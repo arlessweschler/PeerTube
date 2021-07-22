@@ -1,5 +1,10 @@
 import * as express from 'express'
+import { JobQueue } from '@server/lib/job-queue'
+import { VideoRedundancyModel } from '@server/models/redundancy/video-redundancy'
+import { HttpStatusCode } from '../../../../shared/models/http/http-error-codes'
 import { UserRight } from '../../../../shared/models/users'
+import { logger } from '../../../helpers/logger'
+import { removeRedundanciesOfServer, removeVideoRedundancy } from '../../../lib/redundancy'
 import {
   asyncMiddleware,
   authenticate,
@@ -10,16 +15,11 @@ import {
   videoRedundanciesSortValidator
 } from '../../../middlewares'
 import {
-  listVideoRedundanciesValidator,
-  updateServerRedundancyValidator,
   addVideoRedundancyValidator,
-  removeVideoRedundancyValidator
+  listVideoRedundanciesValidator,
+  removeVideoRedundancyValidator,
+  updateServerRedundancyValidator
 } from '../../../middlewares/validators/redundancy'
-import { removeRedundanciesOfServer, removeVideoRedundancy } from '../../../lib/redundancy'
-import { logger } from '../../../helpers/logger'
-import { VideoRedundancyModel } from '@server/models/redundancy/video-redundancy'
-import { JobQueue } from '@server/lib/job-queue'
-import { HttpStatusCode } from '../../../../shared/core-utils/miscs/http-error-codes'
 
 const serverRedundancyRouter = express.Router()
 
@@ -90,13 +90,13 @@ async function addVideoRedundancy (req: express.Request, res: express.Response) 
     payload
   })
 
-  return res.sendStatus(HttpStatusCode.NO_CONTENT_204)
+  return res.status(HttpStatusCode.NO_CONTENT_204).end()
 }
 
 async function removeVideoRedundancyController (req: express.Request, res: express.Response) {
   await removeVideoRedundancy(res.locals.videoRedundancy)
 
-  return res.sendStatus(HttpStatusCode.NO_CONTENT_204)
+  return res.status(HttpStatusCode.NO_CONTENT_204).end()
 }
 
 async function updateRedundancy (req: express.Request, res: express.Response) {
@@ -110,5 +110,5 @@ async function updateRedundancy (req: express.Request, res: express.Response) {
   removeRedundanciesOfServer(server.id)
     .catch(err => logger.error('Cannot remove redundancy of %s.', server.host, { err }))
 
-  return res.sendStatus(HttpStatusCode.NO_CONTENT_204)
+  return res.status(HttpStatusCode.NO_CONTENT_204).end()
 }

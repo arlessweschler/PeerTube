@@ -3,7 +3,7 @@ import { Hooks } from '@server/lib/plugins/hooks'
 import { getServerActor } from '@server/models/application/application'
 import { MChannelBannerAccountDefault } from '@server/types/models'
 import { ActorImageType, VideoChannelCreate, VideoChannelUpdate, VideosCommonQuery } from '../../../shared'
-import { HttpStatusCode } from '../../../shared/core-utils/miscs/http-error-codes'
+import { HttpStatusCode } from '../../../shared/models/http/http-error-codes'
 import { auditLoggerFactory, getAuditIdFromRes, VideoChannelAuditView } from '../../helpers/audit-logger'
 import { resetSequelizeInstance } from '../../helpers/database-utils'
 import { buildNSFWFilter, createReqFiles, getCountVideos, isUserAbleToSearchRemoteURI } from '../../helpers/express-utils'
@@ -13,8 +13,8 @@ import { CONFIG } from '../../initializers/config'
 import { MIMETYPES } from '../../initializers/constants'
 import { sequelizeTypescript } from '../../initializers/database'
 import { sendUpdateActor } from '../../lib/activitypub/send'
-import { deleteLocalActorImageFile, updateLocalActorImageFile } from '../../lib/actor-image'
 import { JobQueue } from '../../lib/job-queue'
+import { deleteLocalActorImageFile, updateLocalActorImageFile } from '../../lib/local-actor'
 import { createLocalVideoChannel, federateAllVideosOfChannel } from '../../lib/video-channel'
 import {
   asyncMiddleware,
@@ -32,7 +32,7 @@ import {
   videoChannelsUpdateValidator,
   videoPlaylistsSortValidator
 } from '../../middlewares'
-import { videoChannelsNameWithHostValidator, videoChannelsOwnSearchValidator, videosSortValidator } from '../../middlewares/validators'
+import { videoChannelsListValidator, videoChannelsNameWithHostValidator, videosSortValidator } from '../../middlewares/validators'
 import { updateAvatarValidator, updateBannerValidator } from '../../middlewares/validators/actor-image'
 import { commonVideoPlaylistFiltersValidator } from '../../middlewares/validators/videos/video-playlists'
 import { AccountModel } from '../../models/account/account'
@@ -51,7 +51,7 @@ videoChannelRouter.get('/',
   videoChannelsSortValidator,
   setDefaultSort,
   setDefaultPagination,
-  videoChannelsOwnSearchValidator,
+  videoChannelsListValidator,
   asyncMiddleware(listVideoChannels)
 )
 
@@ -180,7 +180,7 @@ async function deleteVideoChannelAvatar (req: express.Request, res: express.Resp
 
   await deleteLocalActorImageFile(videoChannel, ActorImageType.AVATAR)
 
-  return res.sendStatus(HttpStatusCode.NO_CONTENT_204)
+  return res.status(HttpStatusCode.NO_CONTENT_204).end()
 }
 
 async function deleteVideoChannelBanner (req: express.Request, res: express.Response) {
@@ -188,7 +188,7 @@ async function deleteVideoChannelBanner (req: express.Request, res: express.Resp
 
   await deleteLocalActorImageFile(videoChannel, ActorImageType.BANNER)
 
-  return res.sendStatus(HttpStatusCode.NO_CONTENT_204)
+  return res.status(HttpStatusCode.NO_CONTENT_204).end()
 }
 
 async function addVideoChannel (req: express.Request, res: express.Response) {

@@ -1,10 +1,11 @@
 import { Observable, of, throwError as observableThrowError } from 'rxjs'
 import { catchError, switchMap } from 'rxjs/operators'
-import { HTTP_INTERCEPTORS, HttpEvent, HttpHandler, HttpInterceptor, HttpRequest, HttpErrorResponse } from '@angular/common/http'
+import { HTTP_INTERCEPTORS, HttpErrorResponse, HttpEvent, HttpHandler, HttpInterceptor, HttpRequest } from '@angular/common/http'
 import { Injectable, Injector } from '@angular/core'
-import { AuthService } from '@app/core/auth/auth.service'
 import { Router } from '@angular/router'
-import { HttpStatusCode } from '@shared/core-utils/miscs/http-error-codes'
+import { AuthService } from '@app/core/auth/auth.service'
+import { HttpStatusCode } from '@shared/models'
+import { OAuth2ErrorCode, PeerTubeProblemDocument } from '@shared/models/server'
 
 @Injectable()
 export class AuthInterceptor implements HttpInterceptor {
@@ -25,7 +26,9 @@ export class AuthInterceptor implements HttpInterceptor {
     return next.handle(authReq)
                .pipe(
                  catchError((err: HttpErrorResponse) => {
-                   if (err.status === HttpStatusCode.UNAUTHORIZED_401 && err.error && err.error.code === 'invalid_token') {
+                   const error = err.error as PeerTubeProblemDocument
+
+                   if (err.status === HttpStatusCode.UNAUTHORIZED_401 && error && error.code === OAuth2ErrorCode.INVALID_TOKEN) {
                      return this.handleTokenExpired(req, next)
                    }
 

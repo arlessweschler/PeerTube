@@ -1,5 +1,6 @@
 import * as express from 'express'
 import * as Feed from 'pfeed'
+import { getCategoryLabel } from '@server/models/video/formatter/video-format-utils'
 import { VideoFilter } from '../../shared/models/videos/video-query.type'
 import { buildNSFWFilter } from '../helpers/express-utils'
 import { CONFIG } from '../initializers/config'
@@ -15,20 +16,20 @@ import {
   videosSortValidator,
   videoSubscriptionFeedsValidator
 } from '../middlewares'
-import { cacheRoute } from '../middlewares/cache'
+import { cacheRouteFactory } from '../middlewares/cache/cache'
 import { VideoModel } from '../models/video/video'
 import { VideoCommentModel } from '../models/video/video-comment'
 
 const feedsRouter = express.Router()
 
+const cacheRoute = cacheRouteFactory({
+  headerBlacklist: [ 'Content-Type' ]
+})
+
 feedsRouter.get('/feeds/video-comments.:format',
   feedsFormatValidator,
   setFeedFormatContentType,
-  asyncMiddleware(cacheRoute({
-    headerBlacklist: [
-      'Content-Type'
-    ]
-  })(ROUTE_CACHE_LIFETIME.FEEDS)),
+  cacheRoute(ROUTE_CACHE_LIFETIME.FEEDS),
   asyncMiddleware(videoFeedsValidator),
   asyncMiddleware(videoCommentsFeedsValidator),
   asyncMiddleware(generateVideoCommentsFeed)
@@ -39,11 +40,7 @@ feedsRouter.get('/feeds/videos.:format',
   setDefaultVideosSort,
   feedsFormatValidator,
   setFeedFormatContentType,
-  asyncMiddleware(cacheRoute({
-    headerBlacklist: [
-      'Content-Type'
-    ]
-  })(ROUTE_CACHE_LIFETIME.FEEDS)),
+  cacheRoute(ROUTE_CACHE_LIFETIME.FEEDS),
   commonVideosFiltersValidator,
   asyncMiddleware(videoFeedsValidator),
   asyncMiddleware(generateVideoFeed)
@@ -54,11 +51,7 @@ feedsRouter.get('/feeds/subscriptions.:format',
   setDefaultVideosSort,
   feedsFormatValidator,
   setFeedFormatContentType,
-  asyncMiddleware(cacheRoute({
-    headerBlacklist: [
-      'Content-Type'
-    ]
-  })(ROUTE_CACHE_LIFETIME.FEEDS)),
+  cacheRoute(ROUTE_CACHE_LIFETIME.FEEDS),
   commonVideosFiltersValidator,
   asyncMiddleware(videoSubscriptionFeedsValidator),
   asyncMiddleware(generateVideoFeedForSubscriptions)
@@ -286,7 +279,7 @@ function addVideosToFeed (feed, videos: VideoModel[]) {
     if (video.category) {
       categories.push({
         value: video.category,
-        label: VideoModel.getCategoryLabel(video.category)
+        label: getCategoryLabel(video.category)
       })
     }
 

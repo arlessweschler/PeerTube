@@ -1,11 +1,10 @@
 import './embed.scss'
 import videojs from 'video.js'
 import { peertubeTranslate } from '../../../../shared/core-utils/i18n'
-import { HttpStatusCode } from '../../../../shared/core-utils/miscs/http-error-codes'
 import {
-  ClientHookName,
   HTMLServerConfig,
-  PluginType,
+  HttpStatusCode,
+  OAuth2ErrorCode,
   ResultList,
   UserRefreshToken,
   VideoCaption,
@@ -18,7 +17,7 @@ import { P2PMediaLoaderOptions, PeertubePlayerManagerOptions, PlayerMode } from 
 import { VideoJSCaption } from '../../assets/player/peertube-videojs-typings'
 import { TranslationsManager } from '../../assets/player/translations-manager'
 import { peertubeLocalStorage } from '../../root-helpers/peertube-web-storage'
-import { Hooks, loadPlugin, runHook } from '../../root-helpers/plugins'
+import { PluginsManager } from '../../root-helpers/plugins-manager'
 import { Tokens } from '../../root-helpers/users'
 import { objectToUrlEncoded } from '../../root-helpers/utils'
 import { RegisterClientHelpers } from '../../types/register-client-option.model'
@@ -67,8 +66,7 @@ export class PeerTubeEmbed {
 
   private wrapperElement: HTMLElement
 
-  private peertubeHooks: Hooks = {}
-  private loadedScripts = new Set<string>()
+  private pluginsManager: PluginsManager
 
   static async main () {
     const videoContainerId = 'video-wrapper'
@@ -118,8 +116,8 @@ export class PeerTubeEmbed {
             if (res.status === HttpStatusCode.UNAUTHORIZED_401) return undefined
 
             return res.json()
-          }).then((obj: UserRefreshToken & { code: 'invalid_grant'}) => {
-            if (!obj || obj.code === 'invalid_grant') {
+          }).then((obj: UserRefreshToken & { code?: OAuth2ErrorCode }) => {
+            if (!obj || obj.code === OAuth2ErrorCode.INVALID_GRANT) {
               Tokens.flush()
               this.removeTokensFromHeaders()
 
@@ -488,7 +486,7 @@ export class PeerTubeEmbed {
       this.PeertubePlayerManagerModulePromise
     ])
 
-    await this.ensurePluginsAreLoaded(serverTranslations)
+    await this.loadPlugins(serverTranslations)
 
     const videoInfo: VideoDetails = videoInfoTmp
 
@@ -559,7 +557,9 @@ export class PeerTubeEmbed {
 
       webtorrent: {
         videoFiles: videoInfo.files
-      }
+      },
+
+      pluginsManager: this.pluginsManager
     }
 
     if (this.mode === 'p2p-media-loader') {
@@ -599,7 +599,7 @@ export class PeerTubeEmbed {
       })
     }
 
-    this.runHook('action:embed.player.loaded', undefined, { player: this.player, videojs, video: videoInfo })
+    this.pluginsManager.runHook('action:embed.player.loaded', undefined, { player: this.player, videojs, video: videoInfo })
   }
 
   private async initCore () {
@@ -739,37 +739,14 @@ export class PeerTubeEmbed {
     return window.location.pathname.split('/')[1] === 'video-playlists'
   }
 
-  private async ensurePluginsAreLoaded (translations?: { [ id: string ]: string }) {
-    if (this.config.plugin.registered.length === 0) return
+  private loadPlugins (translations?: { [ id: string ]: string }) {
+    this.pluginsManager = new PluginsManager({
+      peertubeHelpersFactory: _ => this.buildPeerTubeHelpers(translations)
+    })
 
-    for (const plugin of this.config.plugin.registered) {
-      for (const key of Object.keys(plugin.clientScripts)) {
-        const clientScript = plugin.clientScripts[key]
+    this.pluginsManager.loadPluginsList(this.config)
 
-        if (clientScript.scopes.includes('embed') === false) continue
-
-        const script = `/plugins/${plugin.name}/${plugin.version}/client-scripts/${clientScript.script}`
-
-        if (this.loadedScripts.has(script)) continue
-
-        const pluginInfo = {
-          plugin,
-          clientScript: {
-            script,
-            scopes: clientScript.scopes
-          },
-          pluginType: PluginType.PLUGIN,
-          isTheme: false
-        }
-
-        await loadPlugin({
-          hooks: this.peertubeHooks,
-          pluginInfo,
-          onSettingsScripts: () => undefined,
-          peertubeHelpersFactory: _ => this.buildPeerTubeHelpers(translations)
-        })
-      }
-    }
+    return this.pluginsManager.ensurePluginsAreLoaded('embed')
   }
 
   private buildPeerTubeHelpers (translations?: { [ id: string ]: string }): RegisterClientHelpers {
@@ -779,6 +756,8 @@ export class PeerTubeEmbed {
 
     return {
       getBaseStaticRoute: unimplemented,
+
+      getBaseRouterRoute: unimplemented,
 
       getSettings: unimplemented,
 
@@ -804,10 +783,6 @@ export class PeerTubeEmbed {
         return Promise.resolve(peertubeTranslate(value, translations))
       }
     }
-  }
-
-  private runHook <T> (hookName: ClientHookName, result?: T, params?: any): Promise<T> {
-    return runHook(this.peertubeHooks, hookName, result, params)
   }
 }
 

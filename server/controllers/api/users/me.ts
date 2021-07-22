@@ -2,8 +2,9 @@ import 'multer'
 import * as express from 'express'
 import { auditLoggerFactory, getAuditIdFromRes, UserAuditView } from '@server/helpers/audit-logger'
 import { Hooks } from '@server/lib/plugins/hooks'
+import { AttributesOnly } from '@shared/core-utils'
 import { ActorImageType, UserUpdateMe, UserVideoRate as FormattedUserVideoRate } from '../../../../shared'
-import { HttpStatusCode } from '../../../../shared/core-utils/miscs/http-error-codes'
+import { HttpStatusCode } from '../../../../shared/models/http/http-error-codes'
 import { UserVideoQuota } from '../../../../shared/models/users/user-video-quota.model'
 import { createReqFiles } from '../../../helpers/express-utils'
 import { getFormattedObjects } from '../../../helpers/utils'
@@ -11,7 +12,7 @@ import { CONFIG } from '../../../initializers/config'
 import { MIMETYPES } from '../../../initializers/constants'
 import { sequelizeTypescript } from '../../../initializers/database'
 import { sendUpdateActor } from '../../../lib/activitypub/send'
-import { deleteLocalActorImageFile, updateLocalActorImageFile } from '../../../lib/actor-image'
+import { deleteLocalActorImageFile, updateLocalActorImageFile } from '../../../lib/local-actor'
 import { getOriginalVideoFileTotalDailyFromUser, getOriginalVideoFileTotalFromUser, sendVerifyUserEmail } from '../../../lib/user'
 import {
   asyncMiddleware,
@@ -31,7 +32,6 @@ import { AccountVideoRateModel } from '../../../models/account/account-video-rat
 import { UserModel } from '../../../models/user/user'
 import { VideoModel } from '../../../models/video/video'
 import { VideoImportModel } from '../../../models/video/video-import'
-import { AttributesOnly } from '@shared/core-utils'
 
 const auditLogger = auditLoggerFactory('users')
 
@@ -183,7 +183,7 @@ async function deleteMe (req: express.Request, res: express.Response) {
 
   await user.destroy()
 
-  return res.sendStatus(HttpStatusCode.NO_CONTENT_204)
+  return res.status(HttpStatusCode.NO_CONTENT_204).end()
 }
 
 async function updateMe (req: express.Request, res: express.Response) {
@@ -237,7 +237,7 @@ async function updateMe (req: express.Request, res: express.Response) {
     await sendVerifyUserEmail(user, true)
   }
 
-  return res.sendStatus(HttpStatusCode.NO_CONTENT_204)
+  return res.status(HttpStatusCode.NO_CONTENT_204).end()
 }
 
 async function updateMyAvatar (req: express.Request, res: express.Response) {
@@ -257,5 +257,5 @@ async function deleteMyAvatar (req: express.Request, res: express.Response) {
   const userAccount = await AccountModel.load(user.Account.id)
   await deleteLocalActorImageFile(userAccount, ActorImageType.AVATAR)
 
-  return res.sendStatus(HttpStatusCode.NO_CONTENT_204)
+  return res.status(HttpStatusCode.NO_CONTENT_204).end()
 }

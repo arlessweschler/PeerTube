@@ -5,8 +5,7 @@ import { VideosTorrentCache } from '@server/lib/files-cache/videos-torrent-cache
 import { Hooks } from '@server/lib/plugins/hooks'
 import { getVideoFilePath } from '@server/lib/video-paths'
 import { MStreamingPlaylist, MVideo, MVideoFile, MVideoFullLight } from '@server/types/models'
-import { HttpStatusCode } from '@shared/core-utils/miscs/http-error-codes'
-import { VideoStreamingPlaylistType } from '@shared/models'
+import { HttpStatusCode, VideoStreamingPlaylistType } from '@shared/models'
 import { STATIC_DOWNLOAD_PATHS } from '../initializers/constants'
 import { asyncMiddleware, videosDownloadValidator } from '../middlewares'
 
@@ -41,7 +40,12 @@ export {
 
 async function downloadTorrent (req: express.Request, res: express.Response) {
   const result = await VideosTorrentCache.Instance.getFilePath(req.params.filename)
-  if (!result) return res.sendStatus(HttpStatusCode.NOT_FOUND_404)
+  if (!result) {
+    return res.fail({
+      status: HttpStatusCode.NOT_FOUND_404,
+      message: 'Torrent file not found'
+    })
+  }
 
   const allowParameters = { torrentPath: result.path, downloadName: result.downloadName }
 
@@ -60,7 +64,12 @@ async function downloadVideoFile (req: express.Request, res: express.Response) {
   const video = res.locals.videoAll
 
   const videoFile = getVideoFile(req, video.VideoFiles)
-  if (!videoFile) return res.status(HttpStatusCode.NOT_FOUND_404).end()
+  if (!videoFile) {
+    return res.fail({
+      status: HttpStatusCode.NOT_FOUND_404,
+      message: 'Video file not found'
+    })
+  }
 
   const allowParameters = { video, videoFile }
 
@@ -81,7 +90,12 @@ async function downloadHLSVideoFile (req: express.Request, res: express.Response
   if (!streamingPlaylist) return res.status(HttpStatusCode.NOT_FOUND_404).end
 
   const videoFile = getVideoFile(req, streamingPlaylist.VideoFiles)
-  if (!videoFile) return res.status(HttpStatusCode.NOT_FOUND_404).end()
+  if (!videoFile) {
+    return res.fail({
+      status: HttpStatusCode.NOT_FOUND_404,
+      message: 'Video file not found'
+    })
+  }
 
   const allowParameters = { video, streamingPlaylist, videoFile }
 
@@ -131,9 +145,11 @@ function isVideoDownloadAllowed (_object: {
 function checkAllowResult (res: express.Response, allowParameters: any, result?: AllowedResult) {
   if (!result || result.allowed !== true) {
     logger.info('Download is not allowed.', { result, allowParameters })
-    res.status(HttpStatusCode.FORBIDDEN_403)
-       .json({ error: result?.errorMessage || 'Refused download' })
 
+    res.fail({
+      status: HttpStatusCode.FORBIDDEN_403,
+      message: result?.errorMessage || 'Refused download'
+    })
     return false
   }
 

@@ -16,7 +16,6 @@ import {
   MChannelActor,
   MCommentOwnerVideo
 } from '../../../types/models'
-import { markCommentAsDeleted } from '../../video-comment'
 import { forwardVideoRelatedActivity } from '../send/utils'
 
 async function processDeleteActivity (options: APProcessorOptions<ActivityDelete>) {
@@ -130,7 +129,7 @@ async function processDeleteVideoChannel (videoChannelToRemove: MChannelActor) {
 
 function processDeleteVideoComment (byActor: MActorSignature, videoComment: MCommentOwnerVideo, activity: ActivityDelete) {
   // Already deleted
-  if (videoComment.isDeleted()) return
+  if (videoComment.isDeleted()) return Promise.resolve()
 
   logger.debug('Removing remote video comment "%s".', videoComment.url)
 
@@ -139,11 +138,9 @@ function processDeleteVideoComment (byActor: MActorSignature, videoComment: MCom
       throw new Error(`Account ${byActor.url} does not own video comment ${videoComment.url} or video ${videoComment.Video.url}`)
     }
 
-    await sequelizeTypescript.transaction(async t => {
-      markCommentAsDeleted(videoComment)
+    videoComment.markAsDeleted()
 
-      await videoComment.save()
-    })
+    await videoComment.save({ transaction: t })
 
     if (videoComment.Video.isOwned()) {
       // Don't resend the activity to the sender

@@ -1,3 +1,5 @@
+
+import { OutgoingHttpHeaders } from 'http'
 import { RegisterServerAuthExternalOptions } from '@server/types'
 import {
   MAbuseMessage,
@@ -9,6 +11,8 @@ import {
   MStreamingPlaylist,
   MVideoChangeOwnershipFull,
   MVideoFile,
+  MVideoFormattableDetails,
+  MVideoId,
   MVideoImmutable,
   MVideoLive,
   MVideoPlaylistFull,
@@ -19,8 +23,7 @@ import { MPlugin, MServer, MServerBlocklist } from '@server/types/models/server'
 import { MVideoImportDefault } from '@server/types/models/video/video-import'
 import { MVideoPlaylistElement, MVideoPlaylistElementVideoUrlPlaylistPrivacy } from '@server/types/models/video/video-playlist-element'
 import { MAccountVideoRateAccountVideo } from '@server/types/models/video/video-rate'
-import { HttpMethod } from '@shared/core-utils/miscs/http-methods'
-import { VideoCreate } from '@shared/models'
+import { HttpMethod, PeerTubeProblemDocumentData, ServerErrorCode, VideoCreate } from '@shared/models'
 import { File as UploadXFile, Metadata } from '@uploadx/core'
 import { RegisteredPlugin } from '../../lib/plugins/plugin-manager'
 import {
@@ -34,12 +37,12 @@ import {
   MVideoBlacklist,
   MVideoCaptionVideo,
   MVideoFullLight,
-  MVideoIdThumbnail,
   MVideoRedundancyVideo,
   MVideoShareActor,
-  MVideoThumbnail,
-  MVideoWithRights
+  MVideoThumbnail
 } from '../../types/models'
+import { Writable } from 'stream'
+
 declare module 'express' {
   export interface Request {
     query: any
@@ -83,14 +86,36 @@ declare module 'express' {
     filename: string
   }
 
-  // Extends locals property from Response
+  // Extends Response with added functions and potential variables passed by middlewares
   interface Response {
+    fail: (options: {
+      message: string
+
+      title?: string
+      status?: number
+      type?: ServerErrorCode
+      instance?: string
+
+      data?: PeerTubeProblemDocumentData
+    }) => void
+
     locals: {
+      apicache: {
+        content: string | Buffer
+        write: Writable['write']
+        writeHead: Response['writeHead']
+        end: Response['end']
+        cacheable: boolean
+        headers: OutgoingHttpHeaders
+      }
+
+      docUrl?: string
+
+      videoAPI?: MVideoFormattableDetails
       videoAll?: MVideoFullLight
       onlyImmutableVideo?: MVideoImmutable
       onlyVideo?: MVideoThumbnail
-      onlyVideoWithRights?: MVideoWithRights
-      videoId?: MVideoIdThumbnail
+      videoId?: MVideoId
 
       videoLive?: MVideoLive
 

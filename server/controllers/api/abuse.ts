@@ -6,7 +6,7 @@ import { AbuseModel } from '@server/models/abuse/abuse'
 import { AbuseMessageModel } from '@server/models/abuse/abuse-message'
 import { getServerActor } from '@server/models/application/application'
 import { abusePredefinedReasonsMap } from '@shared/core-utils/abuse'
-import { HttpStatusCode } from '@shared/core-utils/miscs/http-error-codes'
+import { HttpStatusCode } from '@shared/models'
 import { AbuseCreate, AbuseState, UserRight } from '../../../shared'
 import { getFormattedObjects } from '../../helpers/utils'
 import { sequelizeTypescript } from '../../initializers/database'
@@ -24,6 +24,7 @@ import {
   deleteAbuseMessageValidator,
   ensureUserHasRight,
   getAbuseValidator,
+  openapiOperationDoc,
   paginationValidator,
   setDefaultPagination,
   setDefaultSort
@@ -33,6 +34,7 @@ import { AccountModel } from '../../models/account/account'
 const abuseRouter = express.Router()
 
 abuseRouter.get('/',
+  openapiOperationDoc({ operationId: 'getAbuses' }),
   authenticate,
   ensureUserHasRight(UserRight.MANAGE_ABUSES),
   paginationValidator,
@@ -142,7 +144,7 @@ async function updateAbuse (req: express.Request, res: express.Response) {
 
   // Do not send the delete to other instances, we updated OUR copy of this abuse
 
-  return res.sendStatus(HttpStatusCode.NO_CONTENT_204)
+  return res.status(HttpStatusCode.NO_CONTENT_204).end()
 }
 
 async function deleteAbuse (req: express.Request, res: express.Response) {
@@ -154,7 +156,7 @@ async function deleteAbuse (req: express.Request, res: express.Response) {
 
   // Do not send the delete to other instances, we delete OUR copy of this abuse
 
-  return res.sendStatus(HttpStatusCode.NO_CONTENT_204)
+  return res.status(HttpStatusCode.NO_CONTENT_204).end()
 }
 
 async function reportAbuse (req: express.Request, res: express.Response) {
@@ -244,5 +246,5 @@ async function deleteAbuseMessage (req: express.Request, res: express.Response) 
     return abuseMessage.destroy({ transaction: t })
   })
 
-  return res.sendStatus(HttpStatusCode.NO_CONTENT_204)
+  return res.status(HttpStatusCode.NO_CONTENT_204).end()
 }

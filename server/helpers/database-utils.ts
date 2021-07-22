@@ -6,7 +6,7 @@ import { sequelizeTypescript } from '@server/initializers/database'
 import { logger } from './logger'
 
 function retryTransactionWrapper <T, A, B, C, D> (
-  functionToRetry: (arg1: A, arg2: B, arg3: C, arg4: D) => Promise<T> | Bluebird<T>,
+  functionToRetry: (arg1: A, arg2: B, arg3: C, arg4: D) => Promise<T>,
   arg1: A,
   arg2: B,
   arg3: C,
@@ -14,20 +14,20 @@ function retryTransactionWrapper <T, A, B, C, D> (
 ): Promise<T>
 
 function retryTransactionWrapper <T, A, B, C> (
-  functionToRetry: (arg1: A, arg2: B, arg3: C) => Promise<T> | Bluebird<T>,
+  functionToRetry: (arg1: A, arg2: B, arg3: C) => Promise<T>,
   arg1: A,
   arg2: B,
   arg3: C
 ): Promise<T>
 
 function retryTransactionWrapper <T, A, B> (
-  functionToRetry: (arg1: A, arg2: B) => Promise<T> | Bluebird<T>,
+  functionToRetry: (arg1: A, arg2: B) => Promise<T>,
   arg1: A,
   arg2: B
 ): Promise<T>
 
 function retryTransactionWrapper <T, A> (
-  functionToRetry: (arg1: A) => Promise<T> | Bluebird<T>,
+  functionToRetry: (arg1: A) => Promise<T>,
   arg1: A
 ): Promise<T>
 
@@ -36,7 +36,7 @@ function retryTransactionWrapper <T> (
 ): Promise<T>
 
 function retryTransactionWrapper <T> (
-  functionToRetry: (...args: any[]) => Promise<T> | Bluebird<T>,
+  functionToRetry: (...args: any[]) => Promise<T>,
   ...args: any[]
 ): Promise<T> {
   return transactionRetryer<T>(callback => {
@@ -58,7 +58,7 @@ function transactionRetryer <T> (func: (err: any, data: T) => any) {
 
         errorFilter: err => {
           const willRetry = (err.name === 'SequelizeDatabaseError')
-          logger.debug('Maybe retrying the transaction function.', { willRetry, err })
+          logger.debug('Maybe retrying the transaction function.', { willRetry, err, tags: [ 'sql', 'retry' ] })
           return willRetry
         }
       },
@@ -67,6 +67,8 @@ function transactionRetryer <T> (func: (err: any, data: T) => any) {
     )
   })
 }
+
+// ---------------------------------------------------------------------------
 
 function updateInstanceWithAnother <M, T extends U, U extends Model<M>> (instanceToUpdate: T, baseInstance: U) {
   const obj = baseInstance.toJSON()
@@ -80,12 +82,6 @@ function resetSequelizeInstance (instance: Model<any>, savedFields: object) {
   Object.keys(savedFields).forEach(key => {
     instance[key] = savedFields[key]
   })
-}
-
-function afterCommitIfTransaction (t: Transaction, fn: Function) {
-  if (t) return t.afterCommit(() => fn())
-
-  return fn()
 }
 
 function deleteNonExistingModels <T extends { hasSameUniqueKeysThan (other: T): boolean } & Pick<Model, 'destroy'>> (
@@ -111,6 +107,20 @@ function setAsUpdated (table: string, id: number, transaction?: Transaction) {
 
 // ---------------------------------------------------------------------------
 
+function runInReadCommittedTransaction <T> (fn: (t: Transaction) => Promise<T>) {
+  const options = { isolationLevel: Transaction.ISOLATION_LEVELS.READ_COMMITTED }
+
+  return sequelizeTypescript.transaction(options, t => fn(t))
+}
+
+function afterCommitIfTransaction (t: Transaction, fn: Function) {
+  if (t) return t.afterCommit(() => fn())
+
+  return fn()
+}
+
+// ---------------------------------------------------------------------------
+
 export {
   resetSequelizeInstance,
   retryTransactionWrapper,
@@ -118,5 +128,6 @@ export {
   updateInstanceWithAnother,
   afterCommitIfTransaction,
   deleteNonExistingModels,
-  setAsUpdated
+  setAsUpdated,
+  runInReadCommittedTransaction
 }

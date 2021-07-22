@@ -1,7 +1,9 @@
-import { Component, Input, OnInit } from '@angular/core'
-import { AuthService } from '@app/core'
+import { finalize } from 'rxjs/operators'
+import { Component, EventEmitter, Input, OnInit, Output } from '@angular/core'
+import { AuthService, Notifier } from '@app/core'
 import { Video, VideoService } from '../../shared-main'
 import { MiniatureDisplayOptions } from '../../shared-video-miniature'
+import { CustomMarkupComponent } from './shared'
 
 /*
  * Markup component that creates a video miniature only
@@ -12,8 +14,11 @@ import { MiniatureDisplayOptions } from '../../shared-video-miniature'
   templateUrl: 'video-miniature-markup.component.html',
   styleUrls: [ 'video-miniature-markup.component.scss' ]
 })
-export class VideoMiniatureMarkupComponent implements OnInit {
+export class VideoMiniatureMarkupComponent implements CustomMarkupComponent, OnInit {
   @Input() uuid: string
+  @Input() onlyDisplayTitle: boolean
+
+  @Output() loaded = new EventEmitter<boolean>()
 
   video: Video
 
@@ -30,7 +35,8 @@ export class VideoMiniatureMarkupComponent implements OnInit {
 
   constructor (
     private auth: AuthService,
-    private videoService: VideoService
+    private videoService: VideoService,
+    private notifier: Notifier
   ) { }
 
   getUser () {
@@ -38,7 +44,18 @@ export class VideoMiniatureMarkupComponent implements OnInit {
   }
 
   ngOnInit () {
+    if (this.onlyDisplayTitle) {
+      for (const key of Object.keys(this.displayOptions)) {
+        this.displayOptions[key] = false
+      }
+    }
+
     this.videoService.getVideo({ videoId: this.uuid })
-      .subscribe(video => this.video = video)
+      .pipe(finalize(() => this.loaded.emit(true)))
+      .subscribe(
+        video => this.video = video,
+
+        err => this.notifier.error('Error in video miniature component: ' + err.message)
+      )
   }
 }

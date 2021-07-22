@@ -2,8 +2,7 @@ import { throwError as observableThrowError } from 'rxjs'
 import { Injectable } from '@angular/core'
 import { Router } from '@angular/router'
 import { dateToHuman } from '@app/helpers'
-import { ResultList } from '@shared/models'
-import { HttpStatusCode } from '@shared/core-utils/miscs/http-error-codes'
+import { HttpStatusCode, ResultList } from '@shared/models'
 
 @Injectable()
 export class RestExtractor {
@@ -41,7 +40,7 @@ export class RestExtractor {
 
     if (err.error instanceof Error) {
       // A client-side or network error occurred. Handle it accordingly.
-      errorMessage = err.error.message
+      errorMessage = err.error.detail || err.error.title
       console.error('An error occurred:', errorMessage)
     } else if (typeof err.error === 'string') {
       errorMessage = err.error

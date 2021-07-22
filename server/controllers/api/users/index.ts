@@ -4,8 +4,8 @@ import { tokensRouter } from '@server/controllers/api/users/token'
 import { Hooks } from '@server/lib/plugins/hooks'
 import { OAuthTokenModel } from '@server/models/oauth/oauth-token'
 import { MUser, MUserAccountDefault } from '@server/types/models'
-import { UserCreate, UserRight, UserRole, UserUpdate } from '../../../../shared'
-import { HttpStatusCode } from '../../../../shared/core-utils/miscs/http-error-codes'
+import { UserCreate, UserCreateResult, UserRight, UserRole, UserUpdate } from '../../../../shared'
+import { HttpStatusCode } from '../../../../shared/models/http/http-error-codes'
 import { UserAdminFlag } from '../../../../shared/models/users/user-flag.model'
 import { UserRegister } from '../../../../shared/models/users/user-register.model'
 import { auditLoggerFactory, getAuditIdFromRes, UserAuditView } from '../../../helpers/audit-logger'
@@ -220,7 +220,7 @@ async function createUser (req: express.Request, res: express.Response) {
       account: {
         id: account.id
       }
-    }
+    } as UserCreateResult
   })
 }
 
@@ -314,7 +314,7 @@ async function removeUser (req: express.Request, res: express.Response) {
 
   Hooks.runAction('action:api.user.deleted', { user })
 
-  return res.sendStatus(HttpStatusCode.NO_CONTENT_204)
+  return res.status(HttpStatusCode.NO_CONTENT_204).end()
 }
 
 async function updateUser (req: express.Request, res: express.Response) {
@@ -349,7 +349,7 @@ async function updateUser (req: express.Request, res: express.Response) {
 
   // Don't need to send this update to followers, these attributes are not federated
 
-  return res.sendStatus(HttpStatusCode.NO_CONTENT_204)
+  return res.status(HttpStatusCode.NO_CONTENT_204).end()
 }
 
 async function askResetUserPassword (req: express.Request, res: express.Response) {

@@ -1,7 +1,5 @@
-@import '_variables';
-@import '_mixins';
-@import '~bootstrap/scss/functions';
-@import '~bootstrap/scss/variables';
+@use '_variables' as *;
+@use '_mixins' as *;
 
 .peertube-container {
   padding-bottom: 20px;
@@ -83,10 +81,11 @@
   }
 
   .icon.icon-logo {
+    @include margin-right(0.5rem);
+
     display: inline-block;
     width: 23px;
     height: 24px;
-    margin-right: 0.5rem;
   }
 }
 

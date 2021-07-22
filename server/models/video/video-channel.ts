@@ -291,8 +291,7 @@ export class VideoChannelModel extends Model<Partial<AttributesOnly<VideoChannel
   @BelongsTo(() => AccountModel, {
     foreignKey: {
       allowNull: false
-    },
-    hooks: true
+    }
   })
   Account: AccountModel
 
@@ -434,8 +433,8 @@ ON              "Account->Actor"."serverId" = "Account->Actor->Server"."id"`
     sort: string
   }) {
     const attributesInclude = []
-    const escapedSearch = VideoModel.sequelize.escape(options.search)
-    const escapedLikeSearch = VideoModel.sequelize.escape('%' + options.search + '%')
+    const escapedSearch = VideoChannelModel.sequelize.escape(options.search)
+    const escapedLikeSearch = VideoChannelModel.sequelize.escape('%' + options.search + '%')
     attributesInclude.push(createSimilarityAttribute('VideoChannelModel.name', options.search))
 
     const query = {
@@ -522,10 +521,10 @@ ON              "Account->Actor"."serverId" = "Account->Actor->Server"."id"`
       })
   }
 
-  static loadAndPopulateAccount (id: number): Promise<MChannelBannerAccountDefault> {
+  static loadAndPopulateAccount (id: number, transaction?: Transaction): Promise<MChannelBannerAccountDefault> {
     return VideoChannelModel.unscoped()
       .scope([ ScopeNames.WITH_ACTOR_BANNER, ScopeNames.WITH_ACCOUNT ])
-      .findByPk(id)
+      .findByPk(id, { transaction })
   }
 
   static loadByUrlAndPopulateAccount (url: string): Promise<MChannelBannerAccountDefault> {

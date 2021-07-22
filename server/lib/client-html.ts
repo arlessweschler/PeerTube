@@ -5,7 +5,7 @@ import validator from 'validator'
 import { escapeHTML } from '@shared/core-utils/renderer'
 import { HTMLServerConfig } from '@shared/models'
 import { buildFileLocale, getDefaultLocale, is18nLocale, POSSIBLE_LOCALES } from '../../shared/core-utils/i18n/i18n'
-import { HttpStatusCode } from '../../shared/core-utils/miscs/http-error-codes'
+import { HttpStatusCode } from '../../shared/models/http/http-error-codes'
 import { VideoPlaylistPrivacy, VideoPrivacy } from '../../shared/models/videos'
 import { isTestInstance, sha256 } from '../helpers/core-utils'
 import { logger } from '../helpers/logger'
@@ -21,12 +21,13 @@ import {
   WEBSERVER
 } from '../initializers/constants'
 import { AccountModel } from '../models/account/account'
+import { getActivityStreamDuration } from '../models/video/formatter/video-format-utils'
 import { VideoModel } from '../models/video/video'
 import { VideoChannelModel } from '../models/video/video-channel'
-import { getActivityStreamDuration } from '../models/video/video-format-utils'
 import { VideoPlaylistModel } from '../models/video/video-playlist'
 import { MAccountActor, MChannelActor } from '../types/models'
 import { ServerConfigManager } from './server-config-manager'
+import { toCompleteUUID } from '@server/helpers/custom-validators/misc'
 
 type Tags = {
   ogType: string
@@ -78,7 +79,9 @@ class ClientHtml {
     return customHtml
   }
 
-  static async getWatchHTMLPage (videoId: string, req: express.Request, res: express.Response) {
+  static async getWatchHTMLPage (videoIdArg: string, req: express.Request, res: express.Response) {
+    const videoId = toCompleteUUID(videoIdArg)
+
     // Let Angular application handle errors
     if (!validator.isInt(videoId) && !validator.isUUID(videoId, 4)) {
       res.status(HttpStatusCode.NOT_FOUND_404)
@@ -136,7 +139,9 @@ class ClientHtml {
     return customHtml
   }
 
-  static async getWatchPlaylistHTMLPage (videoPlaylistId: string, req: express.Request, res: express.Response) {
+  static async getWatchPlaylistHTMLPage (videoPlaylistIdArg: string, req: express.Request, res: express.Response) {
+    const videoPlaylistId = toCompleteUUID(videoPlaylistIdArg)
+
     // Let Angular application handle errors
     if (!validator.isInt(videoPlaylistId) && !validator.isUUID(videoPlaylistId, 4)) {
       res.status(HttpStatusCode.NOT_FOUND_404)
@@ -549,11 +554,11 @@ async function serveIndexHTML (req: express.Request, res: express.Response) {
       return
     } catch (err) {
       logger.error('Cannot generate HTML page.', err)
-      return res.sendStatus(HttpStatusCode.INTERNAL_SERVER_ERROR_500)
+      return res.status(HttpStatusCode.INTERNAL_SERVER_ERROR_500).end()
     }
   }
 
-  return res.sendStatus(HttpStatusCode.NOT_ACCEPTABLE_406)
+  return res.status(HttpStatusCode.NOT_ACCEPTABLE_406).end()
 }
 
 // ---------------------------------------------------------------------------

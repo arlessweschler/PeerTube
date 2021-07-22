@@ -1,6 +1,6 @@
 import * as express from 'express'
+import { HttpStatusCode } from '../../shared/models/http/http-error-codes'
 import { getHostWithPort } from '../helpers/express-utils'
-import { HttpStatusCode } from '../../shared/core-utils/miscs/http-error-codes'
 
 function setBodyHostsPort (req: express.Request, res: express.Response, next: express.NextFunction) {
   if (!req.body.hosts) return next()
@@ -10,7 +10,10 @@ function setBodyHostsPort (req: express.Request, res: express.Response, next: ex
 
     // Problem with the url parsing?
     if (hostWithPort === null) {
-      return res.sendStatus(HttpStatusCode.INTERNAL_SERVER_ERROR_500)
+      return res.fail({
+        status: HttpStatusCode.INTERNAL_SERVER_ERROR_500,
+        message: 'Could not parse hosts'
+      })
     }
 
     req.body.hosts[i] = hostWithPort

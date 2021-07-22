@@ -1,9 +1,9 @@
 import * as express from 'express'
 import * as multer from 'multer'
-import { extname } from 'path'
-import { HttpStatusCode } from '../../shared/core-utils/miscs/http-error-codes'
+import { HttpStatusCode } from '../../shared/models/http/http-error-codes'
 import { CONFIG } from '../initializers/config'
 import { REMOTE_SCHEME } from '../initializers/constants'
+import { getLowercaseExtension } from './core-utils'
 import { isArray } from './custom-validators/misc'
 import { logger } from './logger'
 import { deleteFileAndCatch, generateRandomString } from './utils'
@@ -30,9 +30,7 @@ function buildNSFWFilter (res?: express.Response, paramNSFW?: string) {
   return null
 }
 
-function cleanUpReqFiles (
-  req: { files: { [fieldname: string]: Express.Multer.File[] } | Express.Multer.File[] }
-) {
+function cleanUpReqFiles (req: express.Request) {
   const filesObject = req.files
   if (!filesObject) return
 
@@ -79,7 +77,7 @@ function createReqFiles (
 
     filename: async (req, file, cb) => {
       let extension: string
-      const fileExtension = extname(file.originalname)
+      const fileExtension = getLowercaseExtension(file.originalname)
       const extensionFromMimetype = getExtFromMimetype(mimeTypes, file.mimetype)
 
       // Take the file extension if we don't understand the mime type

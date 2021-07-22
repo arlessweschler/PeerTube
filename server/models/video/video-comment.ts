@@ -69,14 +69,10 @@ export enum ScopeNames {
             Sequelize.literal(
               '(' +
                 'WITH "blocklist" AS (' + buildBlockedAccountSQL(blockerAccountIds) + ')' +
-                'SELECT COUNT("replies"."id") - (' +
-                  'SELECT COUNT("replies"."id") ' +
-                  'FROM "videoComment" AS "replies" ' +
-                  'WHERE "replies"."originCommentId" = "VideoCommentModel"."id" ' +
-                  'AND "accountId" IN (SELECT "id" FROM "blocklist")' +
-                ')' +
+                'SELECT COUNT("replies"."id") ' +
                 'FROM "videoComment" AS "replies" ' +
                 'WHERE "replies"."originCommentId" = "VideoCommentModel"."id" ' +
+                'AND "deletedAt" IS NULL ' +
                 'AND "accountId" NOT IN (SELECT "id" FROM "blocklist")' +
               ')'
             ),
@@ -741,6 +737,12 @@ export class VideoCommentModel extends Model<Partial<AttributesOnly<VideoComment
     }
 
     return this.Account.isOwned()
+  }
+
+  markAsDeleted () {
+    this.text = ''
+    this.deletedAt = new Date()
+    this.accountId = null
   }
 
   isDeleted () {
