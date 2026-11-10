@@ -1,0 +1,782 @@
+/* oxlint-disable @typescript-eslint/no-unused-expressions,@typescript-eslint/require-await */
+
+import { HttpStatusCode, VideoCommentPolicy, VideoCreateResult, VideoPrivacy } from '@peertube/peertube-models'
+import {
+  PeerTubeServer,
+  cleanupTests,
+  createSingleServer,
+  makeDeleteRequest,
+  makeGetRequest,
+  makePostBodyRequest,
+  setAccessTokensToServers,
+  setDefaultVideoChannel
+} from '@peertube/peertube-server-commands'
+import { checkBadCountPagination, checkBadSort, checkBadStartPagination } from '@tests/shared/checks.js'
+import { expect } from 'chai'
+
+describe('Test video comments API validator', function () {
+  let pathThread: string
+  let pathComment: string
+
+  let server: PeerTubeServer
+
+  let video: VideoCreateResult
+
+  let userAccessToken: string
+  let userAccessToken2: string
+  let editorToken: string
+
+  let commentId: number
+  let privateCommentId: number
+  let privateVideo: VideoCreateResult
+
+  // ---------------------------------------------------------------
+
+  before(async function () {
+    this.timeout(120000)
+
+    server = await createSingleServer(1)
+
+    await setAccessTokensToServers([ server ])
+    await setDefaultVideoChannel([ server ])
+
+    {
+      video = await server.videos.upload({ attributes: {} })
+      pathThread = '/api/v1/videos/' + video.uuid + '/comment-threads'
+    }
+
+    {
+      privateVideo = await server.videos.upload({ attributes: { privacy: VideoPrivacy.PRIVATE } })
+    }
+
+    {
+      const created = await server.comments.createThread({ videoId: video.uuid, text: 'coucou' })
+      commentId = created.id
+      pathComment = '/api/v1/videos/' + video.uuid + '/comments/' + commentId
+    }
+
+    {
+      const created = await server.comments.createThread({ videoId: privateVideo.uuid, text: 'coucou' })
+      privateCommentId = created.id
+    }
+
+    {
+      const user = { username: 'user1', password: 'my super password' }
+      await server.users.create({ username: user.username, password: user.password })
+      userAccessToken = await server.login.getAccessToken(user)
+    }
+
+    {
+      const user = { username: 'user2', password: 'my super password' }
+      await server.users.create({ username: user.username, password: user.password })
+      userAccessToken2 = await server.login.getAccessToken(user)
+    }
+
+    editorToken = await server.channelCollaborators.createEditor('editor', 'root_channel')
+  })
+
+  describe('When listing video comment threads', function () {
+    it('Should fail with a bad start pagination', async function () {
+      await checkBadStartPagination(server.url, pathThread, server.accessToken)
+    })
+
+    it('Should fail with a bad count pagination', async function () {
+      await checkBadCountPagination(server.url, pathThread, server.accessToken)
+    })
+
+    it('Should fail with an incorrect sort', async function () {
+      await checkBadSort(server.url, pathThread, server.accessToken)
+    })
+
+    it('Should fail with an incorrect video', async function () {
+      await makeGetRequest({
+        url: server.url,
+        path: '/api/v1/videos/ba708d62-e3d7-45d9-9d73-41b9097cc02d/comment-threads',
+        expectedStatus: HttpStatusCode.NOT_FOUND_404
+      })
+    })
+
+    it('Should fail with a private video without token', async function () {
+      await makeGetRequest({
+        url: server.url,
+        path: '/api/v1/videos/' + privateVideo.shortUUID + '/comment-threads',
+        expectedStatus: HttpStatusCode.UNAUTHORIZED_401
+      })
+    })
+
+    it('Should fail with another user token', async function () {
+      await makeGetRequest({
+        url: server.url,
+        token: userAccessToken,
+        path: '/api/v1/videos/' + privateVideo.shortUUID + '/comment-threads',
+        expectedStatus: HttpStatusCode.FORBIDDEN_403
+      })
+    })
+
+    it('Should succeed with the correct params', async function () {
+      for (const token of [ server.accessToken, editorToken ]) {
+        await makeGetRequest({
+          url: server.url,
+          token,
+          path: '/api/v1/videos/' + privateVideo.shortUUID + '/comment-threads',
+          expectedStatus: HttpStatusCode.OK_200
+        })
+      }
+    })
+  })
+
+  describe('When listing comments of a thread', function () {
+    it('Should fail with an incorrect video', async function () {
+      await makeGetRequest({
+        url: server.url,
+        path: '/api/v1/videos/ba708d62-e3d7-45d9-9d73-41b9097cc02d/comment-threads/' + commentId,
+        expectedStatus: HttpStatusCode.NOT_FOUND_404
+      })
+    })
+
+    it('Should fail with an incorrect thread id', async function () {
+      await makeGetRequest({
+        url: server.url,
+        path: '/api/v1/videos/' + video.shortUUID + '/comment-threads/156',
+        expectedStatus: HttpStatusCode.NOT_FOUND_404
+      })
+    })
+
+    it('Should fail with a private video without token', async function () {
+      await makeGetRequest({
+        url: server.url,
+        path: '/api/v1/videos/' + privateVideo.shortUUID + '/comment-threads/' + privateCommentId,
+        expectedStatus: HttpStatusCode.UNAUTHORIZED_401
+      })
+    })
+
+    it('Should fail with another user token', async function () {
+      await makeGetRequest({
+        url: server.url,
+        token: userAccessToken,
+        path: '/api/v1/videos/' + privateVideo.shortUUID + '/comment-threads/' + privateCommentId,
+        expectedStatus: HttpStatusCode.FORBIDDEN_403
+      })
+    })
+
+    it('Should fail with an incorrect maxDepth', async function () {
+      for (const maxDepth of [ 'toto', -1, 0, 11 ]) {
+        await makeGetRequest({
+          url: server.url,
+          path: '/api/v1/videos/' + video.shortUUID + '/comment-threads/' + commentId,
+          query: { maxDepth },
+          expectedStatus: HttpStatusCode.BAD_REQUEST_400
+        })
+      }
+    })
+
+    it('Should fail with an incorrect repliesPerLevel', async function () {
+      for (const repliesPerLevel of [ 'toto', -1, 0, 31 ]) {
+        await makeGetRequest({
+          url: server.url,
+          path: '/api/v1/videos/' + video.shortUUID + '/comment-threads/' + commentId,
+          query: { repliesPerLevel },
+          expectedStatus: HttpStatusCode.BAD_REQUEST_400
+        })
+      }
+    })
+
+    it('Should fail with a maxDepth/repliesPerLevel combination that searches too many comments', async function () {
+      for (const query of [ { maxDepth: 10, repliesPerLevel: 30 }, { maxDepth: 7 }, { repliesPerLevel: 30, maxDepth: 5 } ]) {
+        await makeGetRequest({
+          url: server.url,
+          path: '/api/v1/videos/' + video.shortUUID + '/comment-threads/' + commentId,
+          query,
+          expectedStatus: HttpStatusCode.BAD_REQUEST_400
+        })
+      }
+    })
+
+    it('Should succeed with the correct params', async function () {
+      for (const token of [ server.accessToken, editorToken ]) {
+        await makeGetRequest({
+          url: server.url,
+          token,
+          path: '/api/v1/videos/' + privateVideo.shortUUID + '/comment-threads/' + privateCommentId,
+          expectedStatus: HttpStatusCode.OK_200
+        })
+      }
+
+      for (const query of [ { maxDepth: 10, repliesPerLevel: 2 }, { maxDepth: 3, repliesPerLevel: 30 }, {} ]) {
+        await makeGetRequest({
+          url: server.url,
+          path: '/api/v1/videos/' + video.shortUUID + '/comment-threads/' + commentId,
+          query,
+          expectedStatus: HttpStatusCode.OK_200
+        })
+      }
+    })
+  })
+
+  describe('When listing replies of a comment', function () {
+    let pathReplies: string
+
+    before(function () {
+      pathReplies = '/api/v1/videos/' + video.shortUUID + '/comments/' + commentId + '/replies'
+    })
+
+    it('Should fail with a bad start pagination', async function () {
+      await checkBadStartPagination(server.url, pathReplies, server.accessToken)
+    })
+
+    it('Should fail with a bad count pagination', async function () {
+      await checkBadCountPagination(server.url, pathReplies, server.accessToken)
+    })
+
+    it('Should fail with an incorrect sort', async function () {
+      await checkBadSort(server.url, pathReplies, server.accessToken)
+
+      // Only threads can be sorted by total replies
+      for (const sort of [ 'totalReplies', '-totalReplies' ]) {
+        await makeGetRequest({
+          url: server.url,
+          path: pathReplies,
+          query: { sort },
+          expectedStatus: HttpStatusCode.BAD_REQUEST_400
+        })
+      }
+    })
+
+    it('Should succeed with a correct sort', async function () {
+      for (const sort of [ 'createdAt', '-createdAt' ]) {
+        await makeGetRequest({
+          url: server.url,
+          path: pathReplies,
+          query: { sort },
+          expectedStatus: HttpStatusCode.OK_200
+        })
+      }
+    })
+
+    it('Should fail with an incorrect video', async function () {
+      await makeGetRequest({
+        url: server.url,
+        path: '/api/v1/videos/ba708d62-e3d7-45d9-9d73-41b9097cc02d/comments/' + commentId + '/replies',
+        expectedStatus: HttpStatusCode.NOT_FOUND_404
+      })
+    })
+
+    it('Should fail with an incorrect comment id', async function () {
+      await makeGetRequest({
+        url: server.url,
+        path: '/api/v1/videos/' + video.shortUUID + '/comments/156/replies',
+        expectedStatus: HttpStatusCode.NOT_FOUND_404
+      })
+    })
+
+    it('Should fail with a comment of another video', async function () {
+      await makeGetRequest({
+        url: server.url,
+        token: server.accessToken,
+        path: '/api/v1/videos/' + video.shortUUID + '/comments/' + privateCommentId + '/replies',
+        expectedStatus: HttpStatusCode.BAD_REQUEST_400
+      })
+    })
+
+    it('Should fail with an incorrect maxDepth', async function () {
+      for (const maxDepth of [ 'toto', -1, 0, 11 ]) {
+        await makeGetRequest({
+          url: server.url,
+          path: pathReplies,
+          query: { maxDepth },
+          expectedStatus: HttpStatusCode.BAD_REQUEST_400
+        })
+      }
+    })
+
+    it('Should fail with an incorrect repliesPerLevel', async function () {
+      for (const repliesPerLevel of [ 'toto', -1, 0, 31 ]) {
+        await makeGetRequest({
+          url: server.url,
+          path: pathReplies,
+          query: { repliesPerLevel },
+          expectedStatus: HttpStatusCode.BAD_REQUEST_400
+        })
+      }
+    })
+
+    it('Should fail with a maxDepth/repliesPerLevel combination that searches too many comments', async function () {
+      // A high count multiplies every level, so it can break an otherwise valid maxDepth/repliesPerLevel pair
+      for (const query of [ { maxDepth: 10, repliesPerLevel: 30 }, { count: 100, maxDepth: 6 }, { repliesPerLevel: 30, maxDepth: 5 } ]) {
+        await makeGetRequest({
+          url: server.url,
+          path: pathReplies,
+          query,
+          expectedStatus: HttpStatusCode.BAD_REQUEST_400
+        })
+      }
+    })
+
+    it('Should succeed with a high count and the default depth', async function () {
+      await makeGetRequest({
+        url: server.url,
+        path: pathReplies,
+        query: { count: 100 },
+        expectedStatus: HttpStatusCode.OK_200
+      })
+    })
+
+    it('Should fail with a private video without token', async function () {
+      await makeGetRequest({
+        url: server.url,
+        path: '/api/v1/videos/' + privateVideo.shortUUID + '/comments/' + privateCommentId + '/replies',
+        expectedStatus: HttpStatusCode.UNAUTHORIZED_401
+      })
+    })
+
+    it('Should fail with another user token', async function () {
+      await makeGetRequest({
+        url: server.url,
+        token: userAccessToken,
+        path: '/api/v1/videos/' + privateVideo.shortUUID + '/comments/' + privateCommentId + '/replies',
+        expectedStatus: HttpStatusCode.FORBIDDEN_403
+      })
+    })
+
+    it('Should succeed with the correct params', async function () {
+      for (const token of [ server.accessToken, editorToken ]) {
+        await makeGetRequest({
+          url: server.url,
+          token,
+          path: '/api/v1/videos/' + privateVideo.shortUUID + '/comments/' + privateCommentId + '/replies',
+          expectedStatus: HttpStatusCode.OK_200
+        })
+      }
+
+      await makeGetRequest({
+        url: server.url,
+        path: pathReplies,
+        query: { start: 0, count: 5, sort: 'createdAt', maxDepth: 10, repliesPerLevel: 2 },
+        expectedStatus: HttpStatusCode.OK_200
+      })
+    })
+  })
+
+  describe('When adding a video thread', function () {
+    it('Should fail with a non authenticated user', async function () {
+      const fields = {
+        text: 'text'
+      }
+      await makePostBodyRequest({
+        url: server.url,
+        path: pathThread,
+        token: 'none',
+        fields,
+        expectedStatus: HttpStatusCode.UNAUTHORIZED_401
+      })
+    })
+
+    it('Should fail with nothing', async function () {
+      const fields = {}
+      await makePostBodyRequest({ url: server.url, path: pathThread, token: server.accessToken, fields })
+    })
+
+    it('Should fail with a short comment', async function () {
+      const fields = {
+        text: ''
+      }
+      await makePostBodyRequest({ url: server.url, path: pathThread, token: server.accessToken, fields })
+    })
+
+    it('Should fail with a long comment', async function () {
+      const fields = {
+        text: 'h'.repeat(10001)
+      }
+      await makePostBodyRequest({ url: server.url, path: pathThread, token: server.accessToken, fields })
+    })
+
+    it('Should fail with an incorrect video', async function () {
+      const path = '/api/v1/videos/ba708d62-e3d7-45d9-9d73-41b9097cc02d/comment-threads'
+      const fields = { text: 'super comment' }
+
+      await makePostBodyRequest({
+        url: server.url,
+        path,
+        token: server.accessToken,
+        fields,
+        expectedStatus: HttpStatusCode.NOT_FOUND_404
+      })
+    })
+
+    it('Should fail with a private video of another user', async function () {
+      const fields = { text: 'super comment' }
+
+      await makePostBodyRequest({
+        url: server.url,
+        path: '/api/v1/videos/' + privateVideo.shortUUID + '/comment-threads',
+        token: userAccessToken,
+        fields,
+        expectedStatus: HttpStatusCode.FORBIDDEN_403
+      })
+    })
+
+    it('Should succeed with the correct parameters', async function () {
+      const fields = { text: 'super comment' }
+
+      for (const token of [ server.accessToken, editorToken ]) {
+        await makePostBodyRequest({
+          url: server.url,
+          path: '/api/v1/videos/' + privateVideo.shortUUID + '/comment-threads',
+          token,
+          fields,
+          expectedStatus: HttpStatusCode.OK_200
+        })
+      }
+
+      await makePostBodyRequest({
+        url: server.url,
+        path: pathThread,
+        token: server.accessToken,
+        fields,
+        expectedStatus: HttpStatusCode.OK_200
+      })
+    })
+  })
+
+  describe('When adding a comment to a thread', function () {
+    it('Should fail with a non authenticated user', async function () {
+      const fields = {
+        text: 'text'
+      }
+      await makePostBodyRequest({
+        url: server.url,
+        path: pathComment,
+        token: 'none',
+        fields,
+        expectedStatus: HttpStatusCode.UNAUTHORIZED_401
+      })
+    })
+
+    it('Should fail with nothing', async function () {
+      const fields = {}
+      await makePostBodyRequest({ url: server.url, path: pathComment, token: server.accessToken, fields })
+    })
+
+    it('Should fail with a short comment', async function () {
+      const fields = {
+        text: ''
+      }
+      await makePostBodyRequest({ url: server.url, path: pathComment, token: server.accessToken, fields })
+    })
+
+    it('Should fail with a long comment', async function () {
+      const fields = {
+        text: 'h'.repeat(10001)
+      }
+      await makePostBodyRequest({ url: server.url, path: pathComment, token: server.accessToken, fields })
+    })
+
+    it('Should fail with an incorrect video', async function () {
+      const path = '/api/v1/videos/ba708d62-e3d7-45d9-9d73-41b9097cc02d/comments/' + commentId
+      const fields = {
+        text: 'super comment'
+      }
+      await makePostBodyRequest({
+        url: server.url,
+        path,
+        token: server.accessToken,
+        fields,
+        expectedStatus: HttpStatusCode.NOT_FOUND_404
+      })
+    })
+
+    it('Should fail with a private video of another user', async function () {
+      const fields = { text: 'super comment' }
+
+      await makePostBodyRequest({
+        url: server.url,
+        path: '/api/v1/videos/' + privateVideo.uuid + '/comments/' + privateCommentId,
+        token: userAccessToken,
+        fields,
+        expectedStatus: HttpStatusCode.FORBIDDEN_403
+      })
+    })
+
+    it('Should fail with an incorrect comment', async function () {
+      const path = '/api/v1/videos/' + video.uuid + '/comments/124'
+      const fields = {
+        text: 'super comment'
+      }
+      await makePostBodyRequest({
+        url: server.url,
+        path,
+        token: server.accessToken,
+        fields,
+        expectedStatus: HttpStatusCode.NOT_FOUND_404
+      })
+    })
+
+    it('Should succeed with the correct parameters', async function () {
+      const fields = { text: 'super comment' }
+
+      for (const token of [ server.accessToken, editorToken ]) {
+        await makePostBodyRequest({
+          url: server.url,
+          path: '/api/v1/videos/' + privateVideo.uuid + '/comments/' + privateCommentId,
+          token,
+          fields,
+          expectedStatus: HttpStatusCode.OK_200
+        })
+      }
+
+      await makePostBodyRequest({
+        url: server.url,
+        path: pathComment,
+        token: server.accessToken,
+        fields,
+        expectedStatus: HttpStatusCode.OK_200
+      })
+    })
+  })
+
+  describe('When removing video comments', function () {
+    it('Should fail with a non authenticated user', async function () {
+      await makeDeleteRequest({ url: server.url, path: pathComment, token: 'none', expectedStatus: HttpStatusCode.UNAUTHORIZED_401 })
+    })
+
+    it('Should fail with another user', async function () {
+      await makeDeleteRequest({
+        url: server.url,
+        path: pathComment,
+        token: userAccessToken,
+        expectedStatus: HttpStatusCode.FORBIDDEN_403
+      })
+    })
+
+    it('Should fail with an incorrect video', async function () {
+      const path = '/api/v1/videos/ba708d62-e3d7-45d9-9d73-41b9097cc02d/comments/' + commentId
+      await makeDeleteRequest({ url: server.url, path, token: server.accessToken, expectedStatus: HttpStatusCode.NOT_FOUND_404 })
+    })
+
+    it('Should fail with an incorrect comment', async function () {
+      const path = '/api/v1/videos/' + video.uuid + '/comments/124'
+      await makeDeleteRequest({ url: server.url, path, token: server.accessToken, expectedStatus: HttpStatusCode.NOT_FOUND_404 })
+    })
+
+    it('Should succeed with the same user', async function () {
+      const created = await server.comments.createThread({ videoId: video.uuid, token: userAccessToken, text: 'hello' })
+      const path = '/api/v1/videos/' + video.uuid + '/comments/' + created.id
+
+      await makeDeleteRequest({ url: server.url, path, token: userAccessToken2, expectedStatus: HttpStatusCode.FORBIDDEN_403 })
+      await makeDeleteRequest({ url: server.url, path, token: userAccessToken, expectedStatus: HttpStatusCode.NO_CONTENT_204 })
+    })
+
+    it('Should succeed with the owner of the video', async function () {
+      let anotherVideoUUID: string
+
+      {
+        const { uuid } = await server.videos.upload({ token: userAccessToken, attributes: { name: 'video' } })
+        anotherVideoUUID = uuid
+      }
+
+      const created = await server.comments.createThread({ videoId: anotherVideoUUID, text: 'hello' })
+      const path = '/api/v1/videos/' + anotherVideoUUID + '/comments/' + created.id
+
+      await makeDeleteRequest({ url: server.url, path, token: userAccessToken2, expectedStatus: HttpStatusCode.FORBIDDEN_403 })
+      await makeDeleteRequest({ url: server.url, path, token: userAccessToken, expectedStatus: HttpStatusCode.NO_CONTENT_204 })
+    })
+
+    it('Should succeed with the editor of the video', async function () {
+      const created = await server.comments.createThread({ videoId: video.uuid, text: 'hello' })
+      await server.comments.delete({ commentId: created.id, videoId: video.uuid, token: editorToken })
+    })
+
+    it('Should succeed with the correct parameters', async function () {
+      await makeDeleteRequest({
+        url: server.url,
+        path: pathComment,
+        token: server.accessToken,
+        expectedStatus: HttpStatusCode.NO_CONTENT_204
+      })
+    })
+  })
+
+  describe('When a video has comments disabled', function () {
+    before(async function () {
+      video = await server.videos.upload({ attributes: { commentsPolicy: VideoCommentPolicy.DISABLED } })
+      pathThread = `/api/v1/videos/${video.uuid}/comment-threads`
+    })
+
+    it('Should return an empty thread list', async function () {
+      const res = await makeGetRequest({
+        url: server.url,
+        path: pathThread,
+        expectedStatus: HttpStatusCode.OK_200
+      })
+      expect(res.body.total).to.equal(0)
+      expect(res.body.data).to.have.lengthOf(0)
+    })
+
+    it('Should return an thread comments list')
+
+    it('Should return conflict on thread add', async function () {
+      const fields = {
+        text: 'super comment'
+      }
+      await makePostBodyRequest({
+        url: server.url,
+        path: pathThread,
+        token: server.accessToken,
+        fields,
+        expectedStatus: HttpStatusCode.CONFLICT_409
+      })
+    })
+
+    it('Should return conflict on comment thread add')
+  })
+
+  describe('When listing admin/user comments', function () {
+    const paths = [ '/api/v1/videos/comments', '/api/v1/users/me/videos/comments' ]
+
+    it('Should fail with a bad start/count pagination of invalid sort', async function () {
+      for (const path of paths) {
+        await checkBadStartPagination(server.url, path, server.accessToken)
+        await checkBadCountPagination(server.url, path, server.accessToken)
+        await checkBadSort(server.url, path, server.accessToken)
+      }
+    })
+
+    it('Should fail with a non authenticated user', async function () {
+      await server.comments.listForAdmin({ token: null, expectedStatus: HttpStatusCode.UNAUTHORIZED_401 })
+      await server.comments.listCommentsOnMyVideos({ token: null, expectedStatus: HttpStatusCode.UNAUTHORIZED_401 })
+    })
+
+    it('Should fail to list admin comments with a non admin user', async function () {
+      await server.comments.listForAdmin({ token: userAccessToken, expectedStatus: HttpStatusCode.FORBIDDEN_403 })
+    })
+
+    it('Should fail with an invalid video', async function () {
+      await server.comments.listForAdmin({ videoId: 'toto', expectedStatus: HttpStatusCode.BAD_REQUEST_400 })
+      await server.comments.listCommentsOnMyVideos({ videoId: 'toto', expectedStatus: HttpStatusCode.BAD_REQUEST_400 })
+
+      await server.comments.listForAdmin({ videoId: 42, expectedStatus: HttpStatusCode.NOT_FOUND_404 })
+      await server.comments.listCommentsOnMyVideos({ videoId: 42, expectedStatus: HttpStatusCode.NOT_FOUND_404 })
+    })
+
+    it('Should fail with an invalid channel', async function () {
+      await server.comments.listForAdmin({ videoChannelId: 'toto', expectedStatus: HttpStatusCode.BAD_REQUEST_400 })
+      await server.comments.listCommentsOnMyVideos({ videoChannelId: 'toto', expectedStatus: HttpStatusCode.BAD_REQUEST_400 })
+
+      await server.comments.listForAdmin({ videoChannelId: 42, expectedStatus: HttpStatusCode.NOT_FOUND_404 })
+      await server.comments.listCommentsOnMyVideos({ videoChannelId: 42, expectedStatus: HttpStatusCode.NOT_FOUND_404 })
+    })
+
+    it('Should fail to list comments on my videos with non owned video or channel', async function () {
+      await server.comments.listCommentsOnMyVideos({
+        videoId: video.uuid,
+        token: userAccessToken,
+        expectedStatus: HttpStatusCode.FORBIDDEN_403
+      })
+
+      await server.comments.listCommentsOnMyVideos({
+        videoChannelId: server.store.channel.id,
+        token: userAccessToken,
+        expectedStatus: HttpStatusCode.FORBIDDEN_403
+      })
+    })
+
+    it('Should succeed with the correct params', async function () {
+      const base = {
+        search: 'toto',
+        searchAccount: 'toto',
+        searchVideo: 'toto',
+        videoId: video.uuid,
+        videoChannelId: server.store.channel.id,
+        autoTagOneOf: [ 'external-link' ],
+        includeMuted: false
+      }
+
+      await server.comments.listForAdmin({ ...base, isLocal: false })
+      await server.comments.listCommentsOnMyVideos(base)
+      await server.comments.listCommentsOnMyVideos({ ...base, token: editorToken })
+    })
+  })
+
+  describe('When approving a comment', function () {
+    let videoId: string
+    let commentId: number
+    let deletedCommentId: number
+    let userAccessToken3: string
+
+    before(async function () {
+      userAccessToken3 = await server.users.generateUserAndToken('user3')
+
+      {
+        const res = await server.videos.upload({
+          token: userAccessToken,
+          attributes: {
+            name: 'review policy',
+            commentsPolicy: VideoCommentPolicy.REQUIRES_APPROVAL
+          }
+        })
+
+        videoId = res.uuid
+      }
+
+      {
+        const res = await server.comments.createThread({ text: 'thread', videoId, token: userAccessToken2 })
+        commentId = res.id
+      }
+
+      {
+        const res = await server.comments.createThread({ text: 'deleted', videoId, token: userAccessToken2 })
+        deletedCommentId = res.id
+
+        await server.comments.delete({ commentId: deletedCommentId, videoId })
+      }
+    })
+
+    it('Should fail with a non authenticated user', async function () {
+      await server.comments.approve({ token: 'none', commentId, videoId, expectedStatus: HttpStatusCode.UNAUTHORIZED_401 })
+    })
+
+    it('Should fail with another user', async function () {
+      await server.comments.approve({ token: userAccessToken3, commentId, videoId, expectedStatus: HttpStatusCode.FORBIDDEN_403 })
+    })
+
+    it('Should fail with the owner', async function () {
+      await server.comments.approve({ token: userAccessToken2, commentId, videoId, expectedStatus: HttpStatusCode.FORBIDDEN_403 })
+    })
+
+    it('Should fail with an incorrect video', async function () {
+      await server.comments.approve({ token: userAccessToken, commentId, videoId: 42, expectedStatus: HttpStatusCode.NOT_FOUND_404 })
+    })
+
+    it('Should fail with an incorrect comment', async function () {
+      await server.comments.approve({ token: userAccessToken, commentId: 42, videoId, expectedStatus: HttpStatusCode.NOT_FOUND_404 })
+    })
+
+    it('Should fail with a deleted comment', async function () {
+      await server.comments.approve({
+        token: userAccessToken,
+        commentId: deletedCommentId,
+        videoId,
+        expectedStatus: HttpStatusCode.CONFLICT_409
+      })
+    })
+
+    it('Should succeed with the correct params', async function () {
+      await server.comments.approve({ token: userAccessToken, commentId, videoId })
+    })
+
+    it('Should succeed with the editor token', async function () {
+      const created = await server.comments.createThread({ text: 'thread for editor', videoId, token: userAccessToken2 })
+
+      const editor2Token = await server.channelCollaborators.createEditor('editor2', 'user1_channel')
+      await server.comments.approve({ token: editor2Token, commentId: created.id, videoId })
+    })
+
+    it('Should fail with an already held for review comment', async function () {
+      await server.comments.approve({ token: userAccessToken, commentId, videoId, expectedStatus: HttpStatusCode.BAD_REQUEST_400 })
+    })
+  })
+
+  after(async function () {
+    await cleanupTests([ server ])
+  })
+})

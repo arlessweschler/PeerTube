@@ -1,0 +1,292 @@
+import {
+  ChangeOwnershipState,
+  ChangeOwnershipStateType,
+  HttpStatusCode,
+  VideoBlacklistType,
+  VideoChannelActivityAction
+} from '@peertube/peertube-models'
+import { getAuthUser } from '@server/helpers/express-utils.js'
+import { auditLog, buildOwnershipChangeAuditEntity, buildVideoBlockAuditEntity, getAuditActorFromRes } from '@server/lib/audit-log/index.js'
+import { releaseAutoBlacklistOnOwnershipChangeIfNeeded } from '@server/lib/video-blacklist.js'
+import { UserModel } from '@server/models/user/user.js'
+import { VideoBlacklistModel } from '@server/models/video/video-blacklist.js'
+import { VideoChannelActivityModel } from '@server/models/video/video-channel-activity.js'
+import { VideoChannelCollaboratorModel } from '@server/models/video/video-channel-collaborator.js'
+import { VideoPlaylistModel } from '@server/models/video/video-playlist.js'
+import express from 'express'
+import { runTransaction } from '../../../helpers/database-utils.js'
+import { createLogger } from '../../../helpers/logger.js'
+import { getFormattedObjects } from '../../../helpers/utils.js'
+import { sendUpdateActor } from '../../../lib/activitypub/send/index.js'
+import { Notifier } from '../../../lib/notifier/notifier.js'
+import {
+  acceptChannelChangeOwnershipValidator,
+  acceptOrRejectChangeOwnershipValidatorFactory,
+  asyncMiddleware,
+  asyncRetryTransactionMiddleware,
+  authenticate,
+  changeChannelOwnershipValidator,
+  changeOwnershipSortValidator,
+  deleteChangeChannelOwnershipValidator,
+  listChannelOwnershipChangesValidator,
+  paginationValidator,
+  setDefaultPagination
+} from '../../../middlewares/index.js'
+import { ChangeOwnershipModel } from '../../../models/video/change-ownership.js'
+import { VideoChannelModel } from '../../../models/video/video-channel.js'
+import { VideoModel } from '../../../models/video/video.js'
+
+const logger = createLogger()
+
+const ownershipChannelRouter = express.Router()
+
+ownershipChannelRouter.post(
+  '/:handle/give-ownership',
+  authenticate,
+  asyncMiddleware(changeChannelOwnershipValidator),
+  asyncRetryTransactionMiddleware(createChangeOwnershipRequest)
+)
+
+ownershipChannelRouter.get(
+  '/:handle/ownership',
+  authenticate,
+  paginationValidator,
+  setDefaultPagination,
+  changeOwnershipSortValidator,
+  asyncMiddleware(listChannelOwnershipChangesValidator),
+  asyncRetryTransactionMiddleware(listChannelOwnershipChanges)
+)
+
+ownershipChannelRouter.get(
+  '/ownership',
+  authenticate,
+  paginationValidator,
+  setDefaultPagination,
+  changeOwnershipSortValidator,
+  asyncRetryTransactionMiddleware(listAccountChannelOwnershipChanges)
+)
+
+ownershipChannelRouter.post(
+  '/ownership/:id/accept',
+  authenticate,
+  asyncMiddleware(acceptOrRejectChangeOwnershipValidatorFactory('channel')),
+  asyncMiddleware(acceptChannelChangeOwnershipValidator),
+  asyncRetryTransactionMiddleware(acceptOwnershipChange)
+)
+
+ownershipChannelRouter.post(
+  '/ownership/:id/refuse',
+  authenticate,
+  asyncMiddleware(acceptOrRejectChangeOwnershipValidatorFactory('channel')),
+  asyncRetryTransactionMiddleware(refuseOwnershipChange)
+)
+
+ownershipChannelRouter.delete(
+  '/ownership/:id',
+  authenticate,
+  asyncMiddleware(deleteChangeChannelOwnershipValidator),
+  asyncRetryTransactionMiddleware(deleteOwnershipChange)
+)
+
+// ---------------------------------------------------------------------------
+
+export {
+  ownershipChannelRouter
+}
+
+// ---------------------------------------------------------------------------
+
+async function createChangeOwnershipRequest (req: express.Request, res: express.Response) {
+  const channel = res.locals.videoChannel
+  // The initiator is the current owner of the channel, not necessarily the user who made the request (for example a moderator)
+  const initiatorAccountId = channel.accountId
+  const nextOwner = res.locals.changeOwnershipNextOwner
+
+  const ownershipChange = await runTransaction(async t => {
+    const ownershipChange = await ChangeOwnershipModel.create({
+      initiatorAccountId,
+      nextOwnerAccountId: nextOwner.id,
+      videoChannelId: channel.id,
+      state: ChangeOwnershipState.PENDING
+    }, { transaction: t })
+
+    await VideoChannelActivityModel.addChannelOwnershipChangeActivity({
+      action: VideoChannelActivityAction.SEND_OWNERSHIP_REQUEST,
+      user: res.locals.oauth.token.User,
+      channel: channel,
+      targetAccount: nextOwner,
+      transaction: t
+    })
+
+    return ownershipChange
+  })
+
+  const ownershipChangeFull = await ChangeOwnershipModel.load(ownershipChange.id)
+
+  auditLog.create(getAuditActorFromRes(res), () => buildOwnershipChangeAuditEntity(ownershipChangeFull.toFormattedJSON()))
+
+  Notifier.Instance.notifyOfRequestedChannelOwnershipChange(ownershipChangeFull)
+
+  logger.info('Ownership change for channel %s created.', channel.Actor.preferredUsername)
+
+  return res.sendStatus(HttpStatusCode.NO_CONTENT_204)
+}
+
+async function listChannelOwnershipChanges (req: express.Request, res: express.Response) {
+  const videoChannelId = res.locals.videoChannel.id
+  const state = req.query.state as ChangeOwnershipStateType
+
+  const resultList = await ChangeOwnershipModel.listForChannelApi({
+    videoChannelId,
+    state,
+    start: req.query.start,
+    count: req.query.count,
+    sort: req.query.sort || 'createdAt'
+  })
+
+  return res.json(getFormattedObjects(resultList.data, resultList.total))
+}
+
+async function listAccountChannelOwnershipChanges (req: express.Request, res: express.Response) {
+  const currentAccountId = getAuthUser(res).Account.id
+
+  const resultList = await ChangeOwnershipModel.listForChannelApi({
+    accountId: currentAccountId,
+    start: req.query.start,
+    count: req.query.count,
+    sort: req.query.sort || 'createdAt'
+  })
+
+  return res.json(getFormattedObjects(resultList.data, resultList.total))
+}
+
+async function acceptOwnershipChange (req: express.Request, res: express.Response) {
+  const oldOwnershipChangeAuditEntity = auditLog.snapshot(() =>
+    buildOwnershipChangeAuditEntity(res.locals.changeOwnership.toFormattedJSON())
+  )
+
+  await runTransaction(async t => {
+    const changeOwnership = res.locals.changeOwnership
+    const channel = await VideoChannelModel.load(changeOwnership.VideoChannel.id, t)
+    const previousOwnerId = channel.accountId
+
+    channel.accountId = changeOwnership.NextOwner.id
+    await channel.save({ transaction: t })
+
+    // Update owner of channel playlists
+    await VideoPlaylistModel.updateOwnerOfChannelPlaylists({
+      currentOwnerId: previousOwnerId,
+      nextOwnerId: changeOwnership.NextOwner.id,
+      videoChannelId: channel.id,
+      transaction: t
+    })
+
+    // Remove collaborator if the next owner is a collaborator of the channel
+    const collaborator = await VideoChannelCollaboratorModel.loadByCollaboratorAccountName({
+      accountName: changeOwnership.NextOwner.Actor.preferredUsername,
+      channelId: channel.id,
+      transaction: t
+    })
+    if (collaborator) await collaborator.destroy({ transaction: t })
+
+    const channelFull = await VideoChannelModel.loadAndPopulateAccount(channel.id, t)
+    await sendUpdateActor(channelFull, t)
+
+    const nextOwnerUser = await UserModel.loadByAccountId(changeOwnership.NextOwner.id, t)
+    const blockedVideoIds = await VideoBlacklistModel.listVideoIdsOfChannel({
+      channelId: channel.id,
+      type: VideoBlacklistType.AUTO_BY_INSTANCE_POLICY,
+      transaction: t
+    })
+
+    for (const videoId of blockedVideoIds) {
+      const video = await VideoModel.loadWithRights(videoId, t)
+      const releasedBlock = await releaseAutoBlacklistOnOwnershipChangeIfNeeded({ video, nextOwner: nextOwnerUser, transaction: t })
+
+      if (releasedBlock) {
+        auditLog.delete(getAuditActorFromRes(res), () => buildVideoBlockAuditEntity({ video, videoBlock: releasedBlock }), {
+          transaction: t
+        })
+      }
+    }
+
+    changeOwnership.state = ChangeOwnershipState.ACCEPTED
+    await changeOwnership.save({ transaction: t })
+
+    auditLog.update(
+      getAuditActorFromRes(res),
+      () => buildOwnershipChangeAuditEntity(changeOwnership.toFormattedJSON()),
+      oldOwnershipChangeAuditEntity,
+      { transaction: t }
+    )
+
+    await VideoChannelActivityModel.addChannelOwnershipChangeActivity({
+      action: VideoChannelActivityAction.ACCEPT_OWNERSHIP_REQUEST,
+      user: res.locals.oauth.token.User,
+      channel: channelFull,
+      targetAccount: changeOwnership.NextOwner,
+      transaction: t
+    })
+
+    Notifier.Instance.notifyOfAcceptedChannelOwnershipChange(changeOwnership)
+  })
+
+  return res.sendStatus(HttpStatusCode.NO_CONTENT_204)
+}
+
+async function refuseOwnershipChange (req: express.Request, res: express.Response) {
+  const oldOwnershipChangeAuditEntity = auditLog.snapshot(() =>
+    buildOwnershipChangeAuditEntity(res.locals.changeOwnership.toFormattedJSON())
+  )
+
+  await runTransaction(async t => {
+    const changeOwnership = res.locals.changeOwnership
+
+    changeOwnership.state = ChangeOwnershipState.REJECTED
+    await changeOwnership.save({ transaction: t })
+
+    auditLog.update(
+      getAuditActorFromRes(res),
+      () => buildOwnershipChangeAuditEntity(changeOwnership.toFormattedJSON()),
+      oldOwnershipChangeAuditEntity,
+      { transaction: t }
+    )
+
+    const channel = await VideoChannelModel.loadAndPopulateAccount(changeOwnership.videoChannelId, t)
+
+    await VideoChannelActivityModel.addChannelOwnershipChangeActivity({
+      action: VideoChannelActivityAction.REFUSE_OWNERSHIP_REQUEST,
+      user: res.locals.oauth.token.User,
+      channel,
+      targetAccount: changeOwnership.NextOwner,
+      transaction: t
+    })
+
+    Notifier.Instance.notifyOfRejectedChannelOwnershipChange(changeOwnership)
+  })
+
+  return res.sendStatus(HttpStatusCode.NO_CONTENT_204)
+}
+
+async function deleteOwnershipChange (req: express.Request, res: express.Response) {
+  await runTransaction(async t => {
+    const changeOwnership = res.locals.changeOwnership
+    const channel = await VideoChannelModel.loadAndPopulateAccount(changeOwnership.videoChannelId, t)
+
+    await changeOwnership.destroy({ transaction: t })
+
+    auditLog.delete(getAuditActorFromRes(res), () => buildOwnershipChangeAuditEntity(changeOwnership.toFormattedJSON()), { transaction: t })
+
+    await VideoChannelActivityModel.addChannelOwnershipChangeActivity({
+      action: VideoChannelActivityAction.DELETE_OWNERSHIP_REQUEST,
+      user: res.locals.oauth.token.User,
+      channel,
+      targetAccount: changeOwnership.NextOwner,
+      transaction: t
+    })
+
+    logger.info('Channel ownership change request %d deleted.', changeOwnership.id)
+  })
+
+  return res.sendStatus(HttpStatusCode.NO_CONTENT_204)
+}

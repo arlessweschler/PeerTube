@@ -1,0 +1,8 @@
+@use '_variables' as *;
+@use '_mixins' as *;
+
+.pt-badge {
+  font-size: 12px;
+
+  @include margin-right(10px);
+}

@@ -1,13 +1,15 @@
-@import '_variables';
-@import '_mixins';
+@use '_variables' as *;
+@use '_mixins' as *;
+@use '_bootstrap-variables' as *;
 
-.custom-row {
+.notification-row {
   display: flex;
   align-items: center;
   border-bottom: 1px solid $separator-border-color;
 
-  &:first-child {
-    font-size: 16px;
+  &.header {
+    font-weight: $font-semibold;
+    margin-top: 10px;
   }
 
   > div {

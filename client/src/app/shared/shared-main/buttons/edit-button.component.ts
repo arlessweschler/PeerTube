@@ -1,29 +1,33 @@
-import { Component, Input, OnInit } from '@angular/core'
+import { ChangeDetectionStrategy, Component, OnChanges, input, model } from '@angular/core'
+import { ButtonComponent } from './button.component'
 
 @Component({
   selector: 'my-edit-button',
-  styleUrls: [ './button.component.scss' ],
-  templateUrl: './edit-button.component.html'
+  template: `
+    <my-button
+      icon="edit" [label]="label()" [title]="title()" [responsiveLabel]="responsiveLabel()"
+      [ptRouterLink]="ptRouterLink()"
+    ></my-button>
+  `,
+  changeDetection: ChangeDetectionStrategy.OnPush,
+  imports: [ ButtonComponent ]
 })
-export class EditButtonComponent implements OnInit {
-  @Input() label: string
-  @Input() title: string
-  @Input() routerLink: string[] | string = []
-  @Input() responsiveLabel = false
+export class EditButtonComponent implements OnChanges {
+  readonly label = model<string>(undefined)
+  readonly title = model<string>(undefined)
+  readonly ptRouterLink = input<string[] | string>([])
+  readonly responsiveLabel = input(false)
 
-  ngOnInit () {
+  ngOnChanges () {
     // <my-edit-button /> No label
-    if (this.label === undefined && !this.title) {
-      this.title = $localize`Update`
+    const label = this.label()
+    if (label === undefined && !this.title()) {
+      this.title.set($localize`Update`)
     }
 
     // <my-edit-button label /> Use default label
-    if (this.label === '') {
-      this.label = $localize`Update`
-
-      if (!this.title) {
-        this.title = this.label
-      }
+    if (label === '') {
+      this.label.set($localize`Update`)
     }
   }
 }

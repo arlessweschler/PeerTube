@@ -1,21 +1,10 @@
-@import '_variables';
-@import '_mixins';
-
-label {
-  font-weight: $font-regular;
-  font-size: 100%;
-}
-
-input[type=submit] {
-  @include peertube-button;
-  @include orange-button;
-
-  display: block;
-  margin-top: 15px;
-}
+@use "_variables" as *;
+@use "_mixins" as *;
+@use "_button-mixins" as *;
+@use "form-mixins" as *;
 
 .peertube-select-container {
-  @include peertube-select-container(340px);
-
   margin-bottom: 30px;
+
+  @include responsive-width(340px);
 }

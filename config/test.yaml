@@ -1,9 +1,13 @@
 listen:
-  hostname: '0.0.0.0'
+  hostname: '::'
   port: 9000
 
 webserver:
+  hostname: '127.0.0.1'
   https: false
+
+secrets:
+  peertube: 'my super secret'
 
 rates_limit:
   signup:
@@ -15,25 +19,41 @@ rates_limit:
   api:
     window: 10 seconds
     max: 500
+  confirm_token:
+    window: 10 seconds
+    max: 500
+  report_abuse:
+    window: 10 seconds
+    max: 500
+  create_comment:
+    window: 10 seconds
+    max: 500
+  login_lockout:
+    enabled: true
+    window: 5 seconds
+    max: 10
+    max_per_ip: 3
 
 database:
-  hostname: 'localhost'
+  hostname: '127.0.0.1'
   port: 5432
 
 redis:
-  hostname: 'localhost'
+  hostname: '127.0.0.1'
 
 smtp:
   hostname: null
   port: 1025
   tls: false
   disable_starttls: true
-  from_address: 'test-admin@localhost'
+  from_address: 'test-admin@127.0.0.1'
   username: null
   password: null
 
 log:
   level: 'debug'
+  rotation:
+    max_file_size: 100MB
 
 contact_form:
   enabled: true
@@ -67,19 +87,24 @@ cache:
     size: 1
   torrents:
     size: 1
+  storyboards:
+    size: 1
 
 signup:
   enabled: true
+  requires_approval: false
   requires_email_verification: false
 
 transcoding:
   enabled: true
   allow_additional_extensions: false
   allow_audio_files: false
+  always_transcode_podcast_optimized_audio: false
   threads: 2
   concurrency: 2
   resolutions:
     0p: false
+    144p: false
     240p: true
     360p: true
     480p: true
@@ -87,7 +112,7 @@ transcoding:
     1080p: true
     1440p: true
     2160p: true
-  webtorrent:
+  web_videos:
     enabled: true
   hls:
     enabled: true
@@ -105,6 +130,7 @@ live:
     threads: 2
 
     resolutions:
+      144p: false
       240p: false
       360p: false
       480p: false
@@ -118,9 +144,6 @@ import:
     concurrency: 2
     http:
       enabled: true
-      proxy:
-        enabled: false
-        url: ""
     torrent:
       enabled: true
 
@@ -131,33 +154,44 @@ plugins:
   index:
     check_latest_versions_interval: '10 minutes'
 
-search:
-  # Add ability to fetch remote videos/actors by their URI, that may not be federated with your instance
-  # If enabled, the associated group will be able to "escape" from the instance follows
-  # That means they will be able to follow channels, watch videos, list videos of non followed instances
-  remote_uri:
-    users: true
-    anonymous: false
-
-  # Use a third party index instead of your local index, only for search results
-  # Useful to discover content outside of your instance
-  search_index:
-    enabled: false
-    # URL of the search index, that should use the same search API and routes
-    # than PeerTube: https://docs.joinpeertube.org/api-rest-reference.html
-    # You should deploy your own with https://framagit.org/framasoft/peertube/search-index,
-    # and can use https://search.joinpeertube.org/ for tests, but keep in mind the latter is an unmoderated search index
-    url: 'http://localhost:3234'
-    # You can disable local search, so users only use the search index
-    disable_local_search: false
-    # If you did not disable local search, you can decide to use the search index by default
-    is_default_search: true
-
 federation:
+  # We use internal IP address in PeerTube tests
+  prevent_ssrf: false
+
   videos:
     federate_unlisted: true
+    cleanup_remote_interactions: false
 
 views:
   videos:
     remote:
       max_age: -1
+
+    local_buffer_update_interval: '5 seconds'
+    view_expiration: '1 second'
+
+geo_ip:
+  enabled: false
+
+video_studio:
+  enabled: true
+
+open_telemetry:
+  metrics:
+    prometheus_exporter:
+      port: 9092
+
+search:
+  search_index:
+    url: 'https://sepiasearch.org/'
+
+video_transcription:
+  model: 'tiny'
+
+user:
+  password_constraints:
+    min_length: 6
+
+defaults:
+  live:
+    save_replay: false

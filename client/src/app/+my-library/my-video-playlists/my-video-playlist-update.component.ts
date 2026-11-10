@@ -1,9 +1,8 @@
-import { forkJoin, Subscription } from 'rxjs'
-import { map, switchMap } from 'rxjs/operators'
-import { Component, OnDestroy, OnInit } from '@angular/core'
-import { ActivatedRoute, Router } from '@angular/router'
+import { CommonModule, NgClass } from '@angular/common'
+import { ChangeDetectionStrategy, Component, inject, OnDestroy, OnInit } from '@angular/core'
+import { FormsModule, ReactiveFormsModule } from '@angular/forms'
+import { ActivatedRoute, Router, RouterLink } from '@angular/router'
 import { AuthService, Notifier, ServerService } from '@app/core'
-import { listUserChannels } from '@app/helpers'
 import {
   setPlaylistChannelValidator,
   VIDEO_PLAYLIST_CHANNEL_ID_VALIDATOR,
@@ -11,32 +10,52 @@ import {
   VIDEO_PLAYLIST_DISPLAY_NAME_VALIDATOR,
   VIDEO_PLAYLIST_PRIVACY_VALIDATOR
 } from '@app/shared/form-validators/video-playlist-validators'
-import { FormValidatorService } from '@app/shared/shared-forms'
-import { VideoPlaylist, VideoPlaylistService } from '@app/shared/shared-video-playlist'
-import { VideoPlaylistUpdate } from '@shared/models'
+import { FormReactiveService } from '@app/shared/shared-forms/form-reactive.service'
+import { PeertubeCheckboxComponent } from '@app/shared/shared-forms/peertube-checkbox.component'
+import { isSameOwnerForAccountId, listChannelsForSelect } from '@app/shared/shared-forms/select/channel/select-channel-helpers'
+import { SelectChannelUserComponent } from '@app/shared/shared-forms/select/channel/select-channel-user.component'
+import { AlertComponent } from '@app/shared/shared-main/common/alert.component'
+import { VideoPlaylistService } from '@app/shared/shared-video-playlist/video-playlist.service'
+import { VideoPlaylistUpdate } from '@peertube/peertube-models'
+import { forkJoin, Subscription } from 'rxjs'
+import { first, map, switchMap } from 'rxjs/operators'
+import { ImageInputComponent } from '../../shared/shared-forms/image-input.component'
+import { MarkdownTextareaComponent } from '../../shared/shared-forms/markdown-textarea.component'
+import { SelectOptionsComponent } from '../../shared/shared-forms/select/select-options.component'
+import { HelpComponent } from '../../shared/shared-main/buttons/help.component'
 import { MyVideoPlaylistEdit } from './my-video-playlist-edit'
 
 @Component({
   templateUrl: './my-video-playlist-edit.component.html',
-  styleUrls: [ './my-video-playlist-edit.component.scss' ]
+  styleUrls: [ './my-video-playlist-edit.component.scss' ],
+  changeDetection: ChangeDetectionStrategy.Eager,
+  imports: [
+    CommonModule,
+    RouterLink,
+    FormsModule,
+    ReactiveFormsModule,
+    ImageInputComponent,
+    NgClass,
+    HelpComponent,
+    MarkdownTextareaComponent,
+    SelectOptionsComponent,
+    SelectChannelUserComponent,
+    AlertComponent,
+    PeertubeCheckboxComponent
+  ]
 })
 export class MyVideoPlaylistUpdateComponent extends MyVideoPlaylistEdit implements OnInit, OnDestroy {
+  protected formReactiveService = inject(FormReactiveService)
+  private authService = inject(AuthService)
+  private notifier = inject(Notifier)
+  private router = inject(Router)
+  private route = inject(ActivatedRoute)
+  private videoPlaylistService = inject(VideoPlaylistService)
+  private serverService = inject(ServerService)
+
   error: string
-  videoPlaylistToUpdate: VideoPlaylist
 
   private paramsSub: Subscription
-
-  constructor (
-    protected formValidatorService: FormValidatorService,
-    private authService: AuthService,
-    private notifier: Notifier,
-    private router: Router,
-    private route: ActivatedRoute,
-    private videoPlaylistService: VideoPlaylistService,
-    private serverService: ServerService
-  ) {
-    super()
-  }
 
   ngOnInit () {
     this.buildForm({
@@ -51,29 +70,48 @@ export class MyVideoPlaylistUpdateComponent extends MyVideoPlaylistEdit implemen
       setPlaylistChannelValidator(this.form.get('videoChannelId'), privacy)
     })
 
-    listUserChannels(this.authService)
-      .subscribe(channels => this.userVideoChannels = channels)
+    this.paramsSub = this.authService.userInformationLoaded
+      .pipe(
+        first(),
+        switchMap(() => this.route.params),
+        map(routeParams => routeParams['videoPlaylistId']),
+        switchMap(videoPlaylistId => {
+          return forkJoin([
+            this.videoPlaylistService.getVideoPlaylist(videoPlaylistId)
+              .pipe(
+                switchMap(videoPlaylist => {
+                  return listChannelsForSelect({
+                    authService: this.authService,
+                    includeCollaborations: true
+                  }).pipe(map(channels => ({ videoPlaylist, channels })))
+                })
+              ),
+            this.serverService.getVideoPlaylistPrivacies()
+          ])
+        })
+      )
+      .subscribe({
+        next: ([ { videoPlaylist, channels }, videoPlaylistPrivacies ]) => {
+          this.videoPlaylistToUpdate = videoPlaylist
+          this.videoPlaylistPrivacies = videoPlaylistPrivacies
 
-    this.paramsSub = this.route.params
-                         .pipe(
-                           map(routeParams => routeParams['videoPlaylistId']),
-                           switchMap(videoPlaylistId => {
-                             return forkJoin([
-                               this.videoPlaylistService.getVideoPlaylist(videoPlaylistId),
-                               this.serverService.getVideoPlaylistPrivacies()
-                             ])
-                           })
-                         )
-                         .subscribe(
-                           ([ videoPlaylistToUpdate, videoPlaylistPrivacies]) => {
-                             this.videoPlaylistToUpdate = videoPlaylistToUpdate
-                             this.videoPlaylistPrivacies = videoPlaylistPrivacies
+          const user = this.authService.getUser()
 
-                             this.hydrateFormFromPlaylist()
-                           },
+          this.channels = channels.filter(c => {
+            return isSameOwnerForAccountId({
+              user,
+              channel: c,
+              accountId: this.videoPlaylistToUpdate.ownerAccount.id
+            })
+          })
 
-                           err => this.error = err.message
-                         )
+          this.hydrateFormFromPlaylist()
+        },
+
+        error: err => {
+          this.error = err.message
+        }
+      })
   }
 
   ngOnDestroy () {
@@ -92,14 +130,17 @@ export class MyVideoPlaylistUpdateComponent extends MyVideoPlaylistEdit implemen
       thumbnailfile: body.thumbnailfile || undefined
     }
 
-    this.videoPlaylistService.updateVideoPlaylist(this.videoPlaylistToUpdate, videoPlaylistUpdate).subscribe(
-      () => {
-        this.notifier.success($localize`Playlist ${videoPlaylistUpdate.displayName} updated.`)
-        this.router.navigate([ '/my-library', 'video-playlists' ])
-      },
+    this.videoPlaylistService.updateVideoPlaylist(this.videoPlaylistToUpdate, videoPlaylistUpdate)
+      .subscribe({
+        next: () => {
+          this.notifier.success($localize`Playlist ${videoPlaylistUpdate.displayName} updated.`)
+          this.router.navigate([ '/my-library', 'video-playlists' ])
+        },
 
-      err => this.error = err.message
-    )
+        error: err => {
+          this.error = err.message
+        }
+      })
   }
 
   isCreation () {
@@ -110,6 +151,16 @@ export class MyVideoPlaylistUpdateComponent extends MyVideoPlaylistEdit implemen
     return $localize`Update`
   }
 
+  isEditor () {
+    if (!this.videoPlaylistToUpdate) return false
+
+    return this.videoPlaylistToUpdate?.ownerAccount.id !== this.authService.getUser().account.id
+  }
+
+  getOwnerAccountDisplayName () {
+    return this.videoPlaylistToUpdate?.ownerAccount.displayName
+  }
+
   private hydrateFormFromPlaylist () {
     this.form.patchValue({
       displayName: this.videoPlaylistToUpdate.displayName,
@@ -118,7 +169,8 @@ export class MyVideoPlaylistUpdateComponent extends MyVideoPlaylistEdit implemen
       videoChannelId: this.videoPlaylistToUpdate.videoChannel ? this.videoPlaylistToUpdate.videoChannel.id : null
     })
 
-    fetch(this.videoPlaylistToUpdate.thumbnailUrl)
+    // Keep it sync with image size set in the SASS file
+    fetch(this.videoPlaylistToUpdate.getThumbnailUrl(223))
       .then(response => response.blob())
       .then(data => {
         this.form.patchValue({

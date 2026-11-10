@@ -1,32 +1,41 @@
+import { Component, OnInit, inject, ChangeDetectionStrategy } from '@angular/core'
+import { FormsModule, ReactiveFormsModule } from '@angular/forms'
+import { AuthService, Notifier, ServerService, UserService } from '@app/core'
+import {
+  USER_CONFIRM_PASSWORD_VALIDATOR,
+  USER_EXISTING_PASSWORD_VALIDATOR,
+  getUserNewPasswordValidator
+} from '@app/shared/form-validators/user-validators'
+import { FormReactive } from '@app/shared/shared-forms/form-reactive'
+import { FormReactiveService } from '@app/shared/shared-forms/form-reactive.service'
+import { AlertComponent } from '@app/shared/shared-main/common/alert.component'
+import { HttpStatusCode, User } from '@peertube/peertube-models'
 import { filter } from 'rxjs/operators'
-import { Component, OnInit } from '@angular/core'
-import { AuthService, Notifier, UserService } from '@app/core'
-import { USER_CONFIRM_PASSWORD_VALIDATOR, USER_PASSWORD_VALIDATOR, USER_EXISTING_PASSWORD_VALIDATOR } from '@app/shared/form-validators/user-validators'
-import { FormReactive, FormValidatorService } from '@app/shared/shared-forms'
-import { User } from '@shared/models'
+import { InputTextComponent } from '../../../shared/shared-forms/input-text.component'
 
 @Component({
   selector: 'my-account-change-password',
   templateUrl: './my-account-change-password.component.html',
-  styleUrls: [ './my-account-change-password.component.scss' ]
+  styleUrls: [ './my-account-change-password.component.scss' ],
+  changeDetection: ChangeDetectionStrategy.Eager,
+  imports: [ FormsModule, ReactiveFormsModule, InputTextComponent, AlertComponent ]
 })
 export class MyAccountChangePasswordComponent extends FormReactive implements OnInit {
-  error: string = null
-  user: User = null
+  protected formReactiveService = inject(FormReactiveService)
+  private notifier = inject(Notifier)
+  private authService = inject(AuthService)
+  private userService = inject(UserService)
+  private serverService = inject(ServerService)
 
-  constructor (
-    protected formValidatorService: FormValidatorService,
-    private notifier: Notifier,
-    private authService: AuthService,
-    private userService: UserService
-    ) {
-    super()
-  }
+  error: string
+  user: User
 
   ngOnInit () {
+    const { minLength, maxLength } = this.serverService.getHTMLConfig().fieldsConstraints.users.password
+
     this.buildForm({
       'current-password': USER_EXISTING_PASSWORD_VALIDATOR,
-      'new-password': USER_PASSWORD_VALIDATOR,
+      'new-password': getUserNewPasswordValidator(minLength, maxLength),
       'new-confirmed-password': USER_CONFIRM_PASSWORD_VALIDATOR
     })
 
@@ -35,30 +44,31 @@ export class MyAccountChangePasswordComponent extends FormReactive implements On
     const confirmPasswordControl = this.form.get('new-confirmed-password')
 
     confirmPasswordControl.valueChanges
-                          .pipe(filter(v => v !== this.form.value[ 'new-password' ]))
-                          .subscribe(() => confirmPasswordControl.setErrors({ matchPassword: true }))
+      .pipe(filter(v => v !== this.form.value['new-password']))
+      .subscribe(() => confirmPasswordControl.setErrors({ matchPassword: true }))
   }
 
   changePassword () {
-    const currentPassword = this.form.value[ 'current-password' ]
-    const newPassword = this.form.value[ 'new-password' ]
+    const currentPassword = this.form.value['current-password']
+    const newPassword = this.form.value['new-password']
 
-    this.userService.changePassword(currentPassword, newPassword).subscribe(
-      () => {
-        this.notifier.success($localize`Password updated.`)
+    this.userService.changePassword(currentPassword, newPassword)
+      .subscribe({
+        next: () => {
+          this.notifier.success($localize`Password updated.`)
 
-        this.form.reset()
-        this.error = null
-      },
+          this.form.reset()
+          this.error = null
+        },
 
-      err => {
-        if (err.status === 401) {
-          this.error = $localize`You current password is invalid.`
-          return
+        error: err => {
+          if (err.status === HttpStatusCode.UNAUTHORIZED_401) {
+            this.error = $localize`You current password is invalid.`
+            return
+          }
+
+          this.error = err.message
         }
-
-        this.error = err.message
-      }
-    )
+      })
   }
 }

@@ -1,0 +1,40 @@
+packages:
+  - packages/*
+  - apps/*
+  - server
+  - client
+  - client/packages/*
+  - client/src/standalone/player
+
+allowBuilds:
+  '@parcel/watcher': true
+  '@swc/core': true
+  bcrypt: true
+  bufferutil: true
+  core-js: true
+  edgedriver: true
+  es5-ext: true
+  esbuild: true
+  geckodriver: true
+  ip-set: false
+  lmdb: true
+  msgpackr-extract: true
+  node-datachannel: true
+  protobufjs: true
+  sharp: false
+  utf-8-validate: true
+  utp-native: true
+
+blockExoticSubdeps: false
+
+minimumReleaseAge: 1440
+
+overrides:
+  '@types/express': 4.17.9
+  '@types/express-serve-static-core': 4.19.5
+
+patchedDependencies:
+  node-media-server: pnpm-patches/node-media-server.patch
+  sequelize: pnpm-patches/sequelize.patch
+  tinykeys: pnpm-patches/tinykeys.patch
+  video.js: pnpm-patches/video.js.patch

@@ -1,13 +1,30 @@
-export interface SelectOptionsItem {
-  id: string | number
+export interface SelectOptionsItem<T = string | number> {
+  id: T
   label: string
+
   description?: string
-  group?: string
-  groupLabel?: string
+  imageUrl?: string
+  classes?: string[]
 }
 
 export interface SelectChannelItem extends SelectOptionsItem {
-  id: number
+  id: number // Force number
+  name: string
   support: string
-  avatarPath?: string
+
+  editor: boolean
+  collaborate: boolean
+  owner: boolean
+
+  ownerAccountName: string
+  ownerAccountId: number
+  displayName: string
+
+  updatedAt: string | Date
+}
+
+export interface SelectOptionsGroup {
+  label: string
+  value: string
+  items: SelectOptionsItem[]
 }

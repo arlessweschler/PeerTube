@@ -1,0 +1,25 @@
+<my-signup-step-title mascotImageName="success">
+  <strong i18n>Email verified!</strong>
+</my-signup-step-title>
+
+<my-alert type="primary">
+  @if (requiresApproval()) {
+    <p i18n>Your email has been verified and your account request has been sent!</p>
+
+    <p i18n>
+      A moderator will check your registration request soon and you'll receive an email when it is accepted or rejected.
+    </p>
+  } @else {
+    <p i18n>Your email has been verified and your account has been created!</p>
+
+    <p i18n>
+      If you need help using PeerTube, you can have a look at the <a class="link-primary" href="https://docs.joinpeertube.org/use/setup-account" target="_blank" rel="noopener noreferrer">documentation</a>.
+    </p>
+
+    @if (mobileAppUrl()) {
+      <a class="peertube-button-link primary-button" [href]="mobileAppUrl()" (click)="onMobileAppClick()" i18n>Log in in the app</a>
+    } @else {
+      <a class="peertube-button-link primary-button" routerLink="/login" i18n>Log in</a>
+    }
+  }
+</my-alert>

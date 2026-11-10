@@ -1,315 +1,281 @@
-import { HotkeysService } from 'angular2-hotkeys'
-import * as debug from 'debug'
-import { switchMap } from 'rxjs/operators'
-import { ViewportScroller } from '@angular/common'
-import { Component, OnInit, ViewChild } from '@angular/core'
-import { Router } from '@angular/router'
-import {
-  AuthService,
-  AuthStatus,
-  AuthUser,
-  MenuLink,
-  MenuService,
-  RedirectService,
-  ScreenService,
-  ServerService,
-  UserService
-} from '@app/core'
-import { scrollToTop } from '@app/helpers'
-import { LanguageChooserComponent } from '@app/menu/language-chooser.component'
-import { QuickSettingsModalComponent } from '@app/modal/quick-settings-modal.component'
-import { PeertubeModalService } from '@app/shared/shared-main/peertube-modal/peertube-modal.service'
-import { NgbDropdown } from '@ng-bootstrap/ng-bootstrap'
-import { ServerConfig, UserRight, VideoConstant } from '@shared/models'
+import { CommonModule, getLocaleDirection, NgTemplateOutlet } from '@angular/common'
+import { ChangeDetectionStrategy, Component, inject, LOCALE_ID, OnDestroy, OnInit } from '@angular/core'
+import { Params, RouterLink, RouterLinkActive } from '@angular/router'
+import { AuthService, AuthStatus, AuthUser, HooksService, MenuService, RedirectService, ServerService, UserService } from '@app/core'
+import { GlobalIconComponent, GlobalIconName } from '@app/shared/shared-icons/global-icon.component'
+import { ButtonComponent } from '@app/shared/shared-main/buttons/button.component'
+import { NgbDropdownModule } from '@ng-bootstrap/ng-bootstrap'
+import { UserRight } from '@peertube/peertube-models'
+import debug from 'debug'
+import { of, Subscription } from 'rxjs'
+import { first, map, switchMap } from 'rxjs/operators'
 
-const logger = debug('peertube:menu:MenuComponent')
+type MenuLink = {
+  icon: GlobalIconName
+  iconClass?: string
+
+  label: string
+
+  path?: string
+  url?: string
+  query?: Params
+
+  isPrimaryButton?: boolean // default false
+
+  ngClass?: string
+}
+
+type MenuSection = {
+  key: string
+  title: string
+  links: MenuLink[]
+}
+
+const debugLogger = debug('peertube:menu:MenuComponent')
 
 @Component({
   selector: 'my-menu',
   templateUrl: './menu.component.html',
-  styleUrls: ['./menu.component.scss']
+  styleUrls: [ './menu.component.scss' ],
+  changeDetection: ChangeDetectionStrategy.Eager,
+  imports: [
+    CommonModule,
+    GlobalIconComponent,
+    RouterLink,
+    RouterLinkActive,
+    NgbDropdownModule,
+    NgTemplateOutlet,
+    ButtonComponent
+  ]
 })
-export class MenuComponent implements OnInit {
-  @ViewChild('languageChooserModal', { static: true }) languageChooserModal: LanguageChooserComponent
-  @ViewChild('quickSettingsModal', { static: true }) quickSettingsModal: QuickSettingsModalComponent
-  @ViewChild('dropdown') dropdown: NgbDropdown
+export class MenuComponent implements OnInit, OnDestroy {
+  private authService = inject(AuthService)
+  private userService = inject(UserService)
+  private localeId = inject(LOCALE_ID)
+  private serverService = inject(ServerService)
+  private hooks = inject(HooksService)
+  private menu = inject(MenuService)
+  private redirectService = inject(RedirectService)
 
-  user: AuthUser
-  isLoggedIn: boolean
+  menuSections: MenuSection[] = []
+  loggedIn: boolean
+  moreInfoLabel = $localize`More info`
 
-  userHasAdminAccess = false
-  helpVisible = false
+  private user: AuthUser
+  private canSeeVideoMakerBlock: boolean
 
-  videoLanguages: string[] = []
-  nsfwPolicy: string
+  private authSub: Subscription
 
-  currentInterfaceLanguage: string
-
-  commonMenuLinks: MenuLink[] = []
-
-  private languages: VideoConstant<string>[] = []
-  private serverConfig: ServerConfig
-  private routesPerRight: { [role in UserRight]?: string } = {
-    [UserRight.MANAGE_USERS]: '/admin/users',
-    [UserRight.MANAGE_SERVER_FOLLOW]: '/admin/friends',
-    [UserRight.MANAGE_ABUSES]: '/admin/moderation/abuses',
-    [UserRight.MANAGE_VIDEO_BLACKLIST]: '/admin/moderation/video-blocks',
-    [UserRight.MANAGE_JOBS]: '/admin/jobs',
-    [UserRight.MANAGE_CONFIGURATION]: '/admin/config'
-  }
-
-  constructor (
-    private viewportScroller: ViewportScroller,
-    private authService: AuthService,
-    private userService: UserService,
-    private serverService: ServerService,
-    private redirectService: RedirectService,
-    private hotkeysService: HotkeysService,
-    private screenService: ScreenService,
-    private menuService: MenuService,
-    private modalService: PeertubeModalService,
-    private router: Router
-  ) { }
-
-  get isInMobileView () {
-    return this.screenService.isInMobileView()
-  }
-
-  get dropdownContainer () {
-    if (this.isInMobileView) return null
-
-    return 'body' as 'body'
-  }
-
-  get language () {
-    return this.languageChooserModal.getCurrentLanguage()
+  get shortDescription () {
+    return this.serverService.getHTMLConfig().instance.shortDescription
   }
 
   get instanceName () {
-    return this.serverConfig.instance.name
+    return this.serverService.getHTMLConfig().instance.name
+  }
+
+  get collapsed () {
+    return this.menu.isCollapsed()
+  }
+
+  get isOverlay () {
+    return this.menu.isCollapsed()
   }
 
   ngOnInit () {
-    this.serverConfig = this.serverService.getTmpConfig()
-    this.serverService.getConfig()
-      .subscribe(config => {
-        this.serverConfig = config
-        this.buildMenuLinks()
-      })
+    this.loggedIn = this.authService.isLoggedIn()
+    this.onUserStateChange()
 
-    this.isLoggedIn = this.authService.isLoggedIn()
-    if (this.isLoggedIn === true) {
-      this.user = this.authService.getUser()
+    this.authSub = this.authService.loginChangedSource.subscribe(status => {
+      if (status === AuthStatus.LoggedIn) this.loggedIn = true
+      else if (status === AuthStatus.LoggedOut) this.loggedIn = false
 
-      this.computeNSFWPolicy()
-      this.computeVideosLink()
+      this.onUserStateChange()
+    })
+  }
+
+  ngOnDestroy () {
+    if (this.authSub) this.authSub.unsubscribe()
+  }
+
+  // ---------------------------------------------------------------------------
+
+  toggleMenu () {
+    this.menu.toggleMenu()
+  }
+
+  // ---------------------------------------------------------------------------
+
+  private async buildMenuSections () {
+    this.menuSections = []
+
+    for (const section of [ this.buildQuickLinks(), this.buildLibraryLinks(), this.buildVideoMakerLinks(), this.buildAdminLinks() ]) {
+      if (section.links.length !== 0) {
+        this.menuSections.push(section)
+      }
     }
 
-    this.computeAdminAccess()
+    this.menuSections = await this.hooks.wrapObject(this.menuSections, 'common', 'filter:left-menu.links.create.result')
+  }
 
-    this.currentInterfaceLanguage = this.languageChooserModal.getCurrentLanguage()
-
-    this.authService.loginChangedSource.subscribe(
-      status => {
-        if (status === AuthStatus.LoggedIn) {
-          this.isLoggedIn = true
-          this.user = this.authService.getUser()
-
-          this.computeAdminAccess()
-          this.computeVideosLink()
-
-          logger('Logged in.')
-        } else if (status === AuthStatus.LoggedOut) {
-          this.isLoggedIn = false
-          this.user = undefined
-
-          this.computeAdminAccess()
-
-          logger('Logged out.')
-        } else {
-          console.error('Unknown auth status: ' + status)
+  private buildQuickLinks (): MenuSection {
+    const base: MenuSection = {
+      key: 'quick-access',
+      title: $localize`Quick access`,
+      links: [
+        {
+          path: this.redirectService.getDefaultRoute(),
+          query: this.redirectService.getDefaultRouteQuery(),
+          icon: 'home',
+          label: $localize`Home`
         }
-      }
-    )
+      ]
+    }
 
-    this.hotkeysService.cheatSheetToggle
-      .subscribe(isOpen => this.helpVisible = isOpen)
-
-    this.serverService.getVideoLanguages()
-      .subscribe(languages => {
-        this.languages = languages
-
-        this.authService.userInformationLoaded
-          .subscribe(() => this.buildUserLanguages())
+    if (this.loggedIn) {
+      base.links.push({
+        path: '/videos/subscriptions',
+        icon: 'subscriptions',
+        label: $localize`Subscriptions`
       })
+    }
 
-    this.modalService.openQuickSettingsSubject
-      .subscribe(() => this.openQuickSettings())
+    return base
   }
 
-  isRegistrationAllowed () {
-    return this.serverConfig.signup.allowed &&
-      this.serverConfig.signup.allowedForCurrentIP
+  private buildLibraryLinks (): MenuSection {
+    let links: MenuLink[] = []
+
+    if (this.loggedIn) {
+      links = links.concat([
+        {
+          path: '/my-library/video-playlists',
+          icon: 'playlists',
+          label: $localize`Playlists`
+        },
+        {
+          path: '/my-library/history/videos',
+          icon: 'history',
+          label: $localize`History`
+        }
+      ])
+    }
+
+    return {
+      key: 'my-library',
+      title: $localize`My library`,
+      links
+    }
   }
 
-  getFirstAdminRightAvailable () {
-    const user = this.authService.getUser()
-    if (!user) return undefined
+  private buildVideoMakerLinks (): MenuSection {
+    let links: MenuLink[] = []
 
-    const adminRights = [
-      UserRight.MANAGE_USERS,
-      UserRight.MANAGE_SERVER_FOLLOW,
-      UserRight.MANAGE_ABUSES,
-      UserRight.MANAGE_VIDEO_BLACKLIST,
-      UserRight.MANAGE_JOBS,
-      UserRight.MANAGE_CONFIGURATION
-    ]
+    if (this.loggedIn && this.canSeeVideoMakerBlock) {
+      links = links.concat([
+        {
+          path: '/my-library/video-channels',
+          icon: 'channel',
+          iconClass: 'channel-icon',
+          label: $localize`Channels`
+        },
 
-    for (const adminRight of adminRights) {
-      if (user.hasRight(adminRight)) {
-        return adminRight
+        {
+          path: '/my-library/videos',
+          icon: 'videos',
+          label: $localize`Videos`
+        },
+
+        {
+          path: '/videos/publish',
+          icon: 'upload',
+          label: $localize`Publish`,
+          isPrimaryButton: true,
+          ngClass: 'publish-button'
+        }
+      ])
+    }
+
+    return {
+      key: 'my-video-space',
+      title: $localize`My video space`,
+      links
+    }
+  }
+
+  private buildAdminLinks (): MenuSection {
+    const links: MenuLink[] = []
+
+    if (this.loggedIn) {
+      if (this.user.hasRight(UserRight.SEE_ALL_VIDEOS)) {
+        links.push({
+          path: '/admin/overview',
+          icon: 'overview',
+          label: $localize`Overview`
+        })
+      }
+
+      if (this.user.hasRight(UserRight.MANAGE_ABUSES)) {
+        links.push({
+          path: '/admin/moderation',
+          icon: 'moderation',
+          label: $localize`Moderation`
+        })
+      }
+
+      if (this.user.hasRight(UserRight.MANAGE_CONFIGURATION)) {
+        links.push({
+          path: '/admin/settings',
+          icon: 'config',
+          label: $localize`Settings`
+        })
       }
     }
 
-    return undefined
-  }
-
-  getFirstAdminRouteAvailable () {
-    const right = this.getFirstAdminRightAvailable()
-
-    return this.routesPerRight[right]
-  }
-
-  logout (event: Event) {
-    event.preventDefault()
-
-    this.authService.logout()
-    // Redirect to home page
-    this.redirectService.redirectToHomepage()
-  }
-
-  openLanguageChooser () {
-    this.languageChooserModal.show()
-  }
-
-  openHotkeysCheatSheet () {
-    this.hotkeysService.cheatSheetToggle.next(!this.helpVisible)
-  }
-
-  openQuickSettings () {
-    this.quickSettingsModal.show()
-  }
-
-  toggleUseP2P () {
-    if (!this.user) return
-    this.user.webTorrentEnabled = !this.user.webTorrentEnabled
-
-    this.userService.updateMyProfile({ webTorrentEnabled: this.user.webTorrentEnabled })
-      .subscribe(() => this.authService.refreshUserInformation())
-  }
-
-  langForLocale (localeId: string) {
-    if (localeId === '_unknown') return $localize`Unknown`
-
-    return this.languages.find(lang => lang.id === localeId).label
-  }
-
-  onActiveLinkScrollToAnchor (link: HTMLAnchorElement) {
-    const linkURL = link.getAttribute('href')
-    const linkHash = link.getAttribute('fragment')
-
-    // On same url without fragment restore top scroll position
-    if (!linkHash && this.router.url.includes(linkURL)) {
-      scrollToTop('smooth')
-    }
-
-    // On same url with fragment restore anchor scroll position
-    if (linkHash && this.router.url === linkURL) {
-      this.viewportScroller.scrollToAnchor(linkHash)
-    }
-
-    if (this.screenService.isInSmallView()) {
-      this.menuService.toggleMenu()
+    return {
+      key: 'admin',
+      title: $localize`Administration`,
+      links
     }
   }
 
-  // Lock menu scroll when menu scroll to avoid fleeing / detached dropdown
-  onMenuScrollEvent () {
-    document.querySelector('menu').scrollTo(0, 0)
-  }
+  // ---------------------------------------------------------------------------
 
-  onDropdownOpenChange (opened: boolean) {
-    if (this.screenService.isInMobileView()) return
+  private computeCanSeeVideoMakerBlock () {
+    if (!this.loggedIn) return of(false)
+    if (!this.user.hasUploadDisabled()) return of(true)
 
-    // Close dropdown when window scroll to avoid dropdown quick jump for re-position
-    const onWindowScroll = () => {
-      this.dropdown?.close()
-      window.removeEventListener('scroll', onWindowScroll)
-    }
-
-    if (opened) {
-      window.addEventListener('scroll', onWindowScroll)
-      document.querySelector('menu').scrollTo(0, 0) // Reset menu scroll to easy lock
-      document.querySelector('menu').addEventListener('scroll', this.onMenuScrollEvent)
-    } else {
-      document.querySelector('menu').removeEventListener('scroll', this.onMenuScrollEvent)
-    }
-  }
-
-  private buildMenuLinks () {
-    this.commonMenuLinks = this.menuService.buildCommonLinks(this.serverConfig)
-  }
-
-  private buildUserLanguages () {
-    if (!this.user) {
-      this.videoLanguages = []
-      return
-    }
-
-    if (!this.user.videoLanguages) {
-      this.videoLanguages = [$localize`any language`]
-      return
-    }
-
-    this.videoLanguages = this.user.videoLanguages
-      .map(locale => this.langForLocale(locale))
-      .map(value => value === undefined ? '?' : value)
-  }
-
-  private computeAdminAccess () {
-    const right = this.getFirstAdminRightAvailable()
-
-    this.userHasAdminAccess = right !== undefined
-  }
-
-  private computeVideosLink () {
-    this.authService.userInformationLoaded
+    return this.authService.userInformationLoaded
       .pipe(
-        switchMap(() => this.user.computeCanSeeVideosLink(this.userService.getMyVideoQuotaUsed()))
-      ).subscribe(res => {
-        if (res === true) logger('User can see videos link.')
-        else logger('User cannot see videos link.')
+        first(),
+        switchMap(() => this.userService.getMyVideoQuotaUsed()),
+        map(({ videoQuotaUsed }) => {
+          // User already uploaded videos, so it can see the link
+          if (videoQuotaUsed !== 0) return true
+
+          // No videos, no upload so the user don't need to see the videos link
+          return false
+        })
+      )
+  }
+
+  private onUserStateChange () {
+    this.user = this.loggedIn
+      ? this.authService.getUser()
+      : undefined
+
+    this.computeCanSeeVideoMakerBlock()
+      .subscribe(res => {
+        this.canSeeVideoMakerBlock = res
+
+        if (this.canSeeVideoMakerBlock) debugLogger('User can see videos link.')
+        else debugLogger('User cannot see videos link.')
+
+        this.buildMenuSections()
       })
   }
 
-  private computeNSFWPolicy () {
-    if (!this.user) {
-      this.nsfwPolicy = null
-      return
-    }
-
-    switch (this.user.nsfwPolicy) {
-      case 'do_not_list':
-        this.nsfwPolicy = $localize`hide`
-        break
-
-      case 'blur':
-        this.nsfwPolicy = $localize`blur`
-        break
-
-      case 'display':
-        this.nsfwPolicy = $localize`display`
-        break
-    }
+  isRTL () {
+    return getLocaleDirection(this.localeId) === 'rtl'
   }
 }

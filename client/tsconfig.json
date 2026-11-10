@@ -1,14 +1,65 @@
-/*
-  This is a "Solution Style" tsconfig.json file, and is used by editors and TypeScript’s language server to improve development experience.
-  It is not intended to be used to perform a compilation.
-
-  To learn more about this file see: https://angular.io/config/solution-tsconfig.
-*/
 {
-  "files": [],
-  "references": [
-    {
-      "path": "./tsconfig.app.json"
+  "compileOnSave": false,
+  "compilerOptions": {
+    "sourceMap": true,
+    "declaration": false,
+    "moduleResolution": "bundler",
+    "module": "es2020",
+    "esModuleInterop": true,
+    "experimentalDecorators": true,
+    "noImplicitAny": true,
+    "noImplicitThis": true,
+    "alwaysStrict": true,
+    "allowJs": true,
+    "importHelpers": true,
+    "strictBindCallApply": true,
+    "target": "ES2022",
+    "lib": [
+      "ES2022",
+      "DOM",
+      "DOM.Iterable",
+      "ES2025.Float16"
+    ],
+    "isolatedModules": true,
+    "strictPropertyInitialization": false,
+    "strictNullChecks": false,
+    "typeRoots": [
+      "node_modules/@types"
+    ],
+    "paths": {
+      "@app/*": [
+        "./src/app/*"
+      ],
+      "@root-helpers/*": [
+        "./src/root-helpers/*"
+      ],
+      "@pt-types": [
+        "./src/types"
+      ]
     }
-  ]
+  },
+  "references": [
+    { "path": "../packages/core-utils" },
+    { "path": "../packages/models" },
+    { "path": "../packages/typescript-utils" }
+  ],
+  "include": [
+    "./src/polyfills.ts",
+    "./src/environments/*.ts",
+    "./src/main*.ts",
+    "./src/**/*.d.ts",
+    "./src/app/**/*.ts",
+    "./src/shims/*.ts"
+  ],
+  "angularCompilerOptions": {
+    "strictInjectionParameters": true,
+    "extendedDiagnostics": {
+      "checks": {
+        "nullishCoalescingNotNullable": "suppress",
+        "optionalChainNotNullable": "suppress"
+      }
+    },
+    "strictTemplates": true,
+    "enableI18nLegacyMessageIdFormat": false
+  }
 }

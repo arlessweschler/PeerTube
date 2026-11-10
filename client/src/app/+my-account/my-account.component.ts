@@ -1,49 +1,27 @@
-import { Component, OnInit } from '@angular/core'
-import { AuthUser, ScreenService } from '@app/core'
-import { TopMenuDropdownParam } from '../shared/shared-main/misc/top-menu-dropdown.component'
+import { Component, OnInit, inject, ChangeDetectionStrategy } from '@angular/core'
+import { RouterOutlet } from '@angular/router'
+import { AuthUser, PluginService } from '@app/core'
+import { HorizontalMenuComponent, HorizontalMenuEntry } from '@app/shared/shared-main/menu/horizontal-menu.component'
 
 @Component({
-  selector: 'my-my-account',
+  selector: 'my-account',
   templateUrl: './my-account.component.html',
-  styleUrls: [ './my-account.component.scss' ]
+  changeDetection: ChangeDetectionStrategy.Eager,
+  imports: [ HorizontalMenuComponent, RouterOutlet ]
 })
 export class MyAccountComponent implements OnInit {
-  menuEntries: TopMenuDropdownParam[] = []
+  private pluginService = inject(PluginService)
+
+  menuEntries: HorizontalMenuEntry[] = []
   user: AuthUser
 
-  constructor (
-    private screenService: ScreenService
-    ) { }
-
-  get isBroadcastMessageDisplayed () {
-    return this.screenService.isBroadcastMessageDisplayed
-  }
-
   ngOnInit (): void {
-    this.buildMenu()
+    this.pluginService.ensurePluginsAreLoaded('my-account')
+      .then(() => this.buildMenu())
   }
 
   private buildMenu () {
-    const moderationEntries: TopMenuDropdownParam = {
-      label: $localize`Moderation`,
-      children: [
-        {
-          label: $localize`Muted accounts`,
-          routerLink: '/my-account/blocklist/accounts',
-          iconName: 'user-x'
-        },
-        {
-          label: $localize`Muted servers`,
-          routerLink: '/my-account/blocklist/servers',
-          iconName: 'peertube-x'
-        },
-        {
-          label: $localize`Abuse reports`,
-          routerLink: '/my-account/abuses',
-          iconName: 'flag'
-        }
-      ]
-    }
+    const clientRoutes = this.pluginService.getAllRegisteredClientRoutesForParent('/my-account') || {}
 
     this.menuEntries = [
       {
@@ -57,11 +35,39 @@ export class MyAccountComponent implements OnInit {
       },
 
       {
+        label: $localize`Import/Export`,
+        routerLink: '/my-account/import-export'
+      },
+
+      {
         label: $localize`Applications`,
         routerLink: '/my-account/applications'
       },
 
-      moderationEntries
+      {
+        label: $localize`Moderation`,
+        routerLink: '/my-account/blocklist/accounts',
+        children: [
+          {
+            label: $localize`Muted accounts`,
+            routerLink: '/my-account/blocklist/accounts'
+          },
+          {
+            label: $localize`Muted servers`,
+            routerLink: '/my-account/blocklist/servers'
+          },
+          {
+            label: $localize`Abuse reports`,
+            routerLink: '/my-account/abuses'
+          }
+        ]
+      },
+
+      ...Object.values(clientRoutes)
+        .map(clientRoute => ({
+          label: clientRoute.menuItem?.label,
+          routerLink: '/my-account/p/' + clientRoute.route
+        }))
     ]
   }
 }

@@ -1,19 +1,46 @@
-import { Subject, Subscription } from 'rxjs'
-import { CdkDragDrop } from '@angular/cdk/drag-drop'
-import { Component, OnDestroy, OnInit, ViewChild } from '@angular/core'
+import { CdkDrag, CdkDragDrop, CdkDropList } from '@angular/cdk/drag-drop'
+import { Component, OnDestroy, OnInit, inject, viewChild, ChangeDetectionStrategy } from '@angular/core'
 import { ActivatedRoute, Router } from '@angular/router'
-import { ComponentPagination, ConfirmService, Notifier, ScreenService } from '@app/core'
-import { DropdownAction } from '@app/shared/shared-main'
-import { VideoShareComponent } from '@app/shared/shared-share-modal'
-import { VideoPlaylist, VideoPlaylistElement, VideoPlaylistService } from '@app/shared/shared-video-playlist'
-import { VideoPlaylistType } from '@shared/models'
+import { ComponentPagination, ConfirmService, HooksService, Notifier, ScreenService, updatePaginationOnDelete } from '@app/core'
+import { ButtonComponent } from '@app/shared/shared-main/buttons/button.component'
+import { VideoShareComponent } from '@app/shared/shared-share-modal/video-share.component'
+import { VideoPlaylistElement } from '@app/shared/shared-video-playlist/video-playlist-element.model'
+import { VideoPlaylist } from '@app/shared/shared-video-playlist/video-playlist.model'
+import { VideoPlaylistService } from '@app/shared/shared-video-playlist/video-playlist.service'
+import { VideoPlaylistType } from '@peertube/peertube-models'
+import { Subject, Subscription } from 'rxjs'
+import { ActionDropdownComponent, DropdownAction } from '../../shared/shared-main/buttons/action-dropdown.component'
+import { InfiniteScrollerDirective } from '../../shared/shared-main/common/infinite-scroller.directive'
+import { VideoPlaylistElementMiniatureComponent } from '../../shared/shared-video-playlist/video-playlist-element-miniature.component'
+import { VideoPlaylistMiniatureComponent } from '../../shared/shared-video-playlist/video-playlist-miniature.component'
 
 @Component({
   templateUrl: './my-video-playlist-elements.component.html',
-  styleUrls: [ './my-video-playlist-elements.component.scss' ]
+  styleUrls: [ './my-video-playlist-elements.component.scss' ],
+  changeDetection: ChangeDetectionStrategy.Eager,
+  imports: [
+    ButtonComponent,
+    VideoPlaylistMiniatureComponent,
+    ActionDropdownComponent,
+    InfiniteScrollerDirective,
+    CdkDropList,
+    CdkDrag,
+    VideoPlaylistElementMiniatureComponent,
+    VideoShareComponent
+  ]
 })
 export class MyVideoPlaylistElementsComponent implements OnInit, OnDestroy {
-  @ViewChild('videoShareModal') videoShareModal: VideoShareComponent
+  private hooks = inject(HooksService)
+  private notifier = inject(Notifier)
+  private router = inject(Router)
+  private confirmService = inject(ConfirmService)
+  private route = inject(ActivatedRoute)
+  private screenService = inject(ScreenService)
+  private videoPlaylistService = inject(VideoPlaylistService)
+
+  readonly videoShareModal = viewChild<VideoShareComponent>('videoShareModal')
+
+  private errored = false
 
   playlistElements: VideoPlaylistElement[] = []
   playlist: VideoPlaylist
@@ -31,22 +58,13 @@ export class MyVideoPlaylistElementsComponent implements OnInit, OnDestroy {
   private videoPlaylistId: string | number
   private paramsSub: Subscription
 
-  constructor (
-    private notifier: Notifier,
-    private router: Router,
-    private confirmService: ConfirmService,
-    private route: ActivatedRoute,
-    private screenService: ScreenService,
-    private videoPlaylistService: VideoPlaylistService
-  ) {}
-
   ngOnInit () {
     this.playlistActions = [
       [
         {
           label: $localize`Update playlist`,
           iconName: 'edit',
-          linkBuilder: playlist => [ '/my-library', 'video-playlists', 'update', playlist.uuid ]
+          linkBuilder: playlist => [ '/my-library', 'video-playlists', 'update', playlist.shortUUID ]
         },
         {
           label: $localize`Delete playlist`,
@@ -57,7 +75,7 @@ export class MyVideoPlaylistElementsComponent implements OnInit, OnDestroy {
     ]
 
     this.paramsSub = this.route.params.subscribe(routeParams => {
-      this.videoPlaylistId = routeParams[ 'videoPlaylistId' ]
+      this.videoPlaylistId = routeParams['videoPlaylistId']
       this.loadElements()
 
       this.loadPlaylistInfo()
@@ -84,20 +102,21 @@ export class MyVideoPlaylistElementsComponent implements OnInit, OnDestroy {
     this.playlistElements.splice(previousIndex, 1)
     this.playlistElements.splice(newIndex, 0, element)
 
-    this.videoPlaylistService.reorderPlaylist(this.playlist.id, oldPosition, insertAfter)
-      .subscribe(
-        () => {
+    this.videoPlaylistService.reorderVideosOfPlaylist(this.playlist.id, oldPosition, insertAfter)
+      .subscribe({
+        next: () => {
           this.reorderClientPositions()
         },
 
-        err => this.notifier.error(err.message)
-      )
+        error: err => this.notifier.handleError(err)
+      })
   }
 
   onElementRemoved (element: VideoPlaylistElement) {
     const oldFirst = this.findFirst()
 
     this.playlistElements = this.playlistElements.filter(v => v.id !== element.id)
+    updatePaginationOnDelete(this.pagination)
     this.reorderClientPositions(oldFirst)
   }
 
@@ -118,7 +137,7 @@ export class MyVideoPlaylistElementsComponent implements OnInit, OnDestroy {
   }
 
   showShareModal () {
-    this.videoShareModal.show()
+    this.videoShareModal().show()
   }
 
   async deleteVideoPlaylist (videoPlaylist: VideoPlaylist) {
@@ -129,14 +148,14 @@ export class MyVideoPlaylistElementsComponent implements OnInit, OnDestroy {
     if (res === false) return
 
     this.videoPlaylistService.removeVideoPlaylist(videoPlaylist)
-      .subscribe(
-        () => {
+      .subscribe({
+        next: () => {
           this.router.navigate([ '/my-library', 'video-playlists' ])
           this.notifier.success($localize`Playlist ${videoPlaylist.displayName} deleted.`)
         },
 
-        error => this.notifier.error(error.message)
-      )
+        error: err => this.notifier.handleError(err)
+      })
   }
 
   /**
@@ -145,8 +164,6 @@ export class MyVideoPlaylistElementsComponent implements OnInit, OnDestroy {
    * we add a delay to prevent unwanted drag&drop.
    *
    * @see {@link https://github.com/Chocobozzz/PeerTube/issues/2078}
-   *
-   * @returns {null|number} Null for no delay, or a number in milliseconds.
    */
   getDragStartDelay (): null | number {
     if (this.screenService.isInTouchScreen()) {
@@ -157,19 +174,42 @@ export class MyVideoPlaylistElementsComponent implements OnInit, OnDestroy {
   }
 
   private loadElements () {
-    this.videoPlaylistService.getPlaylistVideos(this.videoPlaylistId, this.pagination)
-        .subscribe(({ total, data }) => {
-          this.playlistElements = this.playlistElements.concat(data)
-          this.pagination.totalItems = total
+    this.hooks.wrapObsFun(
+      this.videoPlaylistService.getPlaylistVideos.bind(this.videoPlaylistService),
+      { videoPlaylistId: this.videoPlaylistId, componentPagination: this.pagination },
+      'my-library',
+      'filter:api.my-library.video-playlist-elements.list.params',
+      'filter:api.my-library.video-playlist-elements.list.result'
+    ).subscribe({
+      next: ({ total, data }) => {
+        this.playlistElements = this.playlistElements.concat(data)
+        this.pagination.totalItems = total
 
-          this.onDataSubject.next(data)
-        })
+        this.onDataSubject.next(data)
+      },
+
+      error: err => {
+        if (!this.errored) {
+          this.notifier.handleError(err)
+          this.errored = true
+        }
+      }
+    })
   }
 
   private loadPlaylistInfo () {
     this.videoPlaylistService.getVideoPlaylist(this.videoPlaylistId)
-      .subscribe(playlist => {
-        this.playlist = playlist
+      .subscribe({
+        next: playlist => {
+          this.playlist = playlist
+        },
+
+        error: err => {
+          if (!this.errored) {
+            this.notifier.handleError(err)
+            this.errored = true
+          }
+        }
       })
   }
 
@@ -187,7 +227,7 @@ export class MyVideoPlaylistElementsComponent implements OnInit, OnDestroy {
     // Reload playlist thumbnail if the first element changed
     const newFirst = this.findFirst()
     if (oldFirst && newFirst && oldFirst.id !== newFirst.id) {
-      this.playlist.refreshThumbnail()
+      this.loadPlaylistInfo()
     }
   }
 

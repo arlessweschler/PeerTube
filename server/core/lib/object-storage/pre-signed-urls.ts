@@ -1,0 +1,120 @@
+import { CONFIG } from '@server/initializers/config.js'
+import { MStreamingPlaylistVideo, MUserExport, MVideoFile } from '@server/types/models/index.js'
+import { MVideoSource } from '@server/types/models/video/video-source.js'
+import { generateCommonFileObjectStorageKey, generateHLSObjectStorageKey } from './keys.js'
+import { buildKey, getClient } from './shared/index.js'
+
+export async function generateWebVideoPresignedUrl (options: {
+  file: MVideoFile
+  downloadFilename: string
+}) {
+  const { file, downloadFilename } = options
+
+  const url = await generatePresignedUrl({
+    bucket: CONFIG.OBJECT_STORAGE.WEB_VIDEOS.BUCKET_NAME,
+    key: buildKey(generateCommonFileObjectStorageKey('web_videos', file.filename), CONFIG.OBJECT_STORAGE.WEB_VIDEOS),
+    downloadFilename
+  })
+
+  return replaceByBaseUrl(url, CONFIG.OBJECT_STORAGE.WEB_VIDEOS)
+}
+
+export async function generateHLSFilePresignedUrl (options: {
+  streamingPlaylist: MStreamingPlaylistVideo
+  file: MVideoFile
+  downloadFilename: string
+}) {
+  const { streamingPlaylist, file, downloadFilename } = options
+
+  const url = await generatePresignedUrl({
+    bucket: CONFIG.OBJECT_STORAGE.STREAMING_PLAYLISTS.BUCKET_NAME,
+    key: buildKey(generateHLSObjectStorageKey(streamingPlaylist.Video, file.filename), CONFIG.OBJECT_STORAGE.STREAMING_PLAYLISTS),
+    downloadFilename
+  })
+
+  return replaceByBaseUrl(url, CONFIG.OBJECT_STORAGE.STREAMING_PLAYLISTS)
+}
+
+export async function generateUserExportPresignedUrl (options: {
+  userExport: MUserExport
+  downloadFilename: string
+}) {
+  const { userExport, downloadFilename } = options
+
+  const url = await generatePresignedUrl({
+    bucket: CONFIG.OBJECT_STORAGE.USER_EXPORTS.BUCKET_NAME,
+    key: buildKey(generateCommonFileObjectStorageKey('user_exports', userExport.filename), CONFIG.OBJECT_STORAGE.USER_EXPORTS),
+    downloadFilename
+  })
+
+  return replaceByBaseUrl(url, CONFIG.OBJECT_STORAGE.USER_EXPORTS)
+}
+
+export async function generateOriginalFilePresignedUrl (options: {
+  videoSource: MVideoSource
+  downloadFilename: string
+}) {
+  const { videoSource, downloadFilename } = options
+
+  const url = await generatePresignedUrl({
+    bucket: CONFIG.OBJECT_STORAGE.ORIGINAL_VIDEO_FILES.BUCKET_NAME,
+    key: buildKey(
+      generateCommonFileObjectStorageKey('original_video_files', videoSource.keptOriginalFilename),
+      CONFIG.OBJECT_STORAGE.ORIGINAL_VIDEO_FILES
+    ),
+    downloadFilename
+  })
+
+  return replaceByBaseUrl(url, CONFIG.OBJECT_STORAGE.ORIGINAL_VIDEO_FILES)
+}
+
+export async function generateTorrentPresignedUrl (options: {
+  file: MVideoFile
+  downloadFilename: string
+}) {
+  const { file, downloadFilename } = options
+
+  const url = await generatePresignedUrl({
+    bucket: CONFIG.OBJECT_STORAGE.TORRENTS.BUCKET_NAME,
+    key: buildKey(generateCommonFileObjectStorageKey('torrents', file.torrentFilename), CONFIG.OBJECT_STORAGE.TORRENTS),
+    downloadFilename
+  })
+
+  return replaceByBaseUrl(url, CONFIG.OBJECT_STORAGE.TORRENTS)
+}
+
+// ---------------------------------------------------------------------------
+// Private
+// ---------------------------------------------------------------------------
+
+async function generatePresignedUrl (options: {
+  bucket: string
+  key: string
+  downloadFilename: string
+}) {
+  const { bucket, downloadFilename, key } = options
+
+  const { GetObjectCommand } = await import('@aws-sdk/client-s3')
+  const { getSignedUrl } = await import('@aws-sdk/s3-request-presigner')
+
+  const command = new GetObjectCommand({
+    Bucket: bucket,
+    Key: key,
+    ResponseContentDisposition: `attachment; filename="${encodeURI(downloadFilename)}"`
+  })
+
+  return getSignedUrl(await getClient(), command, { expiresIn: 3600 * 24 })
+}
+
+const regex = CONFIG.OBJECT_STORAGE.FORCE_PATH_STYLE === true
+  ? new RegExp('https?://[^/]+/[^/]+')
+  : new RegExp('https?://[^/]+')
+function replaceByBaseUrl (fileUrl: string, bucket: { BASE_URL: string }) {
+  if (!bucket.BASE_URL) return fileUrl
+
+  const baseUrl = bucket.BASE_URL.endsWith('/')
+    ? bucket.BASE_URL.slice(0, -1)
+    : bucket.BASE_URL
+
+  return fileUrl.replace(regex, baseUrl)
+}

@@ -1,30 +1,50 @@
+import { Component, inject, OnInit, ChangeDetectionStrategy } from '@angular/core'
+import { ActivatedRoute, Router } from '@angular/router'
+import { ComponentPagination, hasMoreItems, Notifier, PasswordConfirmationService, PluginService, resetCurrentPage } from '@app/core'
+import { PluginApiService } from '@app/shared/shared-admin/plugin-api.service'
+import { AlertComponent } from '@app/shared/shared-main/common/alert.component'
+import { PeerTubePluginIndex, PluginType, PluginType_Type } from '@peertube/peertube-models'
+import { logger } from '@root-helpers/logger'
 import { Subject } from 'rxjs'
 import { debounceTime, distinctUntilChanged } from 'rxjs/operators'
-import { Component, OnInit } from '@angular/core'
-import { ActivatedRoute, Router } from '@angular/router'
-import { PluginApiService } from '@app/+admin/plugins/shared/plugin-api.service'
-import { ComponentPagination, ConfirmService, hasMoreItems, Notifier, PluginService } from '@app/core'
-import { PeerTubePluginIndex, PluginType } from '@shared/models'
+import { GlobalIconComponent } from '../../../shared/shared-icons/global-icon.component'
+import { ButtonComponent } from '../../../shared/shared-main/buttons/button.component'
+import { EditButtonComponent } from '../../../shared/shared-main/buttons/edit-button.component'
+import { AutofocusDirective } from '../../../shared/shared-main/common/autofocus.directive'
+import { InfiniteScrollerDirective } from '../../../shared/shared-main/common/infinite-scroller.directive'
+import { PluginCardComponent } from '../shared/plugin-card.component'
 
 @Component({
   selector: 'my-plugin-search',
   templateUrl: './plugin-search.component.html',
-  styleUrls: [
-    '../shared/toggle-plugin-type.scss',
-    '../shared/plugin-list.component.scss',
-    './plugin-search.component.scss'
+  styleUrls: [ './plugin-search.component.scss' ],
+  changeDetection: ChangeDetectionStrategy.Eager,
+  imports: [
+    GlobalIconComponent,
+    AutofocusDirective,
+    InfiniteScrollerDirective,
+    PluginCardComponent,
+    EditButtonComponent,
+    ButtonComponent,
+    AlertComponent
   ]
 })
 export class PluginSearchComponent implements OnInit {
-  pluginTypeOptions: { label: string, value: PluginType }[] = []
-  pluginType: PluginType = PluginType.PLUGIN
+  private pluginService = inject(PluginService)
+  private pluginApiService = inject(PluginApiService)
+  private notifier = inject(Notifier)
+  private passwordConfirmation = inject(PasswordConfirmationService)
+  private router = inject(Router)
+  private route = inject(ActivatedRoute)
+
+  pluginType: PluginType_Type
 
   pagination: ComponentPagination = {
     currentPage: 1,
     itemsPerPage: 10,
     totalItems: null
   }
-  sort = '-popularity'
+  sort = '-trending'
 
   search = ''
   isSearching = false
@@ -37,32 +57,28 @@ export class PluginSearchComponent implements OnInit {
 
   private searchSubject = new Subject<string>()
 
-  constructor (
-    private pluginService: PluginService,
-    private pluginApiService: PluginApiService,
-    private notifier: Notifier,
-    private confirmService: ConfirmService,
-    private router: Router,
-    private route: ActivatedRoute
-  ) {
-    this.pluginTypeOptions = this.pluginApiService.getPluginTypeOptions()
-  }
-
   ngOnInit () {
-    const query = this.route.snapshot.queryParams
-    if (query['pluginType']) this.pluginType = parseInt(query['pluginType'], 10)
+    if (!this.route.snapshot.queryParams['pluginType']) {
+      const queryParams = { pluginType: PluginType.PLUGIN }
+
+      this.router.navigate([], { queryParams })
+    }
+
+    this.route.queryParams.subscribe(query => {
+      if (!query['pluginType']) return
+
+      this.pluginType = parseInt(query['pluginType'], 10) as PluginType_Type
+      this.search = query['search'] || ''
+
+      this.reloadPlugins()
+    })
 
     this.searchSubject.asObservable()
-        .pipe(
-          debounceTime(400),
-          distinctUntilChanged()
-        )
-        .subscribe(search => {
-          this.search = search
-          this.reloadPlugins()
-        })
-
-    this.reloadPlugins()
+      .pipe(
+        debounceTime(400),
+        distinctUntilChanged()
+      )
+      .subscribe(search => this.router.navigate([], { queryParams: { search }, queryParamsHandling: 'merge' }))
   }
 
   onSearchChange (event: Event) {
@@ -72,10 +88,8 @@ export class PluginSearchComponent implements OnInit {
   }
 
   reloadPlugins () {
-    this.pagination.currentPage = 1
+    resetCurrentPage(this.pagination)
     this.plugins = []
-
-    this.router.navigate([], { queryParams: { pluginType: this.pluginType } })
 
     this.loadMorePlugins()
   }
@@ -84,23 +98,23 @@ export class PluginSearchComponent implements OnInit {
     this.isSearching = true
 
     this.pluginApiService.searchAvailablePlugins(this.pluginType, this.pagination, this.sort, this.search)
-        .subscribe(
-          res => {
-            this.isSearching = false
+      .subscribe({
+        next: res => {
+          this.isSearching = false
 
-            this.plugins = this.plugins.concat(res.data)
-            this.pagination.totalItems = res.total
+          this.plugins = this.plugins.concat(res.data)
+          this.pagination.totalItems = res.total
 
-            this.onDataSubject.next(res.data)
-          },
+          this.onDataSubject.next(res.data)
+        },
 
-          err => {
-            console.error(err)
+        error: err => {
+          logger.error(err)
 
-            const message = $localize`The plugin index is not available. Please retry later.`
-            this.notifier.error(message)
-          }
-        )
+          const message = $localize`The plugin index is not available. Please retry later.`
+          this.notifier.error(message)
+        }
+      })
   }
 
   onNearOfBottom () {
@@ -115,12 +129,8 @@ export class PluginSearchComponent implements OnInit {
     return !!this.installing[plugin.npmName]
   }
 
-  getPluginOrThemeHref (name: string) {
-    return this.pluginApiService.getPluginOrThemeHref(this.pluginType, name)
-  }
-
   getShowRouterLink (plugin: PeerTubePluginIndex) {
-    return [ '/admin', 'plugins', 'show', this.pluginService.nameToNpmName(plugin.name, this.pluginType) ]
+    return [ '/admin', 'settings', 'plugins', 'show', this.pluginService.nameToNpmName(plugin.name, this.pluginType) ]
   }
 
   isThemeSearch () {
@@ -130,26 +140,31 @@ export class PluginSearchComponent implements OnInit {
   async install (plugin: PeerTubePluginIndex) {
     if (this.installing[plugin.npmName]) return
 
-    const res = await this.confirmService.confirm(
-      $localize`Please only install plugins or themes you trust, since they can execute any code on your instance.`,
-      $localize`Install ${plugin.name}?`
-    )
-    if (res === false) return
+    const { confirmed, currentPassword } = await this.passwordConfirmation.askPassword({
+      title: $localize`Install ${plugin.name}?`,
+      message: $localize`Please only install plugins or themes you trust, since they can execute any code on your platform.`,
+      confirmIfNotRequired: true
+    })
+    if (confirmed === false) return
 
     this.installing[plugin.npmName] = true
 
-    this.pluginApiService.install(plugin.npmName)
-        .subscribe(
-          () => {
-            this.installing[plugin.npmName] = false
-            this.pluginInstalled = true
+    this.pluginApiService.install(plugin.npmName, currentPassword)
+      .subscribe({
+        next: () => {
+          this.installing[plugin.npmName] = false
+          this.pluginInstalled = true
 
-            this.notifier.success($localize`${plugin.name} installed.`)
+          this.notifier.success($localize`${plugin.name} installed.`)
 
-            plugin.installed = true
-          },
+          plugin.installed = true
+        },
 
-          err => this.notifier.error(err.message)
-        )
+        error: err => {
+          this.installing[plugin.npmName] = false
+
+          this.passwordConfirmation.handleError(err)
+        }
+      })
   }
 }

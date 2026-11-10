@@ -1,15 +1,13 @@
 import { Routes } from '@angular/router'
 import { VideoRedundanciesListComponent } from '@app/+admin/follows/video-redundancies-list'
 import { UserRightGuard } from '@app/core'
-import { UserRight } from '@shared/models'
+import { UserRight } from '@peertube/peertube-models'
 import { FollowersListComponent } from './followers-list'
 import { FollowingListComponent } from './following-list/following-list.component'
-import { FollowsComponent } from './follows.component'
 
-export const FollowsRoutes: Routes = [
+export const followsRoutes: Routes = [
   {
     path: 'follows',
-    component: FollowsComponent,
     canActivate: [ UserRightGuard ],
     data: {
       userRight: UserRight.MANAGE_SERVER_FOLLOW
@@ -25,7 +23,7 @@ export const FollowsRoutes: Routes = [
         component: FollowingListComponent,
         data: {
           meta: {
-            title: $localize`Following list`
+            title: $localize`Following`
           }
         }
       },
@@ -34,7 +32,7 @@ export const FollowsRoutes: Routes = [
         component: FollowersListComponent,
         data: {
           meta: {
-            title: $localize`Followers list`
+            title: $localize`Followers`
           }
         }
       },
@@ -44,7 +42,12 @@ export const FollowsRoutes: Routes = [
       },
       {
         path: 'video-redundancies-list',
-        component: VideoRedundanciesListComponent
+        component: VideoRedundanciesListComponent,
+        data: {
+          meta: {
+            title: $localize`Redundancy`
+          }
+        }
       }
     ]
   }

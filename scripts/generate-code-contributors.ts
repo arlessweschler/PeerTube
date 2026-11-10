@@ -1,7 +1,4 @@
-import { registerTSPaths } from '../server/helpers/register-ts-paths'
-registerTSPaths()
-
-import { execCLI } from '@shared/extra-utils'
+import { CLICommand } from '@peertube/peertube-server-commands'
 
 run()
   .then(() => process.exit(0))
@@ -11,12 +8,12 @@ run()
   })
 
 async function run () {
-  const blacklist = getContributorsBlacklist()
+  const excludeList = getContributorsExcludeList()
 
   {
     let contributors = await getGitContributors()
     contributors = contributors.concat(getZanataContributors())
-    contributors = contributors.filter(c => blacklist[c.username] !== true)
+    contributors = contributors.filter(c => !excludeList.has(c.username))
 
     console.log('# Code & Translators contributors\n')
     for (const contributor of contributors) {
@@ -28,10 +25,12 @@ async function run () {
     console.log('\n\n# Design\n')
     console.log(' * [Olivier Massain](https://dribbble.com/omassain)')
     console.log(' * [Marie-Cécile Godwin Paccard](https://mcgodwin.com/)')
+    console.log(' * [La Coopérative des Internets](https://www.lacooperativedesinternets.fr/)')
 
     console.log('\n\n# Icons\n')
     console.log(' * [Feather Icons](https://feathericons.com) (MIT)')
-    console.log(' * `playlist add`, `history`, `subscriptions`, `miscellaneous-services.svg` by Material UI (Apache 2.0)')
+    console.log(' * [Lucide Icons](https://lucide.dev/) (ISC)')
+    console.log(' * `playlist add`, `history`, `subscriptions`, `miscellaneous-services.svg`, `tip` by Material UI (Apache 2.0)')
     console.log(' * `support` by Chocobozzz (CC-BY)')
     console.log(' * `language` by Aaron Jin (CC-BY)')
     console.log(' * `video-language` by Rigel Kent (CC-BY)')
@@ -44,7 +43,7 @@ async function run () {
     console.log('\n\n# Contributors to our 2020 crowdfunding :heart:\n')
     console.log(
       `*We ran [a crowdfunding campaign](https://joinpeertube.org/roadmap) in 2020 to implement live streaming to the version ` +
-      `3.0.0 of PeerTube. Thanks to everyone who pitched in and shared the news!*\n\n`
+        `3.0.0 of PeerTube. Thanks to everyone who pitched in and shared the news!*\n\n`
     )
   }
 
@@ -52,18 +51,18 @@ async function run () {
     console.log('\n\n# Contributors to our 2018 crowdfunding :heart:')
     console.log(
       `\n*We ran [a crowdfunding campaign](https://www.kisskissbankbank.com/en/projects/peertube-a-free-and-federated-video-platform) ` +
-      `in 2018 to pave the road to the version 1.0.0 of PeerTube, with 1,379 backers. ` +
-      `Thanks to everyone who pitched in and shared the news!*\n\n`
+        `in 2018 to pave the road to the version 1.0.0 of PeerTube, with 1,379 backers. ` +
+        `Thanks to everyone who pitched in and shared the news!*\n\n`
     )
   }
 }
 
 async function getGitContributors () {
-  const output = await execCLI(`git --no-pager shortlog -sn < /dev/tty | sed 's/^\\s\\+[0-9]\\+\\s\\+//g'`)
+  const { stdout } = await CLICommand.exec(`git --no-pager shortlog -sn < /dev/tty | sed 's/^\\s\\+[0-9]\\+\\s\\+//g'`)
 
-  return output.split('\n')
-               .filter(l => !!l)
-               .map(l => ({ username: l }))
+  return stdout.split('\n')
+    .filter(l => !!l)
+    .map(l => ({ username: l }))
 }
 
 // Zanata is dead, don't loose the contributors name
@@ -189,10 +188,16 @@ function getZanataContributors () {
   ]
 }
 
-function getContributorsBlacklist () {
-  return {
-    'Bigard Florian': true,
-    'chocobozzz': true,
-    'Rigel': true
-  }
+function getContributorsExcludeList () {
+  return new Set([
+    'Bigard Florian',
+    'chocobozzz',
+    'Rigel',
+
+    // Requested by the contributor
+    'Marcel Cramm',
+    'Chris Sakura 佐倉くりす on Youtube',
+    'Chris Sakura 佐倉くりす on Youtube - 日本語は第二言語やけ、間違っとったら思いっきり叩いてくださいｗ つたない日本語ばっかりやけど頑張りまーす♪',
+    'chris@famichiki.tube'
+  ])
 }

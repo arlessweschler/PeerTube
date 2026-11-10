@@ -1,19 +1,23 @@
-@import '_variables';
-@import '_mixins';
-
-.modal-body {
-  font-size: 15px;
-}
+@use "_variables" as *;
+@use "_mixins" as *;
+@use "_form-mixins" as *;
 
 .button {
   padding: 0 13px;
 }
 
-input[type=text] {
-  @include peertube-input-text(100%);
+input[type="text"] {
   display: block;
+
+  @include peertube-input-text(100%);
 }
 
-.form-group {
-  margin: 20px 0;
+.modal-body {
+  padding-top: 0;
+  padding-bottom: 0;
+  color: pvar(--fg-300);
+}
+
+.more-info-content {
+  white-space: pre-line;
 }

@@ -1,0 +1,69 @@
+import { sliceWithoutSplittingSurrogates } from '@peertube/peertube-core-utils'
+import { VideoPrivacy } from '@peertube/peertube-models'
+import { CONSTRAINTS_FIELDS, MEMOIZE_LENGTH, MEMOIZE_TTL, VIDEO_PRIVACIES } from '@server/initializers/constants.js'
+import { TagModel } from '@server/models/video/tag.js'
+import { VideoModel } from '@server/models/video/video.js'
+import { MVideoTag } from '@server/types/models/index.js'
+import memoizee from 'memoizee'
+import { Transaction } from 'sequelize'
+
+// ---------------------------------------------------------------------------
+
+export async function setVideoTags (options: {
+  video: MVideoTag
+  tags: string[]
+  transaction?: Transaction
+}) {
+  const { video, tags, transaction } = options
+
+  const internalTags = tags || []
+  const tagInstances = await TagModel.findOrCreateMultiple({ tags: internalTags, transaction })
+
+  await video.$set('Tags', tagInstances, { transaction })
+  video.Tags = tagInstances
+}
+
+// ---------------------------------------------------------------------------
+
+async function getVideoDuration (videoId: number | string) {
+  const video = await VideoModel.load(videoId)
+  if (!video) throw new Error(`Video with id ${videoId} not found`)
+
+  const duration = video.isLive
+    ? undefined
+    : video.duration
+
+  return { duration, isLive: video.isLive }
+}
+
+export const getCachedVideoDuration = memoizee(getVideoDuration, {
+  promise: true,
+  max: MEMOIZE_LENGTH.VIDEO_DURATION,
+  maxAge: MEMOIZE_TTL.VIDEO_DURATION
+})
+
+// ---------------------------------------------------------------------------
+
+// Truncate the source name so the name built by `template` fits in the name constraint
+export function buildNameFromVideoName (sourceName: string, template: (videoName: string) => string) {
+  const maxSourceLength = CONSTRAINTS_FIELDS.VIDEOS.NAME.max - template('').length
+
+  return template(sliceWithoutSplittingSurrogates(sourceName, maxSourceLength).trimEnd())
+}
+
+// ---------------------------------------------------------------------------
+
+export function getLeastPrivatePrivacy () {
+  const order = [
+    VideoPrivacy.PUBLIC,
+    VideoPrivacy.UNLISTED,
+    VideoPrivacy.INTERNAL,
+    VideoPrivacy.PRIVATE
+  ]
+
+  for (const privacy of order) {
+    if (VIDEO_PRIVACIES[privacy]) return privacy
+  }
+
+  throw new Error('No valid privacy found')
+}

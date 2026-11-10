@@ -1,0 +1,59 @@
+export function parallelTests () {
+  return process.env.MOCHA_PARALLEL === 'true'
+}
+
+export function isGithubCI () {
+  return !!process.env.GITHUB_WORKSPACE
+}
+
+export function areHttpImportTestsDisabled () {
+  const disabled = process.env.DISABLE_HTTP_IMPORT_TESTS === 'true'
+
+  if (disabled) console.log('DISABLE_HTTP_IMPORT_TESTS env set to "true" so import tests are disabled')
+
+  return disabled
+}
+
+export function areYoutubeImportTestsDisabled () {
+  const disabled = process.env.DISABLE_HTTP_YOUTUBE_IMPORT_TESTS === 'true'
+
+  if (disabled) console.log('DISABLE_HTTP_YOUTUBE_IMPORT_TESTS env set to "true" so youtube import tests are disabled')
+
+  return disabled
+}
+
+export function areMockObjectStorageTestsDisabled () {
+  const disabled = process.env.ENABLE_OBJECT_STORAGE_TESTS !== 'true'
+
+  if (disabled) console.log('ENABLE_OBJECT_STORAGE_TESTS env is not set to "true" so object storage tests are disabled')
+
+  return disabled
+}
+
+export function areDatabaseStreamingReplicaTestsDisabled () {
+  const disabled = process.env.ENABLE_DB_REPLICA_TESTS !== 'true'
+
+  if (disabled) console.log('ENABLE_DB_REPLICA_TESTS env is not set to "true" so database streaming replica tests are disabled')
+
+  return disabled
+}
+
+export function isTestInstance () {
+  return process.env.NODE_ENV === 'test'
+}
+
+export function isDevInstance () {
+  return process.env.NODE_ENV === 'dev'
+}
+
+export function isTestOrDevInstance () {
+  return isTestInstance() || isDevInstance()
+}
+
+export function isProdInstance () {
+  return process.env.NODE_ENV === 'production'
+}
+
+export function getAppNumber () {
+  return process.env.NODE_APP_INSTANCE || ''
+}

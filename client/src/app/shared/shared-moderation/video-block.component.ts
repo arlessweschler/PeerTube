@@ -1,36 +1,40 @@
-import { Component, EventEmitter, Input, OnInit, Output, ViewChild } from '@angular/core'
+import { NgClass } from '@angular/common'
+import { Component, OnInit, inject, output, viewChild, ChangeDetectionStrategy } from '@angular/core'
+import { FormsModule, ReactiveFormsModule } from '@angular/forms'
 import { Notifier } from '@app/core'
-import { FormReactive, FormValidatorService } from '@app/shared/shared-forms'
-import { Video } from '@app/shared/shared-main'
-import { NgbModal } from '@ng-bootstrap/ng-bootstrap'
-import { NgbModalRef } from '@ng-bootstrap/ng-bootstrap/modal/modal-ref'
+import { formatICU } from '@app/helpers'
+import { FormReactive } from '@app/shared/shared-forms/form-reactive'
+import { FormReactiveService } from '@app/shared/shared-forms/form-reactive.service'
+import { Video } from '@app/shared/shared-main/video/video.model'
+import { NgbModal, NgbModalRef } from '@ng-bootstrap/ng-bootstrap'
 import { VIDEO_BLOCK_REASON_VALIDATOR } from '../form-validators/video-block-validators'
+import { PeertubeCheckboxComponent } from '../shared-forms/peertube-checkbox.component'
+import { GlobalIconComponent } from '../shared-icons/global-icon.component'
 import { VideoBlockService } from './video-block.service'
 
 @Component({
   selector: 'my-video-block',
   templateUrl: './video-block.component.html',
-  styleUrls: [ './video-block.component.scss' ]
+  styleUrls: [ './video-block.component.scss' ],
+  changeDetection: ChangeDetectionStrategy.Eager,
+  imports: [ GlobalIconComponent, FormsModule, ReactiveFormsModule, NgClass, PeertubeCheckboxComponent ]
 })
 export class VideoBlockComponent extends FormReactive implements OnInit {
-  @Input() video: Video = null
+  protected formReactiveService = inject(FormReactiveService)
+  private modalService = inject(NgbModal)
+  private videoBlocklistService = inject(VideoBlockService)
+  private notifier = inject(Notifier)
 
-  @ViewChild('modal', { static: true }) modal: NgbModal
+  readonly modal = viewChild<NgbModal>('modal')
 
-  @Output() videoBlocked = new EventEmitter()
+  readonly videoBlocked = output()
+  readonly modalClosed = output()
+
+  videos: Video[]
 
   error: string = null
 
   private openedModal: NgbModalRef
-
-  constructor (
-    protected formValidatorService: FormValidatorService,
-    private modalService: NgbModal,
-    private videoBlocklistService: VideoBlockService,
-    private notifier: Notifier
-  ) {
-    super()
-  }
 
   ngOnInit () {
     const defaultValues = { unfederate: 'true' }
@@ -41,8 +45,28 @@ export class VideoBlockComponent extends FormReactive implements OnInit {
     }, defaultValues)
   }
 
-  show () {
-    this.openedModal = this.modalService.open(this.modal, { centered: true, keyboard: false })
+  isMultiple () {
+    return this.videos.length > 1
+  }
+
+  getSingleVideo () {
+    return this.videos[0]
+  }
+
+  hasLive () {
+    return this.videos.some(v => v.isLive)
+  }
+
+  hasLocal () {
+    return this.videos.some(v => v.isLocal)
+  }
+
+  show (videos: Video[]) {
+    this.videos = videos
+
+    this.openedModal = this.modalService.open(this.modal(), { centered: true, keyboard: false })
+
+    this.openedModal.hidden.subscribe(() => this.modalClosed.emit())
   }
 
   hide () {
@@ -51,22 +75,36 @@ export class VideoBlockComponent extends FormReactive implements OnInit {
   }
 
   block () {
-    const reason = this.form.value[ 'reason' ] || undefined
-    const unfederate = this.video.isLocal ? this.form.value[ 'unfederate' ] : undefined
+    const options = this.videos.map(v => ({
+      videoId: v.id,
+      reason: this.form.value['reason'] || undefined,
+      unfederate: v.isLocal
+        ? this.form.value['unfederate']
+        : undefined
+    }))
 
-    this.videoBlocklistService.blockVideo(this.video.id, reason, unfederate)
-        .subscribe(
-          () => {
-            this.notifier.success($localize`Video blocked.`)
-            this.hide()
+    this.videoBlocklistService.blockVideos(options)
+      .subscribe({
+        next: () => {
+          const message = formatICU(
+            $localize`{count, plural, =1 {Blocked {videoName}.} other {Blocked {count} videos.}}`,
+            { count: this.videos.length, videoName: this.getSingleVideo().name }
+          )
 
-            this.video.blacklisted = true
-            this.video.blockedReason = reason
+          this.notifier.success(message)
+          this.hide()
 
-            this.videoBlocked.emit()
-          },
+          for (const o of options) {
+            const video = this.videos.find(v => v.id === o.videoId)
 
-          err => this.notifier.error(err.message)
-        )
+            video.blacklisted = true
+            video.blacklistedReason = o.reason
+          }
+
+          this.videoBlocked.emit()
+        },
+
+        error: err => this.notifier.handleError(err)
+      })
   }
 }

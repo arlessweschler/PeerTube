@@ -1,49 +1,21 @@
-@import '_variables';
-@import '_mixins';
+@use "_variables" as *;
+@use "_mixins" as *;
+@use "form-mixins" as *;
 
-.select-job-state {
-  min-width: 120px;
-}
-
-.job-id {
-  max-width: 30vw !important;
-}
-
-.job-type,
-.job-state,
-.job-priority {
-  width: 150px !important;
-}
-
-.job-date {
-  width: 170px !important;
-}
-
-.admin-sub-header {
-  flex-direction: row !important;
-  justify-content: flex-end;
-
-  .select-filter-block {
-    &:not(:last-child) {
-      margin-right: 10px;
-    }
-
-    label {
-      margin-bottom: 2px;
-    }
-
-    .peertube-select-container {
-      @include peertube-select-container(auto);
-    }
+@media screen and (min-width: $medium-view) {
+  .job-id {
+    max-width: 30vw !important;
   }
 
-  .button-filter-block {
-    align-self: flex-end;
+  .job-type,
+  .job-state,
+  .job-priority {
+    width: 150px !important;
   }
-}
 
-td .glyphicon {
-  margin-right: 10px;
+  .job-date {
+    width: 200px !important;
+  }
 }
 
 pre {
@@ -51,9 +23,5 @@ pre {
 }
 
 .job-error {
-  color: #ff0000;
-}
-
-.badge {
-  @include table-badge;
+  color: pvar(--red);
 }

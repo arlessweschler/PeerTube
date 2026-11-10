@@ -1,100 +1,116 @@
-<nav aria-label="breadcrumb">
-  <ol class="breadcrumb">
-    <li class="breadcrumb-item">
-      <a routerLink="/my-library/video-playlists" i18n>My Playlists</a>
-    </li>
+@if (error) {
+  <my-alert type="danger">{{ error }}</my-alert>
+}
 
-    <ng-container *ngIf="isCreation()">
-      <li class="breadcrumb-item active" i18n>Create</li>
-    </ng-container>
-    <ng-container *ngIf="!isCreation()">
-      <li class="breadcrumb-item active" i18n>Edit</li>
-      <li class="breadcrumb-item active" aria-current="page">
-        <a *ngIf="videoPlaylistToUpdate" [routerLink]="[ '/my-library/video-playlists/update', videoPlaylistToUpdate?.uuid ]">{{ videoPlaylistToUpdate?.displayName }}</a>
-      </li>
-    </ng-container>
-  </ol>
-</nav>
+<div class="pt-two-cols"> <!-- playlist grid -->
+  <div class="title-col">
+    <nav aria-label="breadcrumb">
+      <ol class="pt-breadcrumb">
+        <li class="breadcrumb-item">
+          <a routerLink="/my-library/video-playlists" i18n>My Playlists</a>
+        </li>
 
-<div *ngIf="error" class="alert alert-danger">{{ error }}</div>
+        @if (isCreation()) {
+          <li class="breadcrumb-item active" i18n>Create</li>
+        } @else {
+          <li class="breadcrumb-item active" i18n>Edit</li>
 
-<form role="form" (ngSubmit)="formValidated()" [formGroup]="form">
+          <li class="breadcrumb-item active" aria-current="page">
+            @if (videoPlaylistToUpdate) {
+              <a [routerLink]="[ '/my-library/video-playlists/update', videoPlaylistToUpdate?.shortUUID]">
+                {{ videoPlaylistToUpdate?.displayName }}
+              </a>
+            }
+          </li>
+        }
+      </ol>
+    </nav>
 
-  <div class="form-row"> <!-- playlist grid -->
-    <div class="form-group col-12 col-lg-4 col-xl-3">
-      <div *ngIf="isCreation()" class="video-playlist-title" i18n>NEW PLAYLIST</div>
-      <div *ngIf="!isCreation() && videoPlaylistToUpdate" class="video-playlist-title" i18n>PLAYLIST</div>
-    </div>
-
-    <div class="form-group col-12 col-lg-8 col-xl-9">
-
-      <div class="col-md-12 col-xl-6">
-        <div class="form-group">
-          <label i18n for="displayName">Display name</label>
-          <input
-            type="text" id="displayName" class="form-control"
-            formControlName="displayName" [ngClass]="{ 'input-error': formErrors['displayName'] }"
-          >
-          <div *ngIf="formErrors['displayName']" class="form-error">
-            {{ formErrors['displayName'] }}
-          </div>
-        </div>
-
-        <div class="form-group">
-          <label i18n for="description">Description</label>
-          <textarea
-            id="description" formControlName="description"
-            class="form-control" [ngClass]="{ 'input-error': formErrors['description'] }"
-          ></textarea>
-          <div *ngIf="formErrors.description" class="form-error">
-            {{ formErrors.description }}
-          </div>
-        </div>
-      </div>
-
-      <div class="col-md-12 col-xl-6">
-        <div class="form-group">
-          <label i18n for="privacy">Privacy</label>
-          <div class="peertube-select-container">
-            <select id="privacy" formControlName="privacy" class="form-control">
-              <option *ngFor="let privacy of videoPlaylistPrivacies" [value]="privacy.id">{{ privacy.label }}</option>
-            </select>
-          </div>
-
-          <div *ngIf="formErrors.privacy" class="form-error">
-            {{ formErrors.privacy }}
-          </div>
-        </div>
-
-        <div class="form-group">
-          <label i18n>Channel</label>
-
-          <my-select-channel
-            labelForId="videoChannelIdl" [items]="userVideoChannels" formControlName="videoChannelId"
-          ></my-select-channel>
-
-          <div *ngIf="formErrors['videoChannelId']" class="form-error">
-            {{ formErrors['videoChannelId'] }}
-          </div>
-        </div>
-
-        <div class="form-group">
-          <label i18n>Playlist thumbnail</label>
-
-          <my-preview-upload
-            i18n-inputLabel inputLabel="Edit" inputName="thumbnailfile" formControlName="thumbnailfile"
-            previewWidth="223px" previewHeight="122px"
-          ></my-preview-upload>
-        </div>
-      </div>
-
-      <div class="form-row"> <!-- submit placement block -->
-        <div class="col-md-7 col-xl-5"></div>
-        <div class="col-md-5 col-xl-5 d-inline-flex">
-          <input type="submit" value="{{ getFormButtonTitle() }}" [disabled]="!form.valid">
-        </div>
-      </div>
-    </div>
+    @if (isCreation()) {
+      <h2 class="visually-hidden" i18n>NEW PLAYLIST</h2>
+    } @else {
+      <h2 class="visually-hidden" i18n>UPDATE PLAYLIST</h2>
+    }
   </div>
 
-</form>
+  <div class="content-col">
+    <form (ngSubmit)="formValidated()" [formGroup]="form">
+
+      <div class="form-group">
+        <label for="thumbnailfile" i18n>Playlist thumbnail</label>
+
+        <my-image-input i18n-inputLabel inputLabel="Edit" inputName="thumbnailfile" formControlName="thumbnailfile"></my-image-input>
+      </div>
+
+      <div class="form-group">
+        <label i18n for="displayName">Display name</label>
+        <input
+          type="text" id="displayName" class="form-control"
+          formControlName="displayName" [ngClass]="{ 'input-error': formErrors['displayName'] }"
+          >
+        @if (formErrors['displayName']) {
+          <div class="form-error" role="alert">
+            {{ formErrors['displayName'] }}
+          </div>
+        }
+      </div>
+
+      <div class="form-group">
+        <label i18n for="description">Description</label><my-help helpType="markdownText"></my-help>
+        <my-markdown-textarea inputId="description" formControlName="description" [formError]="formErrors['description']"></my-markdown-textarea>
+      </div>
+
+      <div class="form-group">
+        <label i18n for="privacy">Privacy</label>
+        <my-select-options inputId="privacy" [items]="videoPlaylistPrivacies" formControlName="privacy"></my-select-options>
+
+        @if (formErrors.privacy) {
+          <div class="form-error" role="alert">{{ formErrors.privacy }}</div>
+        }
+      </div>
+
+      <div class="form-group">
+        <label for="videoChannelId" i18n>Channel</label>
+
+        @if (isEditor()) {
+          <div class="form-group-description">
+            <div i18n>
+              Only {{ getOwnerAccountDisplayName() }}'s channels are listed
+            </div>
+
+            <div i18n>
+              Changing the owner of a playlist is not supported
+            </div>
+          </div>
+        }
+
+        <my-select-channel-user inputId="videoChannelId" [items]="channels" formControlName="videoChannelId"></my-select-channel-user>
+
+        @if (formErrors['videoChannelId']) {
+          <div class="form-error" role="alert">{{ formErrors['videoChannelId'] }}</div>
+        }
+      </div>
+
+      @if (isCreation() && form.value['videoChannelId']) {
+        <div class="form-group">
+          <my-peertube-checkbox
+            inputName="insertAtFirstPosition"
+            formControlName="insertAtFirstPosition"
+            i18n-labelText
+            labelText="Insert at the first position in your channel's playlist list"
+          >
+            <ng-container ngProjectAs="description">
+              <span i18n>Playlists can be manually sorted in your channel.</span>
+
+              <br />
+
+              <span i18n>By default, new playlists are added at the end of the list.</span>
+            </ng-container>
+          </my-peertube-checkbox>
+        </div>
+      }
+
+      <input type="submit" class="peertube-button primary-button" value="{{ getFormButtonTitle() }}" [disabled]="!form.valid">
+    </form>
+  </div>
+</div>

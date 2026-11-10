@@ -1,0 +1,104 @@
+import { FeedEnclosurePreference, HttpStatusCode, PodcastChapters } from '@peertube/peertube-models'
+import { buildUUID } from '@peertube/peertube-node-utils'
+import { AbstractCommand, OverrideCommandOptions } from '../shared/index.js'
+
+type FeedType = 'videos' | 'video-comments' | 'subscriptions'
+
+export class FeedCommand extends AbstractCommand {
+  getXML (
+    options: OverrideCommandOptions & {
+      feed: FeedType
+      ignoreCache: boolean
+      format?: string
+      query?: { [id: string]: any }
+    }
+  ) {
+    const { feed, format, ignoreCache, query = {} } = options
+    const path = '/feeds/' + feed + '.xml'
+
+    const internalQuery: { [id: string]: string } = {}
+
+    if (ignoreCache) internalQuery.v = buildUUID()
+    if (format) internalQuery.format = format
+
+    return this.getRequestText({
+      ...options,
+
+      path,
+      query: { ...internalQuery, ...query },
+      accept: 'application/xml',
+      implicitToken: false,
+      defaultExpectedStatus: HttpStatusCode.OK_200
+    })
+  }
+
+  getPodcastXML (
+    options: OverrideCommandOptions & {
+      ignoreCache: boolean
+      channelId?: number
+      playlistId?: number
+      enclosurePreference?: FeedEnclosurePreference
+    }
+  ) {
+    const { ignoreCache, channelId, playlistId, enclosurePreference } = options
+    const path = `/feeds/podcast/videos.xml`
+
+    const query: { [id: string]: string } = {}
+
+    if (ignoreCache) query.v = buildUUID()
+    if (channelId) query.videoChannelId = channelId + ''
+    if (playlistId) query.playlistId = playlistId + ''
+    if (enclosurePreference) query.enclosurePreference = enclosurePreference
+
+    return this.getRequestText({
+      ...options,
+
+      path,
+      query,
+      accept: 'application/xml',
+      implicitToken: false,
+      defaultExpectedStatus: HttpStatusCode.OK_200
+    })
+  }
+
+  getJSON (
+    options: OverrideCommandOptions & {
+      feed: FeedType
+      ignoreCache: boolean
+      query?: { [id: string]: any }
+    }
+  ) {
+    const { feed, query = {}, ignoreCache } = options
+    const path = '/feeds/' + feed + '.json'
+
+    const cacheQuery = ignoreCache
+      ? { v: buildUUID() }
+      : {}
+
+    return this.getRequestText({
+      ...options,
+
+      path,
+      query: { ...query, ...cacheQuery },
+      accept: 'application/json',
+      implicitToken: false,
+      defaultExpectedStatus: HttpStatusCode.OK_200
+    })
+  }
+
+  getPodcastChapters (
+    options: OverrideCommandOptions & {
+      videoId: number | string
+    }
+  ) {
+    return this.getRequestBody<PodcastChapters>({
+      ...options,
+
+      path: '/feeds/podcast/video-chapters.json',
+      query: { videoId: options.videoId },
+      accept: 'application/json+chapters',
+      implicitToken: false,
+      defaultExpectedStatus: HttpStatusCode.OK_200
+    })
+  }
+}

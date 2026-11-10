@@ -1,0 +1,303 @@
+import {
+  HttpMethodType,
+  HttpStatusCodeType,
+  PeerTubeProblemDocumentData,
+  ServerErrorCodeType,
+  ServerLogLevel,
+  VideoCreate
+} from '@peertube/peertube-models'
+import { SignupMode } from '@server/lib/signup.ts'
+import { RegisterServerAuthExternalOptions } from '@server/types/index.js'
+import {
+  MAbuseMessage,
+  MAbuseReporter,
+  MAccountBlocklist,
+  MActorFollowActorsDefault,
+  MActorUrl,
+  MBlocklistSubscription,
+  MChangeOwnershipFull,
+  MChannelBannerAccountDefault,
+  MChannelCollaboratorAccount,
+  MChannelSyncChannel,
+  MLocalVideoViewerWithWatchSections,
+  MRegistration,
+  MStreamingPlaylist,
+  MUserAccountUrl,
+  MUserExport,
+  MVideoEmbedDomain,
+  MVideoFile,
+  MVideoFormattableDetails,
+  MVideoId,
+  MVideoImmutable,
+  MVideoLiveSessionReplay,
+  MVideoLiveWithSettingSchedules,
+  MVideoPassword,
+  MVideoPlaylistFull,
+  MVideoPlaylistFullSummary,
+  MVideoThumbnailsBlacklist,
+  MVideoWithBlacklist,
+  MVideoWithRights,
+  MWatchedWordsList,
+  MWatchedWordsSubscription
+} from '@server/types/models/index.js'
+import { MOAuthToken, MOAuthTokenUser } from '@server/types/models/oauth/oauth-token.js'
+import { MPlugin, MServer, MServerBlocklist } from '@server/types/models/server.js'
+import { MVideoImportDefault } from '@server/types/models/video/video-import.js'
+import { MVideoPlaylistElement, MVideoPlaylistElementVideoUrlPlaylistPrivacy } from '@server/types/models/video/video-playlist-element.js'
+import { MAccountVideoRateAccountVideo } from '@server/types/models/video/video-rate.js'
+import { Metadata, File as UploadXFile } from '@uploadx/core'
+import { Job as BullJob } from 'bullmq'
+import { FfprobeData } from 'fluent-ffmpeg'
+import { OutgoingHttpHeaders } from 'http'
+import { Writable } from 'stream'
+import { RegisteredPlugin } from '../../lib/plugins/plugin-manager.js'
+import {
+  MAccountDefault,
+  MActorAccountChannelId,
+  MActorFollowActorsDefaultSubscription,
+  MActorFull,
+  MComment,
+  MCommentOwnerVideoReply,
+  MUserDefault,
+  MVideoAP,
+  MVideoBlacklist,
+  MVideoCaptionVideo,
+  MVideoFull,
+  MVideoRedundancyVideo,
+  MVideoShareActor
+} from './models/index.js'
+import { MRunner, MRunnerJobRunner, MRunnerRegistrationToken } from './models/runners/index.js'
+import { MVideoSource } from './models/video/video-source.js'
+
+declare module 'express' {
+  export interface Request {
+    query: any
+    method: HttpMethodType
+    rawBody: Buffer // Allow plugin routes to access the raw body
+
+    t: (key: string, context?: Record<string, string | number>) => string
+  }
+
+  // ---------------------------------------------------------------------------
+
+  // Upload using multer or uploadx middleware
+  export type MulterOrUploadXFile = UploadXFile | Express.Multer.File
+
+  export type UploadFiles = { [fieldname: string]: MulterOrUploadXFile[] } | MulterOrUploadXFile[]
+
+  // Partial object used by some functions to check the file mimetype/extension
+  export type UploadFileForCheck = {
+    originalname: string
+    mimetype: string
+    size: number
+  }
+
+  export type UploadFilesForCheck = { [fieldname: string]: UploadFileForCheck[] } | UploadFileForCheck[]
+
+  // ---------------------------------------------------------------------------
+
+  export type VideoUploadMetadata = {
+    duration?: number
+
+    // Local path to the uploaded video file or temporary path for staged uploads (filled by `makeUploadXFileAvailableForHookIfNeeded()`)
+    path: string
+
+    // Resumable uploads streamed to object storage staging
+    stagingKey?: string
+    ffmpegInput?: string
+
+    // Presigned URL of the staged upload, given to plugins of upload accept hooks
+    url?: string
+  }
+
+  // Upload file with a duration added by our middleware
+  export type VideoLegacyUploadFile = Pick<Express.Multer.File, 'path' | 'filename' | 'size' | 'originalname'> & VideoUploadMetadata
+
+  // Our custom UploadXFile object using our custom metadata
+  export type CustomUploadXFile<T extends Metadata> = UploadXFile & { metadata: T }
+
+  export type VideoUploadXFile<T extends Metadata> = CustomUploadXFile<T> & VideoUploadMetadata & {
+    filename: string
+    originalname: string
+  }
+
+  export type ResumableUploadImageFile = Express.Multer.File & {
+    // Set when resumable uploads are staged in object storage, so the process receiving the last chunk can get it
+    // `path` is then only set once this process downloaded the file (makeResumableUploadImagesAvailable())
+    stagingKey?: string
+  }
+
+  // Extends Metadata property of UploadX object when uploading a video
+  export type UploadNewVideoXFileMetadata = Metadata & VideoCreate & {
+    previewfile: ResumableUploadImageFile[]
+    thumbnailfile: ResumableUploadImageFile[]
+  }
+
+  // Extends Response with added functions and potential variables passed by middlewares
+  interface Response {
+    fail: (options: {
+      message: string
+
+      title?: string
+      status?: HttpStatusCodeType
+      type?: ServerErrorCodeType
+      instance?: string
+
+      data?: PeerTubeProblemDocumentData
+
+      logLevel?: ServerLogLevel // Default debug
+      tags?: string[]
+    }) => void
+
+    locals: {
+      signupMode?: SignupMode
+
+      requestStart: number
+
+      apicacheGroups: string[]
+
+      apicache: {
+        content: string | Buffer
+        write: Writable['write']
+        writeHead: Response['writeHead']
+        end: Response['end']
+        cacheable: boolean
+        headers: OutgoingHttpHeaders
+      }
+
+      docUrl?: string
+
+      customConfigFile?: Record<string, any>
+
+      ffprobe?: FfprobeData
+
+      videoAPI?: MVideoFormattableDetails
+      videoAP?: MVideoAP
+      videoFull?: MVideoFull
+      videoImmutable?: MVideoImmutable
+      videoWithBlacklist?: MVideoWithBlacklist
+      videoWithRights?: MVideoWithRights
+      videoThumbnailsBlacklist?: MVideoThumbnailsBlacklist
+      videoId?: MVideoId
+
+      videoLive?: MVideoLiveWithSettingSchedules
+      videoLiveSession?: MVideoLiveSessionReplay
+
+      videoShare?: MVideoShareActor
+
+      videoSource?: MVideoSource
+
+      videoFile?: MVideoFile
+
+      uploadVideoFileResumableMetadata?: {
+        mimetype: string
+        size: number
+        originalname: string
+      }
+      uploadVideoFileResumable?: VideoUploadXFile<UploadNewVideoXFileMetadata>
+      updateVideoFileResumable?: VideoUploadXFile<Metadata>
+      importUserFileResumable?: VideoUploadXFile<Metadata>
+
+      videoImport?: MVideoImportDefault
+
+      // Torrent file of a new video import, parsed and handed over to the process that will run the import job
+      videoImportTorrentFile?: {
+        name: string
+        torrentName: string
+
+        torrentPath: string | null
+        torrentStagingKey?: string
+      }
+
+      videoBlacklist?: MVideoBlacklist
+
+      videoCaption?: MVideoCaptionVideo
+
+      abuse?: MAbuseReporter
+      abuseMessage?: MAbuseMessage
+
+      videoStreamingPlaylist?: MStreamingPlaylist
+
+      videoChannel?: MChannelBannerAccountDefault
+      videoChannelSync?: MChannelSyncChannel
+
+      videoPlaylistFull?: MVideoPlaylistFull
+      videoPlaylistSummary?: MVideoPlaylistFullSummary
+
+      videoPlaylistElement?: MVideoPlaylistElement
+      videoPlaylistElementAP?: MVideoPlaylistElementVideoUrlPlaylistPrivacy
+
+      accountVideoRate?: MAccountVideoRateAccountVideo
+
+      videoCommentFull?: MCommentOwnerVideoReply
+      videoCommentThread?: MComment
+
+      videoPassword?: MVideoPassword
+
+      follow?: MActorFollowActorsDefault
+      subscription?: MActorFollowActorsDefaultSubscription
+
+      changeOwnership?: MChangeOwnershipFull
+      changeOwnershipNextOwner?: MAccountDefault
+
+      videoEmbedDomain?: MVideoEmbedDomain
+
+      account?: MAccountDefault
+
+      actorUrl?: MActorUrl
+      actorFull?: MActorFull
+
+      user?: MUserDefault
+      userRegistration?: MRegistration
+      // For verification links
+      userEmail?: MUserDefault
+      userPendingEmail?: MUserDefault
+
+      server?: MServer
+
+      videoRedundancy?: MVideoRedundancyVideo
+
+      accountBlock?: MAccountBlocklist
+      serverBlock?: MServerBlocklist
+
+      oauth?: {
+        token: MOAuthTokenUser
+      }
+
+      signature?: {
+        actor: MActorAccountChannelId
+      }
+
+      videoFileToken?: {
+        user: MUserAccountUrl
+      }
+
+      authenticated?: boolean
+
+      registeredPlugin?: RegisteredPlugin
+
+      externalAuth?: RegisterServerAuthExternalOptions
+
+      plugin?: MPlugin
+
+      localViewerFull?: MLocalVideoViewerWithWatchSections
+
+      runner?: MRunner
+      runnerRegistrationToken?: MRunnerRegistrationToken
+      runnerJob?: MRunnerJobRunner
+
+      userExport?: MUserExport
+
+      watchedWordsList?: MWatchedWordsList
+      watchedWordsSubscription?: MWatchedWordsSubscription
+
+      tokenSession?: MOAuthToken
+
+      channelCollaborator?: MChannelCollaboratorAccount
+
+      blocklistSubscription?: MBlocklistSubscription
+
+      job?: BullJob
+    }
+  }
+}

@@ -1,110 +1,97 @@
+import { Injectable, inject } from '@angular/core'
+import debug from 'debug'
 import { fromEvent } from 'rxjs'
 import { debounceTime } from 'rxjs/operators'
-import { Injectable } from '@angular/core'
-import { GlobalIconName } from '@app/shared/shared-icons'
-import { sortObjectComparator } from '@shared/core-utils/miscs/miscs'
-import { ServerConfig } from '@shared/models/server'
-import { ScreenService } from '../wrappers'
+import { PeerTubeRouterService } from '../routing'
+import { LocalStorageService, ScreenService } from '../wrappers'
 
-export type MenuLink = {
-  icon: GlobalIconName
-  label: string
-  menuLabel: string
-  path: string
-  priority: number
-}
+const debugLogger = debug('peertube:menu')
 
 @Injectable()
 export class MenuService {
-  isMenuDisplayed = true
-  isMenuChangedByUser = false
-  menuWidth = 240  // should be kept equal to $menu-width
+  private screenService = inject(ScreenService)
+  private localStorageService = inject(LocalStorageService)
+  private peertubeRouterService = inject(PeerTubeRouterService)
 
-  constructor (
-    private screenService: ScreenService
-  ) {
-    // Do not display menu on small or touch screens
-    if (this.screenService.isInSmallView() || this.screenService.isInTouchScreen()) {
-      this.setMenuDisplay(false)
+  private static LS_MENU_COLLAPSED = 'menu-collapsed'
+
+  private menuCollapsed = false
+  private menuChangedByUser = false
+
+  constructor () {
+    // Do not display menu on small screens
+    if (this.screenService.isInMenuOverlayView() || this.hasMenuCollapsedByUrl(window.location.pathname)) {
+      this.setMenuCollapsed(true)
+    } else {
+      this.setMenuCollapsed(this.localStorageService.getItem(MenuService.LS_MENU_COLLAPSED) === 'true')
+      this.menuChangedByUser = this.menuCollapsed
     }
 
     this.handleWindowResize()
+
+    this.peertubeRouterService.getNavigationEndEvents()
+      .subscribe(e => {
+        if (this.hasMenuCollapsedByUrl(e.url) || this.hasMenuCollapsedByUrl(e.urlAfterRedirects)) {
+          this.collapseByUrl()
+          return
+        }
+      })
+  }
+
+  private hasMenuCollapsedByUrl (url: string) {
+    const collapsedBaseUrls = [
+      '/videos/publish',
+      '/videos/manage/',
+      '/admin/settings/config',
+      '/my-library/video-channels/manage',
+      '/my-library/video-channels/create'
+    ]
+
+    for (const collapsedBaseUrl of collapsedBaseUrls) {
+      if (url.startsWith(collapsedBaseUrl)) {
+        debugLogger('Menu should be collapsed by URL ' + url)
+
+        return true
+      }
+    }
+
+    return false
+  }
+
+  private collapseByUrl () {
+    if (this.menuCollapsed) return
+
+    this.setMenuCollapsed(true)
   }
 
   toggleMenu () {
-    this.setMenuDisplay(!this.isMenuDisplayed)
-    this.isMenuChangedByUser = true
+    this.setMenuCollapsed(!this.menuCollapsed)
+    this.menuChangedByUser = true
+
+    this.localStorageService.setItem(MenuService.LS_MENU_COLLAPSED, this.menuCollapsed + '')
   }
 
-  isDisplayed () {
-    return this.isMenuDisplayed
+  isCollapsed () {
+    return this.menuCollapsed
   }
 
-  setMenuDisplay (display: boolean) {
-    this.isMenuDisplayed = display
+  setMenuCollapsed (collapsed: boolean) {
+    this.menuCollapsed = collapsed
 
-    if (!this.screenService.isInTouchScreen()) return
-
-    // On touch screens, lock body scroll and display content overlay when memu is opened
-    if (this.isMenuDisplayed) {
+    if (this.menuCollapsed) {
+      document.body.classList.remove('menu-open')
+    } else {
       document.body.classList.add('menu-open')
-      this.screenService.onFingerSwipe('left', () => { this.setMenuDisplay(false) })
-      return
     }
-
-    document.body.classList.remove('menu-open')
   }
 
   onResize () {
-    this.isMenuDisplayed = window.innerWidth >= 800 && !this.isMenuChangedByUser
-  }
-
-  buildCommonLinks (config: ServerConfig) {
-    let entries: MenuLink[] = [
-      {
-        icon: 'globe' as 'globe',
-        label: $localize`Discover videos`,
-        menuLabel: $localize`Discover`,
-        path: '/videos/overview',
-        priority: 150
-      },
-      {
-        icon: 'trending' as 'trending',
-        label: $localize`Trending videos`,
-        menuLabel: $localize`Trending`,
-        path: '/videos/trending',
-        priority: 140
-      },
-      {
-        icon: 'recently-added' as 'recently-added',
-        label: $localize`Recently added videos`,
-        menuLabel: $localize`Recently added`,
-        path: '/videos/recently-added',
-        priority: 130
-      },
-      {
-        icon: 'local' as 'local',
-        label: $localize`Local videos`,
-        menuLabel: $localize`Local videos`,
-        path: '/videos/local',
-        priority: 120
-      }
-    ]
-
-    if (config.homepage.enabled) {
-      entries.push({
-        icon: 'home' as 'home',
-        label: $localize`Home`,
-        menuLabel: $localize`Home`,
-        path: '/home',
-        priority: 160
-      })
+    if (this.screenService.isInSmallView() && !this.menuChangedByUser) {
+      this.setMenuCollapsed(true)
     }
-
-    entries = entries.sort(sortObjectComparator('priority', 'desc'))
-
-    return entries
   }
+
+  // ---------------------------------------------------------------------------
 
   private handleWindowResize () {
     // On touch screens, do not handle window resize event since opened menu is handled with a content overlay

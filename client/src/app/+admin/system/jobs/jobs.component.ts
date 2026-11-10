@@ -1,97 +1,156 @@
+import { CommonModule } from '@angular/common'
+import { ChangeDetectionStrategy, Component, inject, viewChild } from '@angular/core'
+import { FormsModule } from '@angular/forms'
+import { RouterLink } from '@angular/router'
+import { ConfirmService, Notifier, RestPagination, ServerService } from '@app/core'
+import { AdvancedFilterDef } from '@app/shared/shared-forms/advanced-input-filter.component'
+import { ButtonComponent } from '@app/shared/shared-main/buttons/button.component'
+import { PeerTubeBadgeService } from '@app/shared/shared-main/common/peertube-badge.service'
+import { Job, JobState, JobType } from '@peertube/peertube-models'
+import { arrayOfAllFactory } from '@peertube/peertube-typescript-utils'
 import { SortMeta } from 'primeng/api'
-import { Component, OnInit } from '@angular/core'
-import { Notifier, RestPagination, RestTable } from '@app/core'
-import { peertubeLocalStorage } from '@root-helpers/peertube-web-storage'
-import { Job, JobState, JobType } from '@shared/models'
-import { JobStateClient } from '../../../../types/job-state-client.type'
-import { JobTypeClient } from '../../../../types/job-type-client.type'
+import { NumberFormatterPipe } from '../../../shared/shared-main/common/number-formatter.pipe'
+import { TableColumnInfo, TableComponent } from '../../../shared/shared-tables/table.component'
 import { JobService } from './job.service'
+
+type ColumnName = 'id' | 'type' | 'priority' | 'state' | 'progress' | 'createdAt' | 'processed' | 'actions'
+type DataLoaderParameter = Parameters<JobsComponent['_dataLoader']>[0]
 
 @Component({
   selector: 'my-jobs',
   templateUrl: './jobs.component.html',
-  styleUrls: [ './jobs.component.scss' ]
+  styleUrls: [ './jobs.component.scss' ],
+  changeDetection: ChangeDetectionStrategy.Eager,
+  imports: [
+    CommonModule,
+    FormsModule,
+    TableComponent,
+    NumberFormatterPipe,
+    RouterLink,
+    ButtonComponent
+  ]
 })
-export class JobsComponent extends RestTable implements OnInit {
-  private static LOCAL_STORAGE_STATE = 'jobs-list-state'
-  private static LOCAL_STORAGE_TYPE = 'jobs-list-type'
+export class JobsComponent {
+  private server = inject(ServerService)
+  private jobsService = inject(JobService)
+  private peertubeBadgeService = inject(PeerTubeBadgeService)
+  private notifier = inject(Notifier)
+  private confirm = inject(ConfirmService)
 
-  jobState?: JobStateClient | 'all'
-  jobStates: JobStateClient[] = [ 'active', 'completed', 'failed', 'waiting', 'delayed' ]
+  readonly table = viewChild<TableComponent<Job, DataLoaderParameter, ColumnName>>('table')
 
-  jobType: JobTypeClient = 'all'
-  jobTypes: JobTypeClient[] = [
-    'all',
+  private jobStates: JobState[] = [ 'active', 'completed', 'failed', 'waiting', 'delayed' ]
 
+  private jobTypes = arrayOfAllFactory<JobType>()([
+    'activitypub-cleaner',
     'activitypub-follow',
+    'activitypub-http-broadcast-parallel',
     'activitypub-http-broadcast',
     'activitypub-http-fetcher',
     'activitypub-http-unicast',
     'activitypub-refresher',
-    'activitypub-cleaner',
     'actor-keys',
+    'after-video-channel-import',
+    'build-automatic-tags',
+    'build-object-automatic-tags',
+    'create-user-export',
     'email',
+    'federate-video',
+    'generate-video-storyboard',
+    'import-user-archive',
+    'manage-video-torrent',
+    'move-to-file-system',
+    'move-to-object-storage',
+    'notify',
+    'transcoding-job-builder',
+    'video-channel-import',
+    'video-duplicate',
     'video-file-import',
+    'video-files-lifecycle',
     'video-import',
     'video-live-ending',
     'video-redundancy',
+    'video-studio-edition',
     'video-transcoding',
-    'videos-views'
+    'video-transcription',
+    'videos-stats'
+  ])
+
+  readonly inputFilters: AdvancedFilterDef<DataLoaderParameter>[] = [
+    {
+      type: 'select',
+      key: 'type',
+      title: $localize`Job type`,
+      clearable: true,
+      filter: true,
+      items: this.jobTypes.map(i => ({
+        id: i,
+        label: i.toLocaleUpperCase(),
+        classes: [ 'pt-badge', this.getRandomJobTypeBadge(i) ]
+      }))
+    },
+    {
+      type: 'select',
+      key: 'state',
+      title: $localize`Job state`,
+      clearable: true,
+      items: this.jobStates.map(s => ({
+        id: s,
+        label: s.toLocaleUpperCase(),
+        classes: this.getJobStateClasses(s)
+      }))
+    }
   ]
 
-  jobs: Job[] = []
-  totalRecords: number
-  sort: SortMeta = { field: 'createdAt', order: -1 }
-  pagination: RestPagination = { count: this.rowsPerPage, start: 0 }
+  columns: TableColumnInfo<ColumnName>[] = [
+    { id: 'id', class: 'job-id', label: $localize`ID`, sortable: false },
+    { id: 'type', class: 'job-type', label: $localize`Type`, sortable: false },
+    { id: 'priority', class: 'job-priority', label: $localize`Priority`, labelSmall: $localize`(1 = highest priority)`, sortable: false },
+    { id: 'state', class: 'job-state', label: $localize`State`, sortable: false },
+    { id: 'progress', class: 'job-progress', label: $localize`Progress`, isDisplayed: () => this.displayGlobalProgress, sortable: false },
+    { id: 'createdAt', class: 'job-date', label: $localize`Created`, sortable: true },
+    { id: 'processed', label: $localize`Processed/Finished`, sortable: false },
+    { id: 'actions', label: $localize`Actions`, sortable: false }
+  ]
+  dataLoader: typeof this._dataLoader
 
-  constructor (
-    private notifier: Notifier,
-    private jobsService: JobService
-  ) {
-    super()
+  displayGlobalProgress = true
+
+  constructor () {
+    this.dataLoader = this._dataLoader.bind(this)
   }
 
-  ngOnInit () {
-    this.loadJobStateAndType()
-    this.initialize()
-  }
-
-  getIdentifier () {
-    return 'JobsComponent'
-  }
-
-  getJobStateClass (state: JobStateClient) {
+  getJobStateClasses (state: JobState): string[] {
     switch (state) {
+      case undefined:
+      case null:
+        return []
+
       case 'active':
-        return 'badge-blue'
+        return [ 'pt-badge', 'badge-blue' ]
+
       case 'completed':
-        return 'badge-green'
+        return [ 'pt-badge', 'badge-green' ]
+
       case 'delayed':
-        return 'badge-brown'
+      case 'prioritized':
+      case 'wait':
+        return [ 'pt-badge', 'badge-brown' ]
+
       case 'failed':
-        return 'badge-red'
+        return [ 'pt-badge', 'badge-red' ]
+
       case 'waiting':
-        return 'badge-yellow'
+      case 'waiting-children':
+        return [ 'pt-badge', 'badge-yellow' ]
     }
+
+    // Do not remove, to ensure all cases are handled by the switch
+    return state
   }
 
-  getColspan () {
-    if (this.jobState === 'all' && this.hasProgress()) return 7
-
-    if (this.jobState === 'all' || this.hasProgress()) return 6
-
-    return 5
-  }
-
-  onJobStateOrTypeChanged () {
-    this.pagination.start = 0
-
-    this.reloadData()
-    this.saveJobStateAndType()
-  }
-
-  hasProgress () {
-    return this.jobType === 'all' || this.jobType === 'video-transcoding'
+  hasProgress (job: Job) {
+    return job.type === 'video-transcoding'
   }
 
   getProgress (job: Job) {
@@ -100,44 +159,57 @@ export class JobsComponent extends RestTable implements OnInit {
     return ''
   }
 
-  refresh () {
-    this.jobs = []
-    this.totalRecords = 0
-
-    this.reloadData()
+  getRandomJobTypeBadge (type: string) {
+    return this.peertubeBadgeService.getRandomBadge('type', type)
   }
 
-  protected reloadData () {
-    let jobState = this.jobState as JobState
-    if (this.jobState === 'all') jobState = null
+  getStateFilterTitle (state: string) {
+    return $localize`Filter by state: ${state.toLocaleUpperCase()}`
+  }
 
-    this.jobsService
-      .getJobs({
-        jobState,
-        jobType: this.jobType,
-        pagination: this.pagination,
-        sort: this.sort
-      })
-      .subscribe(
-        resultList => {
-          this.jobs = resultList.data
-          this.totalRecords = resultList.total
+  getTypeFilterTitle (type: string) {
+    return $localize`Filter by type: ${type.toLocaleUpperCase()}`
+  }
+
+  isRunnerEnabled () {
+    return this.server.isRemoteRunnersEnabled()
+  }
+
+  async cancelJob (job: Job) {
+    if (!job.canCancel) return
+
+    const res = await this.confirm.confirm($localize`Are you sure you want to cancel job ${job.id}?`, $localize`Cancel job`, {
+      confirmButtonText: $localize`Cancel job`,
+      cancelButtonText: $localize`Keep job`
+    })
+
+    if (!res) return
+
+    this.jobsService.cancelJob({ jobId: job.id, jobType: job.type })
+      .subscribe({
+        next: () => {
+          this.notifier.success($localize`Job ${job.id} cancellation requested`)
+          this.table()?.loadData()
         },
-
-        err => this.notifier.error(err.message)
-      )
+        error: err => this.notifier.error(err.message, $localize`Cannot cancel job ${job.id}`)
+      })
   }
 
-  private loadJobStateAndType () {
-    const state = peertubeLocalStorage.getItem(JobsComponent.LOCAL_STORAGE_STATE)
-    if (state) this.jobState = state as JobState
+  private _dataLoader (options: {
+    pagination: RestPagination
+    sort: SortMeta
+    type?: JobType
+    state?: JobState
+  }) {
+    const { pagination, sort, type, state } = options
 
-    const type = peertubeLocalStorage.getItem(JobsComponent.LOCAL_STORAGE_TYPE)
-    if (type) this.jobType = type as JobType
-  }
+    this.displayGlobalProgress = !type || type === 'video-transcoding'
 
-  private saveJobStateAndType () {
-    peertubeLocalStorage.setItem(JobsComponent.LOCAL_STORAGE_STATE, this.jobState)
-    peertubeLocalStorage.setItem(JobsComponent.LOCAL_STORAGE_TYPE, this.jobType)
+    return this.jobsService.listJobs({
+      jobState: state,
+      jobType: type,
+      pagination,
+      sort
+    })
   }
 }

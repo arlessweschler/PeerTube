@@ -7,8 +7,8 @@
 <p align=center>
   <strong><a href="https://joinpeertube.org">Website</a></strong>
   | <strong><a href="https://joinpeertube.org/instances">Join an instance</a></strong>
-  | <strong><a href="#package-create-your-own-instance">Create an instance</a></strong>
-  | <strong><a href="#contact">Chat with us</a></strong>
+  | <strong><a href="https://github.com/Chocobozzz/PeerTube/blob/develop/README.md#package-create-your-own-instance">Create an instance</a></strong>
+  | <strong><a href="https://github.com/Chocobozzz/PeerTube/blob/develop/README.md#contact">Chat with us</a></strong>
   | <strong><a href="https://framasoft.org/en/#soutenir">Donate</a></strong>
 </p>
 
@@ -22,43 +22,31 @@ Be part of a network of multiple small federated, interoperable video hosting pr
 
 <p align="center">
   <a href="https://framasoft.org">
-    <img width="150px" src="https://lutim.cpy.re/FeRgHH8r.png" alt="Framasoft logo"/>
+    <img width="150px" src="https://asso.framasoft.org/pic/7dcsknbA/8XSBIpLF.png" alt="Framasoft logo"/>
   </a>
 </p>
 
-<p align="center">
-  <strong>Client</strong>
+<div align="center">
+  <a href="https://github.com/Chocobozzz/PeerTube/actions?query=workflow%3A%22Test%22+branch%3Adevelop">
+    <img src="https://github.com/Chocobozzz/PeerTube/workflows/Test/badge.svg" alt="GitHub Test Status">
+  </a>
 
-  <br />
-
-  <a href="https://automate.browserstack.com/public-build/VHUxYy9zYnZqWnkxTTcyNEpPRVdzY2VzN1VhY3hBQUIrYTk2NGFtMnMvTT0tLWxuMk1vVnBzeDJ4cFpFY1JEK2xjSUE9PQ==--cf445693d1fc03efd86a3a5030d079a0de3ece7a">
-    <img src="https://automate.browserstack.com/badge.svg?badge_key=VHUxYy9zYnZqWnkxTTcyNEpPRVdzY2VzN1VhY3hBQUIrYTk2NGFtMnMvTT0tLWxuMk1vVnBzeDJ4cFpFY1JEK2xjSUE9PQ==--cf445693d1fc03efd86a3a5030d079a0de3ece7a"/>
+  <a href="https://automate.browserstack.com/public-build/d0ZMeGpSUFRjaUpDNnN3NUdKY1l2TnNpTGVJaUI0bm9hYkNxMTRtQ1lHTT0tLVZQa2crbFB1c2RDZUl1Y1Blck02SFE9PQ==--5f956d6857c50e06a0b7b1fe405fb93d0f2d0e11%">
+    <img src="https://automate.browserstack.com/badge.svg?badge_key=d0ZMeGpSUFRjaUpDNnN3NUdKY1l2TnNpTGVJaUI0bm9hYkNxMTRtQ1lHTT0tLVZQa2crbFB1c2RDZUl1Y1Blck02SFE9PQ==--5f956d6857c50e06a0b7b1fe405fb93d0f2d0e11%" alt="BrowserStack Status">
   </a>
 
   <a href="https://weblate.framasoft.org/projects/peertube/angular/">
-    <img src="https://weblate.framasoft.org/widgets/peertube/-/angular/svg-badge.svg"/>
-  </a>
-</p>
-
-<p align="center">
-  <strong>Server</strong>
-
-  <br />
-
-  <a href="https://github.com/Chocobozzz/PeerTube/actions?query=workflow%3A%22Test+Suite%22+branch%3Adevelop">
-    <img alt="test suite status" src="https://github.com/Chocobozzz/PeerTube/workflows/Test%20Suite/badge.svg" />
+    <img src="https://weblate.framasoft.org/widgets/peertube/-/angular/svg-badge.svg" alt="Weblate Status">
   </a>
 
-  <a href="https://standardjs.com/">
-    <img src="https://img.shields.io/badge/code%20style-standard-brightgreen.svg" alt="JavaScript Style Guide" />
-  </a>
-</p>
+  <a href="https://digitalpublicgoods.net/r/peertube"><img src="https://img.shields.io/badge/Verified-DPG-3333AB?logo=data:image/svg%2bxml;base64,PHN2ZyB3aWR0aD0iMzEiIGhlaWdodD0iMzMiIHZpZXdCb3g9IjAgMCAzMSAzMyIgZmlsbD0ibm9uZSIgeG1sbnM9Imh0dHA6Ly93d3cudzMub3JnLzIwMDAvc3ZnIj4KPHBhdGggZD0iTTE0LjIwMDggMjEuMzY3OEwxMC4xNzM2IDE4LjAxMjRMMTEuNTIxOSAxNi40MDAzTDEzLjk5MjggMTguNDU5TDE5LjYyNjkgMTIuMjExMUwyMS4xOTA5IDEzLjYxNkwxNC4yMDA4IDIxLjM2NzhaTTI0LjYyNDEgOS4zNTEyN0wyNC44MDcxIDMuMDcyOTdMMTguODgxIDUuMTg2NjJMMTUuMzMxNCAtMi4zMzA4MmUtMDVMMTEuNzgyMSA1LjE4NjYyTDUuODU2MDEgMy4wNzI5N0w2LjAzOTA2IDkuMzUxMjdMMCAxMS4xMTc3TDMuODQ1MjEgMTYuMDg5NUwwIDIxLjA2MTJMNi4wMzkwNiAyMi44Mjc3TDUuODU2MDEgMjkuMTA2TDExLjc4MjEgMjYuOTkyM0wxNS4zMzE0IDMyLjE3OUwxOC44ODEgMjYuOTkyM0wyNC44MDcxIDI5LjEwNkwyNC42MjQxIDIyLjgyNzdMMzAuNjYzMSAyMS4wNjEyTDI2LjgxNzYgMTYuMDg5NUwzMC42NjMxIDExLjExNzdMMjQuNjI0MSA5LjM1MTI3WiIgZmlsbD0id2hpdGUiLz4KPC9zdmc+Cg==" alt="DPG Badge"/></a>
+</div>
 
 <br />
 
 <p align="center">
-  <a href="https://framatube.org/videos/watch/217eefeb-883d-45be-b7fc-a788ad8507d3">
-    <img src="https://lutim.cpy.re/9CLXh0Ys.png" alt="screenshot" />
+  <a href="https://framatube.org/w/kkGMgK9ZtnKfYAgnEtQxbv">
+    <img src="https://asso.framasoft.org/pic/wI6n1YIH/hKfCL8Xi.png" alt="screenshot" />
   </a>
 </p>
 
@@ -85,7 +73,7 @@ To learn more:
   | <strong><a href="https://joinpeertube.org/faq#what-are-the-peertube-features-for-administrators">All features for administrators</a></strong>
 </p>
 
-<img src="https://lutim.cpy.re/AHbctLjn.png" align="left" height="300px"/>
+<img src="https://asso.framasoft.org/pic/z6py52z2/61ZyIm65.png" align="left" height="300px"/>
 <h3 align="left">Video streaming, even in live!</h3>
 <p align="left">
 Just upload your videos, and be sure they will stream anywhere. Add a description, some tags and your video will be discoverable by the entire video fediverse, not just your instance. You can even embed a player on your favorite website!
@@ -96,7 +84,7 @@ You are used to hosting live events? We got you covered too! Start livestreaming
 
 ---
 
-<img src="https://lutim.cpy.re/cxWccUK7.png" align="right" height="200px"/>
+<img src="https://asso.framasoft.org/pic/lYrgaP2N/Sj3hgkeo.png" align="right" height="200px"/>
 
 <h3 align="right">Keep in touch with video creators</h3>
 <p align="right">
@@ -105,7 +93,7 @@ Follow your favorite channels from PeerTube or really any other place. No need t
 
 ---
 
-<img src="https://lutim.cpy.re/K07EhFbt.png" align="left" height="200px"/>
+<img src="https://asso.framasoft.org/pic/UbNnLlzV/Sx0PSrH1.png" align="left" height="200px"/>
 
 <h3 align="left">An interface to call home</h3>
 <p align="left">
@@ -116,10 +104,10 @@ Be it as a user or an instance administrator, you can decide what your experienc
 
 <h3 align="right">Communities that help each other</h3>
 <p align="right">
-In addition to visitors using WebTorrent to share the load among them, instances can help each other by caching one another's videos. This way even small instances have a way to show content to a wider audience, as they will be shouldered by friend instances (more about that in our <a href="https://docs.joinpeertube.org/contribute-architecture?id=redundancy-between-instances">redundancy guide</a>).
+In addition to visitors using P2P with WebRTC to share the load among them, instances can help each other by caching one another's videos. This way even small instances have a way to show content to a wider audience, as they will be shouldered by friend instances (more about that in our <a href="https://docs.joinpeertube.org/contribute/architecture#redundancy-between-instances">redundancy guide</a>).
 </p>
 <p align="right">
-Content creators can get help from their viewers in the simplest way possible: a support button showing a message linking to their donation accounts or really anything else. No more pay-per-view and advertisements that hurt visitors and <strike>incentivize</strike> alter creativity (more about that in our <a href="https://github.com/Chocobozzz/PeerTube/blob/develop/FAQ.md">FAQ</a>).
+Content creators can get help from their viewers in the simplest way possible: a support button showing a message linking to their donation accounts or really anything else. No more pay-per-view and advertisements that hurt visitors and alter creativity (more about that in our <a href="https://github.com/Chocobozzz/PeerTube/blob/develop/FAQ.md">FAQ</a>).
 </p>
 
 
@@ -130,24 +118,21 @@ Content creators can get help from their viewers in the simplest way possible: a
 You don't need to be a programmer to help!
 
 You can give us your feedback, report bugs, help us translate PeerTube, write documentation, and more. Check out the [contributing
-guide](https://github.com/Chocobozzz/PeerTube/blob/develop/.github/CONTRIBUTING.md) to know how, it takes less than 2 minutes to get started. :wink:
+guide](https://docs.joinpeertube.org/contribute/getting-started) to know how, it takes less than 2 minutes to get started. :wink:
 
-You can also join the cheerful bunch that makes our community:
+You can also join the cheerful bunch that makes our community<a name="contact"></a>:
 
-* Chat<a name="contact"></a>:
-  * Matrix (bridged on IRC and [Discord](https://discord.gg/wj8DDUT)) : **[#peertube:matrix.org](https://matrix.to/#/#peertube:matrix.org)**
-  * IRC : **[#peertube on irc.libera.chat:6697](https://kiwiirc.com/nextclient/irc.libera.chat/#peertube)**
-* Forum:
-  * Framacolibri: [https://framacolibri.org/c/peertube](https://framacolibri.org/c/peertube)
+* Matrix (bridged on [Discord](https://discord.gg/wj8DDUT)): **[#peertube:matrix.org](https://matrix.to/#/#peertube:matrix.org)**
+* Forum: [https://framacolibri.org/c/peertube](https://framacolibri.org/c/peertube)
 
 Feel free to reach out if you have any questions or ideas! :speech_balloon:
 
 :package: Create your own instance
 ----------------------------------------------------------------
 
-See the [production guide](https://github.com/Chocobozzz/PeerTube/blob/develop/support/doc/production.md), which is the recommended way to install or upgrade PeerTube. For hardware requirements, see [Should I have a big server to run PeerTube?](https://joinpeertube.org/faq#should-i-have-a-big-server-to-run-peertube) in the FAQ.
+See the [production guide](https://docs.joinpeertube.org/install/any-os), which is the recommended way to install or upgrade PeerTube. For hardware requirements, see [Should I have a big server to run PeerTube?](https://joinpeertube.org/faq#should-i-have-a-big-server-to-run-peertube) in the FAQ.
 
-See the [community packages](https://docs.joinpeertube.org/install-unofficial), which cover various platforms (including [YunoHost](https://install-app.yunohost.org/?app=peertube) and [Docker](https://github.com/Chocobozzz/PeerTube/blob/develop/support/doc/docker.md)).
+See the [community packages](https://docs.joinpeertube.org/install/unofficial), which cover various platforms (including [YunoHost](https://install-app.yunohost.org/?app=peertube) and [Docker](https://github.com/Chocobozzz/PeerTube/blob/develop/support/doc/docker.md)).
 
 :book: Documentation
 ----------------------------------------------------------------
@@ -156,31 +141,37 @@ If you have a question, please try to find the answer in the [FAQ](https://joinp
 
 ### User documentation
 
-See the [user documentation](https://docs.joinpeertube.org/use-setup-account).
+See the [user documentation](https://docs.joinpeertube.org/use/setup-account).
 
 ### Admin documentation
 
 See [how to create your own instance](https://github.com/Chocobozzz/PeerTube/blob/develop/README.md#package-create-your-own-instance).
 
-See the more general [admin documentation](https://docs.joinpeertube.org/admin-following-instances).
+See the more general [admin documentation](https://docs.joinpeertube.org/admin/following-instances).
 
 ### Tools documentation
 
-Learn how to import/upload videos from CLI or admin your PeerTube instance with the [tools documentation](https://docs.joinpeertube.org/maintain-tools).
+Learn how to import/upload videos from CLI or admin your PeerTube instance with the [tools documentation](https://docs.joinpeertube.org/maintain/tools).
 
 ### Technical documentation
 
-See the [architecture blueprint](https://docs.joinpeertube.org/contribute-architecture) for a more detailed explanation of the architectural choices.
+See the [architecture blueprint](https://docs.joinpeertube.org/contribute/architecture) for a more detailed explanation of the architectural choices.
 
 See our REST API documentation:
   * OpenAPI 3.0.0 schema: [/support/doc/api/openapi.yaml](https://github.com/Chocobozzz/PeerTube/blob/develop/support/doc/api/openapi.yaml)
   * Spec explorer: [docs.joinpeertube.org/api-rest-reference.html](https://docs.joinpeertube.org/api-rest-reference.html)
 
-See our [ActivityPub documentation](https://docs.joinpeertube.org/api-activitypub).
+See our [ActivityPub documentation](https://docs.joinpeertube.org/api/activitypub).
 
 ## License
 
-Copyright (C) 2015-2021 PeerTube Contributors (see [CREDITS.md](CREDITS.md))
+### Logo
+
+[CC BY-SA 4.0](https://creativecommons.org/licenses/by-sa/4.0/), by [Framasoft](https://framasoft.org)
+
+### Code
+
+Copyright (C) 2015-2025 PeerTube Contributors (see [CREDITS.md](/CREDITS.md))
 
 This program is free software: you can redistribute it and/or modify
 it under the terms of the GNU Affero General Public License as published

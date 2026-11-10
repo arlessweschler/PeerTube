@@ -1,0 +1,399 @@
+import { buildAspectRatio } from '@peertube/peertube-core-utils'
+import {
+  LiveVideoCreate,
+  LiveVideoLatencyMode,
+  NSFWFlag,
+  PeerTubeError,
+  VideoAIUsage,
+  VideoChannelActivityAction,
+  VideoCommercialContent,
+  VideoCreate,
+  VideoEmbedPrivacyPolicy,
+  VideoEmbedPrivacyPolicyType,
+  VideoPrivacy,
+  VideoState,
+  VideoStateType
+} from '@peertube/peertube-models'
+import { buildUUID } from '@peertube/peertube-node-utils'
+import { afterCommitIfTransaction, retryTransactionWrapper, runTransaction } from '@server/helpers/database-utils.js'
+import { createLogger } from '@server/helpers/logger.js'
+import { CONFIG } from '@server/initializers/config.js'
+import { ScheduleVideoUpdateModel } from '@server/models/video/schedule-video-update.js'
+import { VideoChannelActivityModel } from '@server/models/video/video-channel-activity.js'
+import { VideoLiveReplaySettingModel } from '@server/models/video/video-live-replay-setting.js'
+import { VideoLiveScheduleModel } from '@server/models/video/video-live-schedule.js'
+import { VideoLiveModel } from '@server/models/video/video-live.js'
+import { VideoPasswordModel } from '@server/models/video/video-password.js'
+import { VideoModel } from '@server/models/video/video.js'
+import { MChannel, MChannelAccountLight, MUserAccountId, MVideoFileInfoHash, MVideoFull } from '@server/types/models/index.js'
+import { FilteredModelAttributes } from '@server/types/sequelize.js'
+import { FfprobeData } from 'fluent-ffmpeg'
+import { getLocalVideoActivityPubUrl } from './activitypub/url.js'
+import { scheduleVideoFederation } from './activitypub/videos/federate.js'
+import { createVideoAutomaticTagsJob } from './automatic-tags/automatic-tags.js'
+import { Hooks } from './plugins/hooks.js'
+import { createLocalVideoThumbnailsFromImage, createLocalVideoThumbnailsFromVideo } from './thumbnail.js'
+import { autoBlacklistVideoIfNeeded } from './video-blacklist.js'
+import { replaceChapters, replaceChaptersFromDescriptionIfNeeded } from './video-chapters.js'
+import { buildNewFile, createVideoSource, FFmpegInput, storeNewWebVideoFile } from './video-file.js'
+import { addVideoJobsAfterCreation } from './video-jobs.js'
+import { setVideoTags } from './video.js'
+
+const logger = createLogger('video')
+
+type VideoAttributes = Omit<VideoCreate, 'channelId'> & {
+  duration: number
+  isLive: boolean
+  state: VideoStateType
+  inputFilename: string
+
+  firstPublishedAt?: string
+
+  embedPrivacyPolicy?: VideoEmbedPrivacyPolicyType
+}
+
+type LiveAttributes =
+  & Pick<
+    LiveVideoCreate,
+    | 'permanentLive'
+    | 'latencyMode'
+    | 'dvrWindow'
+    | 'saveReplay'
+    | 'replaySettings'
+    | 'schedules'
+  >
+  & {
+    streamKey?: string
+  }
+
+export type ThumbnailOption = {
+  path: string
+  automaticallyGenerated: boolean
+  keepOriginal: boolean
+}
+
+type ChaptersOption = { timecode: number, title: string }[]
+
+type VideoAttributeHookFilter =
+  | 'filter:api.video.user-import.video-attribute.result'
+  | 'filter:api.video.upload.video-attribute.result'
+  | 'filter:api.video.live.video-attribute.result'
+
+type FileInput = {
+  input: { path: string } | { url: string, size: number, extname: string, stagingKey: string }
+  probe: FfprobeData
+}
+
+export class LocalVideoCreator {
+  private readonly fileInput: FileInput | undefined
+  private readonly fileInputProbe: FfprobeData
+
+  private readonly videoAttributes: VideoAttributes
+  private readonly liveAttributes: LiveAttributes | undefined
+
+  private readonly channel: MChannelAccountLight
+  private readonly videoAttributeResultHook: VideoAttributeHookFilter
+
+  private video: MVideoFull
+  private videoFile: MVideoFileInfoHash
+  private storedFileInput: FFmpegInput
+  private videoFileInput: string // Local path or URL (staging) read to generate thumbnails
+
+  private cleanupLocalVideoFile: () => Promise<void>
+  private rollbackLocalVideoFile: () => Promise<void>
+
+  constructor (
+    private readonly options: {
+      fileInput: FileInput | null // null with a live
+
+      videoAttributes: VideoAttributes
+      liveAttributes: LiveAttributes
+
+      channel: MChannelAccountLight
+      user: MUserAccountId
+      videoAttributeResultHook: VideoAttributeHookFilter
+      thumbnail: ThumbnailOption
+
+      chapters: ChaptersOption | undefined
+      fallbackChapters: {
+        fromDescription: boolean
+        finalFallback: ChaptersOption | undefined
+      }
+    }
+  ) {
+    this.fileInput = options.fileInput
+    this.fileInputProbe = options.fileInput?.probe
+
+    this.videoAttributes = options.videoAttributes
+    this.liveAttributes = options.liveAttributes
+
+    this.channel = options.channel
+
+    this.videoAttributeResultHook = options.videoAttributeResultHook
+  }
+
+  async create () {
+    this.video = new VideoModel(
+      await Hooks.wrapObject(this.buildVideo(this.videoAttributes, this.channel), this.videoAttributeResultHook)
+    )
+
+    return logger.withContext([ this.video.uuid ], async () => {
+      try {
+        const result = await this.runCreate()
+        await this.cleanupLocalVideoFile?.()
+
+        return result
+      } catch (err) {
+        await this.rollbackLocalVideoFile?.()
+        throw err
+      }
+    })
+  }
+
+  private async runCreate () {
+    this.video.VideoChannel = this.channel
+    this.video.url = getLocalVideoActivityPubUrl(this.video)
+
+    if (this.fileInput) {
+      const { input } = this.fileInput
+
+      this.videoFile = await buildNewFile({
+        input,
+        mode: 'web-video',
+        ffprobe: this.fileInputProbe
+      }) as MVideoFileInfoHash
+
+      // Keep a local copy of the file until the end of the creation, even if it is stored in object storage
+      // A staged file is copied server side instead, and read from its staging URL
+      const { localPath, cleanup, rollback } = await storeNewWebVideoFile({
+        video: this.video,
+        videoFile: this.videoFile,
+        input
+      })
+
+      // The local copy if any or the original input (staging URL)
+      this.storedFileInput = localPath
+        ? { path: localPath }
+        : input
+
+      this.videoFileInput = 'path' in this.storedFileInput
+        ? this.storedFileInput.path
+        : this.storedFileInput.url
+
+      this.cleanupLocalVideoFile = cleanup
+      this.rollbackLocalVideoFile = rollback
+
+      this.video.aspectRatio = buildAspectRatio({ width: this.videoFile.width, height: this.videoFile.height })
+    }
+
+    const thumbnails = await this.createThumbnails()
+
+    await retryTransactionWrapper(() => {
+      return runTransaction(async transaction => {
+        await this.video.save({ transaction })
+
+        await VideoChannelActivityModel.addVideoActivity({
+          action: VideoChannelActivityAction.CREATE,
+          user: this.options.user,
+          channel: this.channel,
+          video: this.video,
+          transaction
+        })
+
+        await this.video.replaceAndSaveThumbnails(thumbnails, transaction)
+
+        if (this.videoFile) {
+          this.videoFile.videoId = this.video.id
+          await this.videoFile.save({ transaction })
+
+          this.video.VideoFiles = [ this.videoFile ]
+        }
+
+        await setVideoTags({ video: this.video, tags: this.videoAttributes.tags, transaction })
+
+        // Schedule an update in the future?
+        if (this.videoAttributes.scheduleUpdate) {
+          await ScheduleVideoUpdateModel.create({
+            videoId: this.video.id,
+            updateAt: new Date(this.videoAttributes.scheduleUpdate.updateAt),
+            privacy: this.videoAttributes.scheduleUpdate.privacy || null
+          }, { transaction })
+        }
+
+        if (this.options.chapters) {
+          await replaceChapters({ video: this.video, chapters: this.options.chapters, transaction })
+        } else if (this.options.fallbackChapters.fromDescription) {
+          if (!await replaceChaptersFromDescriptionIfNeeded({ newDescription: this.video.description, video: this.video, transaction })) {
+            await replaceChapters({ video: this.video, chapters: this.options.fallbackChapters.finalFallback, transaction })
+          }
+        }
+
+        const autoBlacklistStatus = await autoBlacklistVideoIfNeeded({
+          video: this.video,
+          user: this.options.user,
+          // A video with a file has its automatic tags built by `addVideoJobsAfterCreation`, before it is announced.
+          // A video without one (live) is federated right away, so hold it until the tagging job has run
+          holdIfAutoTagPolicy: !this.videoFile,
+          isRemote: false,
+          isNew: true,
+          isNewFile: true,
+          transaction
+        })
+
+        // Keep it sync with `holdIfAutoTagPolicy` above
+        if (!this.videoFile) {
+          createVideoAutomaticTagsJob({
+            video: this.video,
+            moderation: autoBlacklistStatus === 'held-for-auto-tags'
+              ? 'release-hold'
+              : 'apply',
+            transaction
+          })
+        }
+
+        if (this.videoAttributes.privacy === VideoPrivacy.PASSWORD_PROTECTED) {
+          await VideoPasswordModel.addPasswords(this.videoAttributes.videoPasswords, this.video.id, transaction)
+        }
+
+        if (this.videoAttributes.isLive) {
+          const videoLive = new VideoLiveModel({
+            saveReplay: this.liveAttributes.saveReplay || CONFIG.DEFAULTS.LIVE.SAVE_REPLAY,
+            permanentLive: this.liveAttributes.permanentLive || false,
+            latencyMode: this.liveAttributes.latencyMode || LiveVideoLatencyMode.DEFAULT,
+            dvrWindow: this.liveAttributes.dvrWindow ?? CONFIG.LIVE.DVR.MAX_WINDOW,
+            streamKey: this.liveAttributes.streamKey || buildUUID()
+          })
+
+          if (videoLive.saveReplay) {
+            const replaySettings = new VideoLiveReplaySettingModel({
+              privacy: this.liveAttributes.replaySettings?.privacy ?? this.video.privacy
+            })
+            await replaySettings.save({ transaction })
+
+            videoLive.replaySettingId = replaySettings.id
+          }
+
+          videoLive.videoId = this.video.id
+          this.video.VideoLive = await videoLive.save({ transaction })
+
+          if (this.liveAttributes.schedules) {
+            this.video.VideoLive.LiveSchedules = await VideoLiveScheduleModel.addToLiveId(
+              this.video.VideoLive.id,
+              this.liveAttributes.schedules.map(s => s.startAt),
+              transaction
+            )
+          }
+        }
+
+        if (this.videoFile) {
+          afterCommitIfTransaction(transaction, () => {
+            addVideoJobsAfterCreation({
+              video: this.video,
+              videoFile: this.videoFile,
+              generateTranscription: this.videoAttributes.generateTranscription ?? true
+            }).catch(err => logger.error('Cannot build new video jobs of %s.', this.video.uuid, { err }))
+          })
+        } else {
+          scheduleVideoFederation({ video: this.video, transaction })
+        }
+      }).catch(err => {
+        // Reset elements to reinsert them in the database
+        this.video.isNewRecord = true
+        if (this.videoFile) this.videoFile.isNewRecord = true
+
+        for (const t of thumbnails) {
+          t.isNewRecord = true
+        }
+
+        throw err
+      })
+    })
+
+    if (this.videoAttributes.inputFilename) {
+      await createVideoSource({
+        inputFilename: this.videoAttributes.inputFilename,
+        inputFile: this.storedFileInput,
+        inputProbe: this.fileInputProbe,
+        video: this.video
+      })
+    }
+
+    // Channel has a new content, set as updated
+    await this.channel.setAsUpdated()
+
+    return { video: this.video, videoFile: this.videoFile }
+  }
+
+  private async createThumbnails () {
+    if (this.options.thumbnail) {
+      return createLocalVideoThumbnailsFromImage({
+        automaticallyGenerated: this.options.thumbnail.automaticallyGenerated,
+        keepOriginal: this.options.thumbnail.keepOriginal,
+        inputPath: this.options.thumbnail.path,
+        video: this.video
+      }).catch(err => {
+        // oxlint-disable-next-line @typescript-eslint/only-throw-error
+        throw PeerTubeError.fromError(err, 'INVALID_IMAGE_FILE')
+      })
+    }
+
+    return createLocalVideoThumbnailsFromVideo({
+      video: this.video,
+      videoFile: this.videoFile,
+      fileInput: this.videoFileInput,
+      ffprobe: this.fileInputProbe
+    })
+  }
+
+  private buildVideo (videoInfo: VideoAttributes, channel: MChannel) {
+    const privacy = videoInfo.privacy || VideoPrivacy.PRIVATE
+
+    const now = new Date()
+
+    let firstPublishedAt: Date = null
+    if (videoInfo.firstPublishedAt) {
+      firstPublishedAt = new Date(videoInfo.firstPublishedAt)
+    } else if (privacy !== VideoPrivacy.PRIVATE && videoInfo.state === VideoState.PUBLISHED) {
+      firstPublishedAt = now
+    }
+
+    return {
+      name: videoInfo.name,
+      state: videoInfo.state,
+      remote: false,
+      category: videoInfo.category,
+      licence: videoInfo.licence ?? CONFIG.DEFAULTS.PUBLISH.LICENCE,
+      language: videoInfo.language,
+      commentsPolicy: videoInfo.commentsPolicy ?? CONFIG.DEFAULTS.PUBLISH.COMMENTS_POLICY,
+      recommendationScope: videoInfo.recommendationScope ?? CONFIG.DEFAULTS.PUBLISH.RECOMMENDATION_SCOPE,
+      aiUsage: videoInfo.aiUsage ?? VideoAIUsage.NOT_SPECIFIED,
+      commercialContent: videoInfo.commercialContent ?? VideoCommercialContent.NONE,
+      downloadEnabled: videoInfo.downloadEnabled ?? CONFIG.DEFAULTS.PUBLISH.DOWNLOAD_ENABLED,
+      waitTranscoding: videoInfo.waitTranscoding || false,
+
+      embedPrivacyPolicy: videoInfo.embedPrivacyPolicy ?? VideoEmbedPrivacyPolicy.ALL_ALLOWED,
+
+      nsfw: videoInfo.nsfw || false,
+      nsfwSummary: videoInfo.nsfwSummary,
+      nsfwFlags: videoInfo.nsfwFlags || NSFWFlag.NONE,
+
+      description: videoInfo.description,
+      support: videoInfo.support,
+      privacy,
+      isLive: videoInfo.isLive,
+      channelId: channel.id,
+      originallyPublishedAt: videoInfo.originallyPublishedAt
+        ? new Date(videoInfo.originallyPublishedAt)
+        : null,
+
+      firstPublishedAt,
+
+      publishedAt: this.videoAttributes.scheduleUpdate?.updateAt
+        ? new Date(this.videoAttributes.scheduleUpdate?.updateAt)
+        : now,
+
+      uuid: buildUUID(),
+      duration: videoInfo.duration
+    } satisfies FilteredModelAttributes<VideoModel>
+  }
+}

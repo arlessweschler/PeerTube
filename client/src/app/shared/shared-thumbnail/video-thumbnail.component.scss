@@ -1,6 +1,11 @@
-@import '_variables';
-@import '_mixins';
-@import '_miniature';
+@use "_variables" as *;
+@use "_mixins" as *;
+@use "_miniature" as *;
+
+// Positioning context of ".actions-overlay", which is a sibling of ".video-thumbnail" and not one of its children
+:host {
+  position: relative;
+}
 
 .video-thumbnail {
   @include miniature-thumbnail;
@@ -10,76 +15,106 @@
   height: 3px;
   width: 100%;
   position: absolute;
+  z-index: z(miniature);
   bottom: 0;
   background-color: rgba(0, 0, 0, 0.2);
 
   div {
     height: 100%;
-    background-color: pvar(--mainColor);
+    background-color: pvar(--border-primary);
+    border-radius: 6px;
   }
 }
 
-.video-thumbnail-watch-later-overlay,
-.video-thumbnail-label-overlay,
-.video-thumbnail-duration-overlay,
-.video-thumbnail-live-overlay {
-  @include static-thumbnail-overlay;
-
-  border-radius: 3px;
-  font-size: 12px;
-  font-weight: $font-semibold;
-  line-height: 1.1;
+.watch-icon-overlay,
+.duration-overlay,
+.live-overlay {
+  font-size: 0.75rem;
+  line-height: normal;
   z-index: z(miniature);
+
+  @include static-thumbnail-overlay;
 }
 
-.video-thumbnail-label-overlay {
+.label-overlay {
   position: absolute;
   padding: 0 5px;
   left: 5px;
   top: 5px;
-  font-weight: $font-bold;
-
-  &.warning { background-color: #ffa500; }
-  &.danger { background-color: #ff0000; }
+  z-index: z(miniature);
 }
 
-.video-thumbnail-duration-overlay,
-.video-thumbnail-live-overlay {
+.duration-overlay,
+.live-overlay {
   position: absolute;
-  padding: 0 3px;
-  right: 5px;
-  bottom: 5px;
+  padding: 2px 8px;
+  border-top-left-radius: 4px;
+
+  bottom: 0;
+  // right property is defined below
 }
 
-.video-thumbnail-live-overlay {
-  font-weight: $font-semibold;
-  color: #fff;
+.live-overlay {
+  font-weight: $font-bold;
+  color: #f4f4f5;
 
-  &:not(.live-ended) {
-    background-color: rgba(224, 8, 8, 0.7);
+  &.live-streaming {
+    color: #f4f4f5;
+
+    &::before {
+      content: "";
+      display: inline-block;
+      width: 6px;
+      height: 6px;
+      border-radius: 100%;
+      background-color: pvar(--border-primary);
+      position: relative;
+      top: -1px;
+
+      @include margin-right(8px);
+    }
   }
 }
 
-.video-thumbnail-actions-overlay {
+.actions-overlay {
   position: absolute;
   display: flex;
   flex-direction: column;
-  right: 5px;
-  top: 5px;
   opacity: 0;
+  font-weight: $font-semibold;
+  z-index: z(miniature);
+
+  top: 5px;
+
+  @include right(5px);
 
   div:not(:first-child) {
     margin-top: 2px;
   }
 }
 
-.video-thumbnail-watch-later-overlay {
+.watch-icon-overlay {
   padding: 3px;
+  border-radius: 3px;
 
   my-global-icon {
-    @include apply-svg-color(#fff);
-
     width: 22px;
     height: 22px;
+
+    color: #f4f4f5;
+  }
+}
+
+.video-thumbnail.is-rtl {
+  .duration-overlay,
+  .live-overlay {
+    left: 0;
+  }
+}
+
+.video-thumbnail:not(.is-rtl) {
+  .duration-overlay,
+  .live-overlay {
+    right: 0;
   }
 }

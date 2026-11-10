@@ -1,11 +1,11 @@
-@import '_variables';
-@import '_mixins';
+@use "_variables" as *;
+@use "_mixins" as *;
+
+code {
+  font-size: 14px;
+  font-weight: $font-semibold;
+}
 
 .root {
-  font-size: 15px;
-
-  code {
-    font-size: 14px;
-    font-weight: $font-semibold;
-  }
+  max-width: 500px;
 }

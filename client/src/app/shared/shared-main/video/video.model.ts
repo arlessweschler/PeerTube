@@ -1,20 +1,32 @@
 import { AuthUser } from '@app/core'
 import { User } from '@app/core/users/user.model'
-import { durationToString, getAbsoluteAPIUrl, getAbsoluteEmbedUrl } from '@app/helpers'
-import { Account } from '@app/shared/shared-main/account/account.model'
+import { durationToString, getEmbedUrl } from '@app/helpers'
 import { Actor } from '@app/shared/shared-main/account/actor.model'
-import { VideoChannel } from '@app/shared/shared-main/video-channel/video-channel.model'
-import { peertubeTranslate } from '@shared/core-utils/i18n'
+import { buildVideoWatchPath, getAllFiles, peertubeTranslate } from '@peertube/peertube-core-utils'
 import {
   ActorImage,
-  ServerConfig,
+  ConstantLabel,
+  HTMLServerConfig,
+  Thumbnail,
   UserRight,
-  Video as VideoServerModel,
-  VideoConstant,
+  VideoAIUsage,
+  VideoAIUsageType,
+  VideoCommercialContent,
+  VideoCommercialContentType,
+  VideoFile,
   VideoPrivacy,
+  VideoPrivacyType,
+  VideoRecommendationScope,
+  VideoRecommendationScopeType,
   VideoScheduleUpdate,
-  VideoState
-} from '@shared/models'
+  Video as VideoServerModel,
+  VideoSource,
+  VideoState,
+  VideoStateType,
+  VideoStreamingPlaylist,
+  VideoStreamingPlaylistType
+} from '@peertube/peertube-models'
+import { isVideoNSFWBlurForUser, isVideoNSFWHiddenForUser, isVideoNSFWWarnedForUser } from '@root-helpers/video'
 
 export class Video implements VideoServerModel {
   byVideoChannel: string
@@ -24,44 +36,72 @@ export class Video implements VideoServerModel {
   updatedAt: Date
   publishedAt: Date
   originallyPublishedAt: Date | string
-  category: VideoConstant<number>
-  licence: VideoConstant<number>
-  language: VideoConstant<string>
-  privacy: VideoConstant<VideoPrivacy>
+
+  category: ConstantLabel<number>
+  licence: ConstantLabel<number>
+  language: ConstantLabel<string>
+  privacy: ConstantLabel<VideoPrivacyType>
+
+  truncatedDescription: string
   description: string
+
   duration: number
   durationLabel: string
+
   id: number
   uuid: string
+  shortUUID: string
+
   isLocal: boolean
+
   name: string
   serverHost: string
-  thumbnailPath: string
-  thumbnailUrl: string
+
+  thumbnailPath: never
+  thumbnailUrl: never
+  previewPath: never
+  previewUrl: never
+
+  thumbnails: Thumbnail[]
+
+  aspectRatio: number
 
   isLive: boolean
-
-  previewPath: string
-  previewUrl: string
+  liveSchedules: { startAt: Date | string }[]
 
   embedPath: string
   embedUrl: string
 
-  url?: string
+  url: string
 
   views: number
+  viewers: number
+
+  downloads: number
+
   likes: number
   dislikes: number
+
   nsfw: boolean
+  nsfwFlags: number
+  nsfwSummary: string
+
+  aiUsage: ConstantLabel<VideoAIUsageType>
+  commercialContent: ConstantLabel<VideoCommercialContentType>
+  recommendationScope: ConstantLabel<VideoRecommendationScopeType>
 
   originInstanceUrl: string
   originInstanceHost: string
 
   waitTranscoding?: boolean
-  state?: VideoConstant<VideoState>
+  state?: ConstantLabel<VideoStateType>
   scheduledUpdate?: VideoScheduleUpdate
+
   blacklisted?: boolean
-  blockedReason?: string
+  blacklistedReason?: string
+
+  blockedOwner?: never
+  blockedServer?: never
 
   account: {
     id: number
@@ -69,7 +109,8 @@ export class Video implements VideoServerModel {
     displayName: string
     url: string
     host: string
-    avatar?: ActorImage
+
+    avatars: ActorImage[]
   }
 
   channel: {
@@ -78,22 +119,41 @@ export class Video implements VideoServerModel {
     displayName: string
     url: string
     host: string
-    avatar?: ActorImage
+
+    avatars: ActorImage[]
   }
 
   userHistory?: {
     currentTime: number
   }
 
+  captionLanguages?: string[]
+
   pluginData?: any
 
-  static buildClientUrl (videoUUID: string) {
-    return '/w/' + videoUUID
+  streamingPlaylists?: VideoStreamingPlaylist[]
+  files?: VideoFile[]
+
+  videoSource?: VideoSource
+
+  tags?: string[]
+  automaticTags?: string[]
+
+  comments: number
+
+  static buildWatchUrl (video: Partial<Pick<Video, 'uuid' | 'shortUUID'>>) {
+    return buildVideoWatchPath({ shortUUID: video.shortUUID || video.uuid })
   }
 
-  constructor (hash: VideoServerModel, translations = {}) {
-    const absoluteAPIUrl = getAbsoluteAPIUrl()
+  static buildManageUrl (video: Partial<Pick<Video, 'uuid' | 'shortUUID'>>) {
+    return '/videos/manage/' + (video.shortUUID || video.uuid)
+  }
 
+  static buildDurationLabel (video: Partial<Pick<Video, 'duration'>>) {
+    return durationToString(video.duration)
+  }
+
+  constructor (hash: VideoServerModel, translations: { [id: string]: string } = {}) {
     this.createdAt = new Date(hash.createdAt.toString())
     this.publishedAt = new Date(hash.publishedAt.toString())
     this.category = hash.category
@@ -102,39 +162,54 @@ export class Video implements VideoServerModel {
     this.privacy = hash.privacy
     this.waitTranscoding = hash.waitTranscoding
     this.state = hash.state
+
+    this.truncatedDescription = hash.truncatedDescription
     this.description = hash.description
 
     this.isLive = hash.isLive
+    this.liveSchedules = hash.liveSchedules
+      ? hash.liveSchedules.map(schedule => ({ startAt: new Date(schedule.startAt.toString()) }))
+      : null
+
+    this.thumbnails = hash.thumbnails
 
     this.duration = hash.duration
-    this.durationLabel = durationToString(hash.duration)
+    this.durationLabel = Video.buildDurationLabel(this)
 
     this.id = hash.id
     this.uuid = hash.uuid
+    this.shortUUID = hash.shortUUID
 
     this.isLocal = hash.isLocal
     this.name = hash.name
 
-    this.thumbnailPath = hash.thumbnailPath
-    this.thumbnailUrl = this.thumbnailPath
-      ? hash.thumbnailUrl || (absoluteAPIUrl + hash.thumbnailPath)
-      : null
-
-    this.previewPath = hash.previewPath
-    this.previewUrl = this.previewPath
-      ? hash.previewUrl || (absoluteAPIUrl + hash.previewPath)
-      : null
-
     this.embedPath = hash.embedPath
-    this.embedUrl = hash.embedUrl || (getAbsoluteEmbedUrl() + hash.embedPath)
+    this.embedUrl = hash.embedUrl || (getEmbedUrl() + hash.embedPath)
 
     this.url = hash.url
 
     this.views = hash.views
+    this.viewers = hash.viewers
     this.likes = hash.likes
     this.dislikes = hash.dislikes
+    this.downloads = hash.downloads
 
     this.nsfw = hash.nsfw
+    this.nsfwFlags = hash.nsfwFlags
+    this.nsfwSummary = hash.nsfwSummary
+
+    // Search indexes may not provide this attribute
+    this.aiUsage = hash.aiUsage
+      ? { ...hash.aiUsage, label: peertubeTranslate(hash.aiUsage.label, translations) }
+      : { id: VideoAIUsage.NOT_SPECIFIED, label: $localize`Not specified` }
+
+    this.commercialContent = hash.commercialContent
+      ? { ...hash.commercialContent, label: peertubeTranslate(hash.commercialContent.label, translations) }
+      : { id: VideoCommercialContent.NONE, label: $localize`None` }
+
+    this.recommendationScope = hash.recommendationScope
+      ? { ...hash.recommendationScope, label: peertubeTranslate(hash.recommendationScope.label, translations) }
+      : { id: VideoRecommendationScope.ALL, label: $localize`All videos` }
 
     this.account = hash.account
     this.channel = hash.channel
@@ -148,64 +223,199 @@ export class Video implements VideoServerModel {
     this.privacy.label = peertubeTranslate(this.privacy.label, translations)
 
     this.scheduledUpdate = hash.scheduledUpdate
-    this.originallyPublishedAt = hash.originallyPublishedAt ? new Date(hash.originallyPublishedAt.toString()) : null
+    this.originallyPublishedAt = hash.originallyPublishedAt
+      ? new Date(hash.originallyPublishedAt.toString())
+      : null
 
     if (this.state) this.state.label = peertubeTranslate(this.state.label, translations)
 
     this.blacklisted = hash.blacklisted
-    this.blockedReason = hash.blacklistedReason
+    this.blacklistedReason = hash.blacklistedReason
+
+    this.streamingPlaylists = hash.streamingPlaylists
+    this.files = hash.files
+
+    for (const file of this.getAllVideoFiles()) {
+      file.resolution.label = peertubeTranslate(file.resolution.label, translations)
+    }
+
+    this.videoSource = hash.videoSource
 
     this.userHistory = hash.userHistory
+
+    this.captionLanguages = hash.captionLanguages
 
     this.originInstanceHost = this.account.host
     this.originInstanceUrl = 'https://' + this.originInstanceHost
 
     this.pluginData = hash.pluginData
+
+    this.aspectRatio = hash.aspectRatio
+
+    this.tags = hash.tags
+    this.automaticTags = hash.automaticTags
+
+    this.comments = hash.comments
   }
 
-  isVideoNSFWForUser (user: User, serverConfig: ServerConfig) {
-    // Video is not NSFW, skip
-    if (this.nsfw === false) return false
-
-    // Return user setting if logged in
-    if (user) return user.nsfwPolicy !== 'display'
-
-    // Return default instance config
-    return serverConfig.instance.defaultNSFWPolicy !== 'display'
+  isNSFWWarnedForUser (user: User, serverConfig: HTMLServerConfig) {
+    return isVideoNSFWWarnedForUser(this, serverConfig, user)
   }
 
-  isRemovableBy (user: AuthUser) {
-    return user && this.isLocal === true && (this.account.name === user.username || user.hasRight(UserRight.REMOVE_ANY_VIDEO))
+  isNSFWBlurForUser (user: User, serverConfig: HTMLServerConfig) {
+    return isVideoNSFWBlurForUser(this, serverConfig, user)
   }
 
-  isBlockableBy (user: AuthUser) {
-    return this.blacklisted !== true && user && user.hasRight(UserRight.MANAGE_VIDEO_BLACKLIST) === true
+  isNSFWHiddenForUser (user: User, serverConfig: HTMLServerConfig) {
+    return isVideoNSFWHiddenForUser(this, serverConfig, user)
   }
 
-  isUnblockableBy (user: AuthUser) {
-    return this.blacklisted === true && user && user.hasRight(UserRight.MANAGE_VIDEO_BLACKLIST) === true
+  isNSFWHiddenOrWarned (user: User, serverConfig: HTMLServerConfig) {
+    return this.isNSFWHiddenForUser(user, serverConfig) || this.isNSFWWarnedForUser(user, serverConfig)
   }
 
-  isUpdatableBy (user: AuthUser) {
-    return user && this.isLocal === true && (this.account.name === user.username || user.hasRight(UserRight.UPDATE_ANY_VIDEO))
+  // ---------------------------------------------------------------------------
+
+  canBeBlockedBy (user: AuthUser) {
+    return this.blacklisted !== true && user?.hasRight(UserRight.MANAGE_VIDEO_BLACKLIST) === true
   }
 
-  isLiveInfoAvailableBy (user: AuthUser) {
+  canBeUnblockedBy (user: AuthUser) {
+    return this.blacklisted === true && user?.hasRight(UserRight.MANAGE_VIDEO_BLACKLIST) === true
+  }
+
+  canBeUpdatedBy (user: AuthUser) {
+    return user && this.isLocal === true && (
+      user.isOwnerOfChannel(this.channel) ||
+      user.isEditorOfChannel(this.channel) ||
+      user.hasRight(UserRight.UPDATE_ANY_VIDEO)
+    )
+  }
+
+  canBeStudioEditedBy (options: {
+    user: AuthUser
+    studioEnabled: boolean
+  }) {
+    return options.studioEnabled &&
+      this.state?.id === VideoState.PUBLISHED &&
+      this.canBeUpdatedBy(options.user)
+  }
+
+  canBeRemovedBy (user: AuthUser) {
+    return user && this.isLocal === true && (
+      user.isOwnerOfChannel(this.channel) ||
+      user.isEditorOfChannel(this.channel) ||
+      user.hasRight(UserRight.REMOVE_ANY_VIDEO)
+    )
+  }
+
+  canBypassDisabledDownload (user: AuthUser) {
+    return user && this.isLocal === true && (
+      user.isOwnerOfChannel(this.channel) ||
+      user.isEditorOfChannel(this.channel) ||
+      user.hasRight(UserRight.SEE_ALL_VIDEOS)
+    )
+  }
+
+  // The source metadata endpoint requires UPDATE_ANY_VIDEO and the source file endpoint SEE_ALL_VIDEOS
+  canGetOriginalFile (user: AuthUser) {
+    return user && this.isLocal === true && (
+      user.isOwnerOfChannel(this.channel) ||
+      user.isEditorOfChannel(this.channel) ||
+      (user.hasRight(UserRight.UPDATE_ANY_VIDEO) && user.hasRight(UserRight.SEE_ALL_VIDEOS))
+    )
+  }
+
+  canBypassPassword (user: AuthUser) {
+    return this.privacy.id === VideoPrivacy.PASSWORD_PROTECTED &&
+      user &&
+      this.isLocal === true && (
+        user.isOwnerOfChannel(this.channel) ||
+        user.isEditorOfChannel(this.channel) ||
+        user.hasRight(UserRight.SEE_ALL_VIDEOS)
+      )
+  }
+
+  canDisplayLiveInfoBy (user: AuthUser) {
     return this.isLive &&
-      user && this.isLocal === true && (this.account.name === user.username || user.hasRight(UserRight.GET_ANY_LIVE))
+      user && this.isLocal === true && (
+        user.isOwnerOfChannel(this.channel) ||
+        user.isEditorOfChannel(this.channel) ||
+        user.hasRight(UserRight.GET_ANY_LIVE)
+      )
   }
+
+  canBeReportedBy (user: AuthUser) {
+    if (!user) return false
+
+    return user.isOwnerOfChannel(this.channel) === false &&
+      user.isEditorOfChannel(this.channel) === false
+  }
+
+  // ---------------------------------------------------------------------------
+
+  canRemoveOneFile (user: AuthUser) {
+    return this.isLocal &&
+      user && user.hasRight(UserRight.MANAGE_VIDEO_FILES) &&
+      this.state.id !== VideoState.TO_TRANSCODE &&
+      getAllFiles(this).length > 1
+  }
+
+  canRemoveAllHLSOrWebFiles (user: AuthUser) {
+    return this.isLocal &&
+      user && user.hasRight(UserRight.MANAGE_VIDEO_FILES) &&
+      this.state.id !== VideoState.TO_TRANSCODE &&
+      this.hasHLS() &&
+      this.hasWebVideos()
+  }
+
+  // ---------------------------------------------------------------------------
 
   canBeDuplicatedBy (user: AuthUser) {
     return user && this.isLocal === false && user.hasRight(UserRight.MANAGE_VIDEOS_REDUNDANCIES)
   }
 
-  getExactNumberOfViews () {
-    if (this.views < 1000) return ''
+  canRunTranscoding (user: AuthUser) {
+    return this.isLocal &&
+      !this.isLive &&
+      user?.hasRight(UserRight.RUN_VIDEO_TRANSCODING) &&
+      this.state?.id &&
+      !this.transcodingAndTranscriptionIncompatibleStates().has(this.state.id)
+  }
 
-    if (this.isLive) {
-      return $localize`${this.views} viewers`
-    }
+  canGenerateTranscription (user: AuthUser, transcriptionEnabled: boolean) {
+    return transcriptionEnabled &&
+      this.isLocal &&
+      !this.isLive &&
+      user.hasRight(UserRight.UPDATE_ANY_VIDEO) &&
+      this.state?.id &&
+      !this.transcodingAndTranscriptionIncompatibleStates().has(this.state.id)
+  }
 
-    return $localize`${this.views} views`
+  private transcodingAndTranscriptionIncompatibleStates () {
+    return new Set<VideoStateType>([
+      VideoState.TO_IMPORT,
+      VideoState.TO_IMPORT_FAILED,
+      VideoState.TO_EDIT,
+      VideoState.TO_EDIT_FAILED,
+      VideoState.TO_DUPLICATE,
+      VideoState.TO_DUPLICATE_FAILED,
+      VideoState.TO_MOVE_TO_EXTERNAL_STORAGE,
+      VideoState.TO_MOVE_TO_FILE_SYSTEM
+    ])
+  }
+
+  // ---------------------------------------------------------------------------
+
+  hasHLS () {
+    return this.streamingPlaylists?.some(p => p.type === VideoStreamingPlaylistType.HLS)
+  }
+
+  hasWebVideos () {
+    return this.files && this.files.length !== 0
+  }
+
+  getAllVideoFiles () {
+    return getAllFiles(this)
   }
 }

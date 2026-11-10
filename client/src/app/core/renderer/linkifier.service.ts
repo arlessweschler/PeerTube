@@ -1,121 +1,85 @@
 import { Injectable } from '@angular/core'
-import { getAbsoluteAPIUrl } from '@app/helpers/utils'
+import { getAPIUrl } from '@app/helpers/utils'
+import type LinkifyHTML from 'linkify-html'
+import type * as LinkifyJS from 'linkifyjs'
 
 @Injectable()
 export class LinkifierService {
   static CLASSNAME = 'linkified'
 
-  private linkifyModule: any
-  private linkifyHtmlModule: any
+  private linkifyModule: typeof LinkifyJS
+  private linkifyHtmlModule: typeof LinkifyHTML
 
-  private linkifyOptions = {
+  private mentionPluginInitialized = false
+
+  private linkifyOptions: LinkifyJS.Opts = {
     className: {
       mention: LinkifierService.CLASSNAME + '-mention',
       url: LinkifierService.CLASSNAME + '-url'
+    },
+    formatHref: {
+      mention: (href: string) => {
+        return getAPIUrl() + '/services/redirect/actors/' + href.substring(1)
+      }
     }
   }
 
   async linkify (text: string) {
     if (!this.linkifyModule) {
       const result = await Promise.all([
-        import('linkifyjs'), // ES module
-        import('linkifyjs/html').then(m => m.default)
+        import('linkifyjs'),
+        import('linkify-html').then(m => (m as any).default)
       ])
 
       this.linkifyModule = result[0]
       this.linkifyHtmlModule = result[1]
 
-      this.mentionWithDomainPlugin()
+      this.buildMentionPlugin()
     }
 
     return this.linkifyHtmlModule(text, this.linkifyOptions)
   }
 
-  private mentionWithDomainPlugin () {
-    const TT = this.linkifyModule.scanner.TOKENS // Text tokens
-    const { TOKENS: MT, State } = this.linkifyModule.parser // Multi tokens, state
-    const MultiToken = MT.Base
-    const S_START = this.linkifyModule.parser.start
+  private buildMentionPlugin () {
+    if (this.mentionPluginInitialized) return
 
-    const TT_AT = TT.AT
-    const TT_DOMAIN = TT.DOMAIN
-    const TT_LOCALHOST = TT.LOCALHOST
-    const TT_NUM = TT.NUM
-    const TT_COLON = TT.COLON
-    const TT_SLASH = TT.SLASH
-    const TT_TLD = TT.TLD
-    const TT_UNDERSCORE = TT.UNDERSCORE
-    const TT_DOT = TT.DOT
-
-    function MENTION (this: any, value: any) {
-      this.v = value
-    }
-
-    this.linkifyModule.inherits(MultiToken, MENTION, {
-      type: 'mentionWithDomain',
+    const MentionToken = this.linkifyModule.createTokenClass('mention', {
       isLink: true,
       toHref () {
-        return getAbsoluteAPIUrl() + '/services/redirect/accounts/' + this.toString().substr(1)
+        return '/' + this.toString().slice(1)
       }
     })
 
-    const S_AT = S_START.jump(TT_AT) // @
-    const S_AT_SYMS = new State()
-    const S_MENTION = new State(MENTION)
-    const S_MENTION_DIVIDER = new State()
-    const S_MENTION_DIVIDER_SYMS = new State()
+    this.linkifyModule.registerPlugin('mention', ({ scanner, parser }) => {
+      const { DOT, HYPHEN, UNDERSCORE, AT } = scanner.tokens
+      const { domain } = scanner.tokens.groups
 
-    // @_,
-    S_AT.on(TT_UNDERSCORE, S_AT_SYMS)
+      // Start with @
+      const At = parser.start.tt(AT)
 
-    //  @_*
-    S_AT_SYMS
-      .on(TT_UNDERSCORE, S_AT_SYMS)
-      .on(TT_DOT, S_AT_SYMS)
+      // Valid mention (not made up entirely of symbols)
+      const Mention = At.tt(UNDERSCORE, MentionToken as any)
 
-    // Valid mention (not made up entirely of symbols)
-    S_AT
-      .on(TT_DOMAIN, S_MENTION)
-      .on(TT_LOCALHOST, S_MENTION)
-      .on(TT_TLD, S_MENTION)
-      .on(TT_NUM, S_MENTION)
+      At.ta(domain, Mention)
+      At.tt(UNDERSCORE, Mention)
 
-    S_AT_SYMS
-      .on(TT_DOMAIN, S_MENTION)
-      .on(TT_LOCALHOST, S_MENTION)
-      .on(TT_TLD, S_MENTION)
-      .on(TT_NUM, S_MENTION)
+      // More valid mentions
+      Mention.ta(domain, Mention)
+      Mention.tt(HYPHEN, Mention)
+      Mention.tt(UNDERSCORE, Mention)
 
-    // More valid mentions
-    S_MENTION
-      .on(TT_DOMAIN, S_MENTION)
-      .on(TT_LOCALHOST, S_MENTION)
-      .on(TT_TLD, S_MENTION)
-      .on(TT_COLON, S_MENTION)
-      .on(TT_NUM, S_MENTION)
-      .on(TT_UNDERSCORE, S_MENTION)
+      // ADDED: . transitions
+      const MentionDot = Mention.tt(DOT)
+      MentionDot.ta(domain, Mention)
+      MentionDot.tt(HYPHEN, Mention)
+      MentionDot.tt(UNDERSCORE, Mention)
 
-    // Mention with a divider
-    S_MENTION
-      .on(TT_AT, S_MENTION_DIVIDER)
-      .on(TT_SLASH, S_MENTION_DIVIDER)
-      .on(TT_DOT, S_MENTION_DIVIDER)
+      const MentionAt = Mention.tt(AT)
+      MentionAt.ta(domain, Mention)
+      MentionAt.tt(HYPHEN, Mention)
+      MentionAt.tt(UNDERSCORE, Mention)
+    })
 
-    // Mention _ trailing stash plus syms
-    S_MENTION_DIVIDER.on(TT_UNDERSCORE, S_MENTION_DIVIDER_SYMS)
-    S_MENTION_DIVIDER_SYMS.on(TT_UNDERSCORE, S_MENTION_DIVIDER_SYMS)
-
-    // Once we get a word token, mentions can start up again
-    S_MENTION_DIVIDER
-      .on(TT_DOMAIN, S_MENTION)
-      .on(TT_LOCALHOST, S_MENTION)
-      .on(TT_TLD, S_MENTION)
-      .on(TT_NUM, S_MENTION)
-
-    S_MENTION_DIVIDER_SYMS
-      .on(TT_DOMAIN, S_MENTION)
-      .on(TT_LOCALHOST, S_MENTION)
-      .on(TT_TLD, S_MENTION)
-      .on(TT_NUM, S_MENTION)
+    this.mentionPluginInitialized = true
   }
 }

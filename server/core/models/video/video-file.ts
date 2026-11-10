@@ -1,0 +1,724 @@
+import {
+  ActivityVideoUrlObject,
+  FileStorage,
+  type FileStorageType,
+  VideoFileFormatFlag,
+  type VideoFileFormatFlagType,
+  VideoFileStream,
+  type VideoFileStreamType,
+  VideoResolution
+} from '@peertube/peertube-models'
+import { createLogger } from '@server/helpers/logger.js'
+import { extractVideo } from '@server/helpers/video.js'
+import { CONFIG } from '@server/initializers/config.js'
+import { buildRemoteUrl } from '@server/lib/activitypub/url.js'
+import {
+  buildObjectStorageHLSPrivateFileUrl,
+  buildObjectStoragePublicFileUrl,
+  buildObjectStorageWebVideoPrivateFileUrl,
+  generateCommonFileObjectStorageKey,
+  generateHLSObjectStorageKey
+} from '@server/lib/object-storage/index.js'
+import { buildCommonFileObjectStorageUrl, removeCommonFileObjectStorage } from '@server/lib/object-storage/common-files.js'
+import { getVideoFileMimeType } from '@server/lib/video-file.js'
+import { isVideoInPrivateDirectory } from '@server/lib/video-privacy.js'
+import { MStreamingPlaylistVideo, MVideo, MVideoWithHost, isStreamingPlaylist } from '@server/types/models/index.js'
+import { remove } from 'fs-extra/esm'
+import { join } from 'path'
+import { FindOptions, Op, QueryTypes, Transaction, WhereOptions } from 'sequelize'
+import {
+  AllowNull,
+  BelongsTo,
+  Column,
+  CreatedAt,
+  DataType,
+  Default,
+  DefaultScope,
+  ForeignKey,
+  HasOne,
+  Is,
+  Scopes,
+  Table,
+  UpdatedAt
+} from 'sequelize-typescript'
+import validator from 'validator'
+import {
+  isVideoFPSResolutionValid,
+  isVideoFileExtnameValid,
+  isVideoFileResolutionValid,
+  isVideoFileSizeValid
+} from '../../helpers/custom-validators/videos.js'
+import { DOWNLOAD_PATHS, LAZY_STATIC_PATHS, STATIC_PATHS, WEBSERVER } from '../../initializers/constants.js'
+import { MVideoFile, MVideoFileInfoHash, MVideoFileStreamingPlaylistVideo, MVideoFileVideo } from '../../types/models/video/video-file.js'
+import { SequelizeModel, doesExist, parseAggregateResult, throwIfNotValid } from '../shared/index.js'
+import { VideoInfohashModel } from './video-infohash.js'
+import { VideoStreamingPlaylistModel } from './video-streaming-playlist.js'
+import { VideoModel } from './video.js'
+
+const logger = createLogger()
+
+export enum ScopeNames {
+  WITH_VIDEO = 'WITH_VIDEO',
+  WITH_METADATA = 'WITH_METADATA',
+  WITH_VIDEO_OR_PLAYLIST = 'WITH_VIDEO_OR_PLAYLIST'
+}
+
+@DefaultScope(() => ({
+  attributes: {
+    exclude: [ 'metadata' ]
+  }
+}))
+@Scopes(() => ({
+  [ScopeNames.WITH_VIDEO]: {
+    include: [
+      {
+        model: VideoModel.unscoped(),
+        required: true
+      }
+    ]
+  },
+  [ScopeNames.WITH_VIDEO_OR_PLAYLIST]: (options: { whereVideo?: WhereOptions } = {}) => {
+    return {
+      include: [
+        {
+          model: VideoModel.unscoped(),
+          required: false,
+          where: options.whereVideo
+        },
+        {
+          model: VideoStreamingPlaylistModel.unscoped(),
+          required: false,
+          include: [
+            {
+              model: VideoModel.unscoped(),
+              required: true,
+              where: options.whereVideo
+            }
+          ]
+        }
+      ]
+    }
+  },
+  [ScopeNames.WITH_METADATA]: {
+    attributes: {
+      include: [ 'metadata' ]
+    }
+  }
+}))
+@Table({
+  tableName: 'videoFile',
+  indexes: [
+    {
+      fields: [ 'torrentFilename' ],
+      unique: true
+    },
+
+    {
+      fields: [ 'filename' ],
+      unique: true
+    },
+
+    {
+      fields: [ 'videoId', 'resolution', 'fps' ],
+      unique: true,
+      where: {
+        videoId: {
+          [Op.ne]: null
+        }
+      }
+    },
+    {
+      fields: [ 'videoStreamingPlaylistId', 'resolution', 'fps' ],
+      unique: true,
+      where: {
+        videoStreamingPlaylistId: {
+          [Op.ne]: null
+        }
+      }
+    }
+  ]
+})
+export class VideoFileModel extends SequelizeModel<VideoFileModel> {
+  @CreatedAt
+  declare createdAt: Date
+
+  @UpdatedAt
+  declare updatedAt: Date
+
+  @AllowNull(false)
+  @Is('VideoFileResolution', value => throwIfNotValid(value, isVideoFileResolutionValid, 'resolution'))
+  @Column
+  declare resolution: number
+
+  @AllowNull(true)
+  @Column
+  declare width: number
+
+  @AllowNull(true)
+  @Column
+  declare height: number
+
+  @AllowNull(false)
+  @Is('VideoFileSize', value => throwIfNotValid(value, isVideoFileSizeValid, 'size'))
+  @Column(DataType.BIGINT)
+  declare size: number
+
+  @AllowNull(false)
+  @Is('VideoFileExtname', value => throwIfNotValid(value, isVideoFileExtnameValid, 'extname'))
+  @Column
+  declare extname: string
+
+  @AllowNull(false)
+  @Default(-1)
+  @Is('VideoFileFPS', value => throwIfNotValid(value, isVideoFPSResolutionValid, 'fps'))
+  @Column
+  declare fps: number
+
+  @AllowNull(false)
+  @Column
+  declare formatFlags: VideoFileFormatFlagType
+
+  @AllowNull(false)
+  @Column
+  declare streams: VideoFileStreamType
+
+  @AllowNull(true)
+  @Column(DataType.JSONB)
+  declare metadata: any
+
+  @AllowNull(true)
+  @Column
+  declare metadataUrl: string
+
+  @AllowNull(true)
+  @Column
+  declare fileUrl: string
+
+  // Can be null for live files
+  @AllowNull(true)
+  @Column
+  declare filename: string
+
+  @AllowNull(true)
+  @Column
+  declare torrentUrl: string
+
+  // Can be null for live files
+  @AllowNull(true)
+  @Column
+  declare torrentFilename: string
+
+  // object_storage.torrents can be enabled independently of the storage of the video file itself
+  // null when there is no torrent file (live files)
+  @AllowNull(true)
+  @Column
+  declare torrentStorage: FileStorageType
+
+  @ForeignKey(() => VideoModel)
+  @Column
+  declare videoId: number
+
+  @AllowNull(false)
+  @Default(FileStorage.FILE_SYSTEM)
+  @Column
+  declare storage: FileStorageType
+
+  @BelongsTo(() => VideoModel, {
+    foreignKey: {
+      allowNull: true
+    },
+    onDelete: 'CASCADE'
+  })
+  declare Video: Awaited<VideoModel>
+
+  @ForeignKey(() => VideoStreamingPlaylistModel)
+  @Column
+  declare videoStreamingPlaylistId: number
+
+  @BelongsTo(() => VideoStreamingPlaylistModel, {
+    foreignKey: {
+      allowNull: true
+    },
+    onDelete: 'CASCADE'
+  })
+  declare VideoStreamingPlaylist: Awaited<VideoStreamingPlaylistModel>
+
+  @HasOne(() => VideoInfohashModel, {
+    foreignKey: {
+      allowNull: true
+    },
+    onDelete: 'CASCADE'
+  })
+  declare InfoHash: Awaited<VideoInfohashModel>
+
+  static async doesVideoExistForVideoFile (id: number, videoIdOrUUID: number | string) {
+    const videoFile = await VideoFileModel.loadWithVideoOrPlaylist(id, videoIdOrUUID)
+
+    return !!videoFile
+  }
+
+  static async doesOwnedTorrentFileExist (filename: string, storage: FileStorageType) {
+    const query = 'SELECT 1 FROM "videoFile" ' +
+      'LEFT JOIN "video" "webvideo" ON "webvideo"."id" = "videoFile"."videoId" AND "webvideo"."remote" = false ' +
+      'LEFT JOIN "videoStreamingPlaylist" ON "videoStreamingPlaylist"."id" = "videoFile"."videoStreamingPlaylistId" ' +
+      'LEFT JOIN "video" "hlsVideo" ON "hlsVideo"."id" = "videoStreamingPlaylist"."videoId" AND "hlsVideo"."remote" = false ' +
+      'WHERE "torrentFilename" = $filename AND "torrentStorage" = $storage ' +
+      'AND ("hlsVideo"."id" IS NOT NULL OR "webvideo"."id" IS NOT NULL) LIMIT 1'
+
+    return doesExist({ sequelize: this.sequelize, query, bind: { filename, storage } })
+  }
+
+  static listOwnedWithTorrentBatch (options: {
+    lastId: number
+    batchSize: number
+  }): Promise<{ id: number, videoId: number | null, videoStreamingPlaylistId: number | null }[]> {
+    const query = 'SELECT "videoFile"."id", "videoFile"."videoId", "videoFile"."videoStreamingPlaylistId" FROM "videoFile" ' +
+      'LEFT JOIN "video" "webvideo" ON "webvideo"."id" = "videoFile"."videoId" AND "webvideo"."remote" = false ' +
+      'LEFT JOIN "videoStreamingPlaylist" ON "videoStreamingPlaylist"."id" = "videoFile"."videoStreamingPlaylistId" ' +
+      'LEFT JOIN "video" "hlsVideo" ON "hlsVideo"."id" = "videoStreamingPlaylist"."videoId" AND "hlsVideo"."remote" = false ' +
+      'WHERE "videoFile"."id" > $lastId AND "videoFile"."torrentFilename" IS NOT NULL ' +
+      'AND ("hlsVideo"."id" IS NOT NULL OR "webvideo"."id" IS NOT NULL) ' +
+      'ORDER BY "videoFile"."id" ASC LIMIT $batchSize'
+
+    return this.sequelize.query(query, { bind: options, type: QueryTypes.SELECT })
+  }
+
+  // Don't update a torrent that has been replaced or moved in the meantime
+  static async updateTorrentStorageIfUnchanged (filename: string, from: FileStorageType, to: FileStorageType) {
+    const [ affectedCount ] = await VideoFileModel.update(
+      { torrentStorage: to },
+      { where: { torrentFilename: filename, torrentStorage: from } }
+    )
+
+    return affectedCount !== 0
+  }
+
+  static async doesOwnedWebVideoFileExist (filename: string, storage: FileStorageType) {
+    const query = 'SELECT 1 FROM "videoFile" INNER JOIN "video" ON "video"."id" = "videoFile"."videoId" AND "video"."remote" = false ' +
+      `WHERE "filename" = $filename AND "storage" = $storage LIMIT 1`
+
+    return doesExist({ sequelize: this.sequelize, query, bind: { filename, storage } })
+  }
+
+  static loadByFilename (filename: string) {
+    const query = {
+      where: {
+        filename
+      }
+    }
+
+    return VideoFileModel.findOne(query)
+  }
+
+  static loadWithVideoByFilename (filename: string): Promise<MVideoFileVideo | MVideoFileStreamingPlaylistVideo> {
+    const query = {
+      where: {
+        filename
+      }
+    }
+
+    return VideoFileModel.scope(ScopeNames.WITH_VIDEO_OR_PLAYLIST).findOne(query)
+  }
+
+  static loadWithVideoOrPlaylistByTorrentFilename (filename: string) {
+    const query = {
+      where: {
+        torrentFilename: filename
+      }
+    }
+
+    return VideoFileModel.scope(ScopeNames.WITH_VIDEO_OR_PLAYLIST).findOne(query)
+  }
+
+  static load (id: number): Promise<MVideoFile> {
+    return VideoFileModel.findByPk(id)
+  }
+
+  static loadWithMetadata (id: number) {
+    return VideoFileModel.scope(ScopeNames.WITH_METADATA).findByPk<MVideoFile>(id)
+  }
+
+  static loadWithVideo (id: number, transaction?: Transaction) {
+    return VideoFileModel.scope(ScopeNames.WITH_VIDEO).findByPk<MVideoFileVideo>(id, { transaction })
+  }
+
+  static loadWithVideoOrPlaylist (id: number, videoIdOrUUID: number | string): Promise<MVideoFileVideo | MVideoFileStreamingPlaylistVideo> {
+    const whereVideo = validator.default.isUUID(videoIdOrUUID + '')
+      ? { uuid: videoIdOrUUID }
+      : { id: videoIdOrUUID }
+
+    const options = {
+      where: {
+        id
+      }
+    }
+
+    return VideoFileModel.scope({ method: [ ScopeNames.WITH_VIDEO_OR_PLAYLIST, { whereVideo } ] })
+      .findOne(options)
+      .then(file => {
+        if (!file) return null
+
+        // We used `required: false` so check we have at least a video or a streaming playlist
+        if (!file.Video && !file.VideoStreamingPlaylist) return null
+
+        return file
+      })
+  }
+
+  static listByStreamingPlaylist (streamingPlaylistId: number, transaction?: Transaction) {
+    const query = {
+      include: [
+        {
+          model: VideoStreamingPlaylistModel.unscoped(),
+          required: true,
+          where: {
+            id: streamingPlaylistId
+          }
+        }
+      ],
+      transaction
+    }
+
+    return VideoFileModel.findAll<MVideoFile>(query)
+  }
+
+  static getStats () {
+    const webVideoFilesQuery: FindOptions = {
+      include: [
+        {
+          attributes: [],
+          required: true,
+          model: VideoModel.unscoped(),
+          where: {
+            remote: false
+          }
+        }
+      ]
+    }
+
+    const hlsFilesQuery: FindOptions = {
+      include: [
+        {
+          attributes: [],
+          required: true,
+          model: VideoStreamingPlaylistModel.unscoped(),
+          include: [
+            {
+              attributes: [],
+              model: VideoModel.unscoped(),
+              required: true,
+              where: {
+                remote: false
+              }
+            }
+          ]
+        }
+      ]
+    }
+
+    return Promise.all([
+      VideoFileModel.aggregate('size', 'SUM', webVideoFilesQuery),
+      VideoFileModel.aggregate('size', 'SUM', hlsFilesQuery)
+    ]).then(([ webVideoResult, hlsResult ]) => ({
+      totalLocalVideoFilesSize: parseAggregateResult(webVideoResult) + parseAggregateResult(hlsResult)
+    }))
+  }
+
+  // Redefine upsert because sequelize does not use an appropriate where clause in the update query with 2 unique indexes
+  static async customUpsert (
+    videoFile: MVideoFile,
+    mode: 'streaming-playlist' | 'video',
+    transaction: Transaction
+  ) {
+    const baseFind = {
+      fps: videoFile.fps,
+      resolution: videoFile.resolution,
+      transaction
+    }
+
+    const element = mode === 'streaming-playlist'
+      ? await VideoFileModel.loadHLSFile({ ...baseFind, playlistId: videoFile.videoStreamingPlaylistId })
+      : await VideoFileModel.loadWebVideoFile({ ...baseFind, videoId: videoFile.videoId })
+
+    if (!element) {
+      videoFile.isNewRecord = true
+
+      return videoFile.save({ transaction })
+    }
+
+    for (const k of Object.keys(videoFile.toJSON())) {
+      element.set(k, videoFile[k])
+    }
+
+    return element.save({ transaction })
+  }
+
+  static async loadWebVideoFile (options: {
+    videoId: number
+    fps: number
+    resolution: number
+    transaction?: Transaction
+  }) {
+    const where = {
+      fps: options.fps,
+      resolution: options.resolution,
+      videoId: options.videoId
+    }
+
+    return VideoFileModel.findOne({ where, transaction: options.transaction })
+  }
+
+  static async loadHLSFile (options: {
+    playlistId: number
+    fps: number
+    resolution: number
+    transaction?: Transaction
+  }) {
+    const where = {
+      fps: options.fps,
+      resolution: options.resolution,
+      videoStreamingPlaylistId: options.playlistId
+    }
+
+    return VideoFileModel.findOne({ where, transaction: options.transaction })
+  }
+
+  static removeHLSFilesOfStreamingPlaylistId (videoStreamingPlaylistId: number) {
+    const options = {
+      where: { videoStreamingPlaylistId }
+    }
+
+    return VideoFileModel.destroy(options)
+  }
+
+  hasTorrent () {
+    return !!this.torrentFilename
+  }
+
+  // A magnet URI also needs the infohash, which is not fetched by every video query
+  canBuildMagnetUri (this: MVideoFile): this is MVideoFileInfoHash {
+    return !!this.torrentFilename && !!(this as MVideoFileInfoHash).InfoHash
+  }
+
+  getVideoOrStreamingPlaylist (this: MVideoFileVideo | MVideoFileStreamingPlaylistVideo): MVideo | MStreamingPlaylistVideo {
+    if (this.videoId || (this as MVideoFileVideo).Video) return (this as MVideoFileVideo).Video
+
+    return (this as MVideoFileStreamingPlaylistVideo).VideoStreamingPlaylist
+  }
+
+  getVideo (this: MVideoFileVideo | MVideoFileStreamingPlaylistVideo): MVideo {
+    return extractVideo(this.getVideoOrStreamingPlaylist())
+  }
+
+  // ---------------------------------------------------------------------------
+
+  isAudio () {
+    return this.resolution === VideoResolution.H_NOVIDEO
+  }
+
+  isLive () {
+    return this.size === -1
+  }
+
+  isHLS () {
+    return !!this.videoStreamingPlaylistId
+  }
+
+  hasAudio () {
+    return (this.streams & VideoFileStream.AUDIO) === VideoFileStream.AUDIO
+  }
+
+  hasVideo () {
+    return (this.streams & VideoFileStream.VIDEO) === VideoFileStream.VIDEO
+  }
+
+  // ---------------------------------------------------------------------------
+
+  getObjectStorageUrl (video: MVideo) {
+    if (video.hasPrivateStaticPath() && CONFIG.OBJECT_STORAGE.PROXY.PROXIFY_PRIVATE_FILES === true) {
+      return this.buildPrivateObjectStorageUrl(video)
+    }
+
+    return this.buildPublicObjectStorageUrl(video)
+  }
+
+  private buildPrivateObjectStorageUrl (video: MVideo) {
+    if (this.isHLS()) {
+      return buildObjectStorageHLSPrivateFileUrl(video, this.filename)
+    }
+
+    return buildObjectStorageWebVideoPrivateFileUrl(this.filename)
+  }
+
+  private buildPublicObjectStorageUrl (video: MVideo) {
+    if (this.isHLS()) {
+      return buildObjectStoragePublicFileUrl({
+        bucket: CONFIG.OBJECT_STORAGE.STREAMING_PLAYLISTS,
+        key: generateHLSObjectStorageKey(video, this.filename)
+      })
+    }
+
+    return buildObjectStoragePublicFileUrl({
+      bucket: CONFIG.OBJECT_STORAGE.WEB_VIDEOS,
+      key: generateCommonFileObjectStorageKey('web_videos', this.filename)
+    })
+  }
+
+  // ---------------------------------------------------------------------------
+
+  getFileUrl (video: MVideo) {
+    if (video.isLocal()) {
+      if (this.storage === FileStorage.OBJECT_STORAGE) {
+        return this.getObjectStorageUrl(video)
+      }
+
+      return WEBSERVER.URL + this.getFileStaticPath(video)
+    }
+
+    return this.fileUrl
+  }
+
+  // ---------------------------------------------------------------------------
+
+  getFileStaticPath (video: MVideo) {
+    if (this.isHLS()) return this.getHLSFileStaticPath(video)
+
+    return this.getWebVideoFileStaticPath(video)
+  }
+
+  private getWebVideoFileStaticPath (video: MVideo) {
+    if (isVideoInPrivateDirectory(video.privacy)) {
+      return join(STATIC_PATHS.PRIVATE_WEB_VIDEOS, this.filename)
+    }
+
+    return join(STATIC_PATHS.WEB_VIDEOS, this.filename)
+  }
+
+  private getHLSFileStaticPath (video: MVideo) {
+    if (isVideoInPrivateDirectory(video.privacy)) {
+      return join(STATIC_PATHS.STREAMING_PLAYLISTS.PRIVATE_HLS, video.uuid, this.filename)
+    }
+
+    return join(STATIC_PATHS.STREAMING_PLAYLISTS.HLS, video.uuid, this.filename)
+  }
+
+  // ---------------------------------------------------------------------------
+
+  getFileDownloadUrl (video: MVideoWithHost) {
+    const path = this.isHLS()
+      ? join(DOWNLOAD_PATHS.HLS_VIDEOS, `${video.uuid}-${this.resolution}-fragmented${this.extname}`)
+      : join(DOWNLOAD_PATHS.WEB_VIDEOS, `${video.uuid}-${this.resolution}${this.extname}`)
+
+    if (video.isLocal()) return WEBSERVER.URL + path
+
+    // FIXME: don't guess remote URL
+    return buildRemoteUrl(video, path)
+  }
+
+  getRemoteTorrentUrl (video: MVideo) {
+    if (video.isLocal()) throw new Error(`Video ${video.url} is not a remote video`)
+
+    return this.torrentUrl
+  }
+
+  getTorrentUrl () {
+    if (!this.torrentFilename) return null
+
+    // Only local torrents can be stored in our object storage
+    if (this.torrentStorage === FileStorage.OBJECT_STORAGE) {
+      return buildCommonFileObjectStorageUrl('torrents', this.torrentFilename)
+    }
+
+    // We proxify remote torrent requests so use a local URL
+    return WEBSERVER.URL + join(LAZY_STATIC_PATHS.TORRENTS, this.torrentFilename)
+  }
+
+  getTorrentDownloadUrl () {
+    if (!this.torrentFilename) return null
+
+    return WEBSERVER.URL + join(DOWNLOAD_PATHS.TORRENTS, this.torrentFilename)
+  }
+
+  removeTorrent () {
+    if (!this.torrentFilename) return null
+
+    return VideoFileModel.removeTorrentFile(this.torrentFilename, this.torrentStorage)
+  }
+
+  static removeTorrentFile (filename: string, storage: FileStorageType) {
+    if (storage === FileStorage.OBJECT_STORAGE) {
+      return removeCommonFileObjectStorage('torrents', filename)
+        .catch(err => logger.warn('Cannot delete torrent %s in object storage.', filename, { err }))
+    }
+
+    const torrentPath = join(CONFIG.STORAGE.TORRENTS_DIR, filename)
+    return remove(torrentPath)
+      .catch(err => logger.warn('Cannot delete torrent %s.', torrentPath, { err }))
+  }
+
+  hasSameUniqueKeysThan (other: MVideoFile) {
+    return this.fps === other.fps &&
+      this.resolution === other.resolution &&
+      (
+        (this.videoId !== null && this.videoId === other.videoId) ||
+        (this.videoStreamingPlaylistId !== null && this.videoStreamingPlaylistId === other.videoStreamingPlaylistId)
+      )
+  }
+
+  withVideoOrPlaylist (videoOrPlaylist: MVideo | MStreamingPlaylistVideo) {
+    if (isStreamingPlaylist(videoOrPlaylist)) return Object.assign(this, { VideoStreamingPlaylist: videoOrPlaylist })
+
+    return Object.assign(this, { Video: videoOrPlaylist })
+  }
+
+  // ---------------------------------------------------------------------------
+
+  toActivityPubObject (this: MVideoFile, video: MVideo): ActivityVideoUrlObject {
+    const mimeType = getVideoFileMimeType(this.extname, false)
+
+    const attachment: ActivityVideoUrlObject['attachment'] = []
+
+    if (this.hasAudio()) {
+      attachment.push({
+        type: 'PropertyValue',
+        name: 'ffprobe_codec_type',
+        value: 'audio'
+      })
+    }
+
+    if (this.hasVideo()) {
+      attachment.push({
+        type: 'PropertyValue',
+        name: 'ffprobe_codec_type',
+        value: 'video'
+      })
+    }
+
+    if (this.formatFlags & VideoFileFormatFlag.FRAGMENTED) {
+      attachment.push({
+        type: 'PropertyValue',
+        name: 'peertube_format_flag',
+        value: 'fragmented'
+      })
+    }
+
+    if (this.formatFlags & VideoFileFormatFlag.WEB_VIDEO) {
+      attachment.push({
+        type: 'PropertyValue',
+        name: 'peertube_format_flag',
+        value: 'web-video'
+      })
+    }
+
+    return {
+      type: 'Link',
+      mediaType: mimeType as ActivityVideoUrlObject['mediaType'],
+      href: this.getFileUrl(video),
+      height: this.height || this.resolution,
+      width: this.width,
+      size: this.size,
+      fps: this.fps,
+      attachment
+    }
+  }
+}

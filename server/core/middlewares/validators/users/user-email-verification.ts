@@ -1,0 +1,131 @@
+import { HttpStatusCode } from '@peertube/peertube-models'
+import { toBooleanOrNull } from '@server/helpers/custom-validators/misc.js'
+import { Hooks } from '@server/lib/plugins/hooks.js'
+import { getByEmailPermissive } from '@server/lib/user.js'
+import { UserModel } from '@server/models/user/user.js'
+import express from 'express'
+import { body, param } from 'express-validator'
+import { isSecretEqual } from '../../../helpers/peertube-crypto.js'
+import { createLogger } from '../../../helpers/logger.js'
+import { Redis } from '../../../lib/redis/index.js'
+import { areValidationErrors, checkUserIdExist } from '../shared/index.js'
+import { checkRegistrationEmailExistPermissive, checkRegistrationIdExist } from './shared/user-registrations.js'
+
+const logger = createLogger()
+
+export const usersAskSendUserVerifyEmailValidator = [
+  body('email').isEmail().not().isEmpty().withMessage('Should have a valid email'),
+
+  async (req: express.Request, res: express.Response, next: express.NextFunction) => {
+    if (areValidationErrors(req, res)) return
+
+    const { email } = await Hooks.wrapObject({
+      email: req.body.email
+    }, 'filter:api.email-verification.ask-send-verify-email.body')
+
+    const [ userEmail, userPendingEmail ] = await Promise.all([
+      UserModel.loadByEmailCaseInsensitive(email).then(users => getByEmailPermissive(users, email)),
+      UserModel.loadByPendingEmailCaseInsensitive(email).then(users => getByEmailPermissive(users, email))
+    ])
+
+    if (userEmail && userPendingEmail) {
+      logger.error(`Found 2 users with email ${email} to send verification link.`)
+
+      // Do not leak our emails
+      return res.sendStatus(HttpStatusCode.NO_CONTENT_204)
+    }
+
+    if (!userEmail && !userPendingEmail) {
+      logger.debug(`User with email ${email} does not exist (asking verify email).`)
+
+      // Do not leak our emails
+      return res.sendStatus(HttpStatusCode.NO_CONTENT_204)
+    }
+
+    res.locals.userEmail = userEmail
+    res.locals.userPendingEmail = userPendingEmail
+
+    const user = userEmail || userPendingEmail
+
+    if (user.pluginAuth) {
+      logger.debug(`User with email ${email} uses a plugin authentication, cannot send verification email.`)
+
+      // Do not leak our emails
+      return res.sendStatus(HttpStatusCode.NO_CONTENT_204)
+    }
+
+    return next()
+  }
+]
+
+export const usersAskSendRegistrationVerifyEmailValidator = [
+  body('email').isEmail().not().isEmpty().withMessage('Should have a valid email'),
+
+  async (req: express.Request, res: express.Response, next: express.NextFunction) => {
+    if (areValidationErrors(req, res)) return
+
+    const { email } = await Hooks.wrapObject({
+      email: req.body.email
+    }, 'filter:api.email-verification.ask-send-verify-email.body')
+
+    const registrationExists = await checkRegistrationEmailExistPermissive(email, res, false)
+
+    if (!registrationExists) {
+      logger.debug(`Registration with email ${email} does not exist (asking verify email).`)
+
+      // Do not leak our emails
+      return res.sendStatus(HttpStatusCode.NO_CONTENT_204)
+    }
+
+    return next()
+  }
+]
+
+export const usersVerifyEmailValidator = [
+  param('id')
+    .isInt().not().isEmpty().withMessage('Should have a valid id'),
+
+  body('verificationString')
+    .not().isEmpty().withMessage('Should have a valid verification string'),
+  body('isPendingEmail')
+    .optional()
+    .customSanitizer(toBooleanOrNull),
+
+  async (req: express.Request, res: express.Response, next: express.NextFunction) => {
+    if (areValidationErrors(req, res)) return
+    if (!await checkUserIdExist(req.params.id, res)) return
+
+    const user = res.locals.user
+    const redisVerificationString = await Redis.Instance.getUserVerifyEmailLink(user.id, req.body.isPendingEmail === true)
+
+    if (!isSecretEqual(redisVerificationString, req.body.verificationString)) {
+      return res.fail({ status: HttpStatusCode.FORBIDDEN_403, message: 'Invalid verification string.' })
+    }
+
+    return next()
+  }
+]
+
+// ---------------------------------------------------------------------------
+
+export const registrationVerifyEmailValidator = [
+  param('registrationId')
+    .isInt().not().isEmpty().withMessage('Should have a valid registrationId'),
+
+  body('verificationString')
+    .not().isEmpty().withMessage('Should have a valid verification string'),
+
+  async (req: express.Request, res: express.Response, next: express.NextFunction) => {
+    if (areValidationErrors(req, res)) return
+    if (!await checkRegistrationIdExist(req.params.registrationId, res)) return
+
+    const registration = res.locals.userRegistration
+    const redisVerificationString = await Redis.Instance.getRegistrationVerifyEmailLink(registration.id)
+
+    if (!isSecretEqual(redisVerificationString, req.body.verificationString)) {
+      return res.fail({ status: HttpStatusCode.FORBIDDEN_403, message: 'Invalid verification string.' })
+    }
+
+    return next()
+  }
+]

@@ -1,23 +1,41 @@
+import { Component, inject, OnDestroy, OnInit, ChangeDetectionStrategy } from '@angular/core'
+import { RouterLink } from '@angular/router'
+import { ComponentPagination, hasMoreItems, MarkdownService, User, UserService } from '@app/core'
+import { SimpleMemoize } from '@app/helpers'
+import { NSFWPolicyType, VideoSortField } from '@peertube/peertube-models'
 import { from, Subject, Subscription } from 'rxjs'
 import { concatMap, map, switchMap, tap } from 'rxjs/operators'
-import { Component, OnDestroy, OnInit } from '@angular/core'
-import { ComponentPagination, hasMoreItems, MarkdownService, ScreenService, User, UserService } from '@app/core'
-import { Account, AccountService, Video, VideoChannel, VideoChannelService, VideoService } from '@app/shared/shared-main'
-import { NSFWPolicyType, VideoSortField } from '@shared/models'
-import { MiniatureDisplayOptions } from '@app/shared/shared-video-miniature'
+import { ActorAvatarComponent } from '../../shared/shared-actor-image/actor-avatar.component'
+import { InfiniteScrollerDirective } from '../../shared/shared-main/common/infinite-scroller.directive'
+import { SubscribeButtonComponent } from '../../shared/shared-user-subscription/subscribe-button.component'
+import { MiniatureDisplayOptions, VideoMiniatureComponent } from '../../shared/shared-video-miniature/video-miniature.component'
+import { Account } from '@app/shared/shared-main/account/account.model'
+import { AccountService } from '@app/shared/shared-main/account/account.service'
+import { VideoChannel } from '@app/shared/shared-main/channel/video-channel.model'
+import { VideoChannelService } from '@app/shared/shared-main/channel/video-channel.service'
+import { Video } from '@app/shared/shared-main/video/video.model'
+import { VideoService } from '@app/shared/shared-main/video/video.service'
 
 @Component({
   selector: 'my-account-video-channels',
   templateUrl: './account-video-channels.component.html',
-  styleUrls: [ './account-video-channels.component.scss' ]
+  styleUrls: [ './account-video-channels.component.scss' ],
+  changeDetection: ChangeDetectionStrategy.Eager,
+  imports: [ InfiniteScrollerDirective, ActorAvatarComponent, RouterLink, SubscribeButtonComponent, VideoMiniatureComponent ]
 })
 export class AccountVideoChannelsComponent implements OnInit, OnDestroy {
+  private accountService = inject(AccountService)
+  private videoChannelService = inject(VideoChannelService)
+  private videoService = inject(VideoService)
+  private markdown = inject(MarkdownService)
+  private userService = inject(UserService)
+
   account: Account
   videoChannels: VideoChannel[] = []
 
   videos: { [id: number]: { total: number, videos: Video[] } } = {}
 
-  channelsDescriptionHTML: { [ id: number ]: string } = {}
+  channelsDescriptionHTML: { [id: number]: string } = {}
 
   channelPagination: ComponentPagination = {
     currentPage: 1,
@@ -41,30 +59,20 @@ export class AccountVideoChannelsComponent implements OnInit, OnDestroy {
     views: true,
     by: false,
     avatar: false,
-    privacyLabel: false,
-    privacyText: false,
-    state: false,
-    blacklistInfo: false
+    privacyLabel: false
   }
 
   private accountSub: Subscription
 
-  constructor (
-    private accountService: AccountService,
-    private videoChannelService: VideoChannelService,
-    private videoService: VideoService,
-    private markdown: MarkdownService,
-    private userService: UserService
-  ) { }
-
   ngOnInit () {
     // Parent get the account for us
     this.accountSub = this.accountService.accountLoaded
-        .subscribe(account => {
-          this.account = account
+      .subscribe(account => {
+        this.account = account
+        this.videoChannels = []
 
-          this.loadMoreChannels()
-        })
+        this.loadMoreChannels()
+      })
 
     this.userService.getAnonymousOrLoggedUser()
       .subscribe(user => {
@@ -85,24 +93,30 @@ export class AccountVideoChannelsComponent implements OnInit, OnDestroy {
       sort: '-updatedAt'
     }
 
-    this.videoChannelService.listAccountVideoChannels(options)
+    this.videoChannelService.listAccountChannels(options)
       .pipe(
-        tap(res => this.channelPagination.totalItems = res.total),
+        tap(res => {
+          this.channelPagination.totalItems = res.total
+        }),
         switchMap(res => from(res.data)),
         concatMap(videoChannel => {
           const options = {
             videoChannel,
             videoPagination: this.videosPagination,
             sort: this.videosSort,
-            nsfwPolicy: this.nsfwPolicy
+            nsfw: this.videoService.nsfwPolicyToParam(this.nsfwPolicy)
           }
 
-          return this.videoService.getVideoChannelVideos(options)
+          return this.videoService.listChannelVideos(options)
             .pipe(map(data => ({ videoChannel, videos: data.data, total: data.total })))
         })
       )
       .subscribe(async ({ videoChannel, videos, total }) => {
-        this.channelsDescriptionHTML[videoChannel.id] = await this.markdown.textMarkdownToHTML(videoChannel.description)
+        this.channelsDescriptionHTML[videoChannel.id] = await this.markdown.textMarkdownToHTML({
+          markdown: videoChannel.description,
+          withEmoji: true,
+          withHtml: true
+        })
 
         this.videoChannels.push(videoChannel)
 
@@ -113,14 +127,14 @@ export class AccountVideoChannelsComponent implements OnInit, OnDestroy {
   }
 
   getVideosOf (videoChannel: VideoChannel) {
-    const obj = this.videos[ videoChannel.id ]
+    const obj = this.videos[videoChannel.id]
     if (!obj) return []
 
     return obj.videos
   }
 
   getTotalVideosOf (videoChannel: VideoChannel) {
-    const obj = this.videos[ videoChannel.id ]
+    const obj = this.videos[videoChannel.id]
     if (!obj) return undefined
 
     return obj.total
@@ -138,6 +152,7 @@ export class AccountVideoChannelsComponent implements OnInit, OnDestroy {
     this.loadMoreChannels()
   }
 
+  @SimpleMemoize()
   getVideoChannelLink (videoChannel: VideoChannel) {
     return [ '/c', videoChannel.nameWithHost ]
   }

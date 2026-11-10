@@ -1,0 +1,200 @@
+import { FollowState } from '../actors/index.js'
+import { ConstantLabel } from '../common/constant-label.model.js'
+import { AbuseStateType } from '../moderation/index.js'
+import { PluginType_Type } from '../plugins/index.js'
+import { ChangeOwnershipStateType, VideoChannelCollaboratorStateType } from '../videos/index.js'
+import { VideoStateType } from '../videos/video-state.enum.js'
+import { UserNotificationData } from './user-notification-data.model.js'
+
+export const UserNotificationType = {
+  NEW_VIDEO_FROM_SUBSCRIPTION: 1,
+  NEW_COMMENT_ON_MY_VIDEO: 2,
+  NEW_ABUSE_FOR_MODERATORS: 3,
+
+  BLACKLIST_ON_MY_VIDEO: 4,
+  UNBLACKLIST_ON_MY_VIDEO: 5,
+
+  MY_VIDEO_PUBLISHED: 6,
+
+  MY_VIDEO_IMPORT_SUCCESS: 7,
+  MY_VIDEO_IMPORT_ERROR: 8,
+
+  NEW_USER_REGISTRATION: 9,
+  NEW_FOLLOW: 10,
+  COMMENT_MENTION: 11,
+
+  VIDEO_AUTO_BLACKLIST_FOR_MODERATORS: 12,
+
+  NEW_INSTANCE_FOLLOWER: 13,
+
+  AUTO_INSTANCE_FOLLOWING: 14,
+
+  ABUSE_STATE_CHANGE: 15,
+
+  ABUSE_NEW_MESSAGE: 16,
+
+  NEW_PLUGIN_VERSION: 17,
+  NEW_PEERTUBE_VERSION: 18,
+
+  MY_VIDEO_STUDIO_EDITION_FINISHED: 19,
+
+  NEW_USER_REGISTRATION_REQUEST: 20,
+
+  NEW_LIVE_FROM_SUBSCRIPTION: 21,
+
+  MY_VIDEO_TRANSCRIPTION_GENERATED: 22,
+
+  INVITED_TO_COLLABORATE_TO_CHANNEL: 23,
+  ACCEPTED_TO_COLLABORATE_TO_CHANNEL: 24,
+  REFUSED_TO_COLLABORATE_TO_CHANNEL: 25,
+
+  VIDEO_OWNERSHIP_CHANGED_REQUEST: 26,
+  VIDEO_OWNERSHIP_CHANGED_ACCEPTED: 27,
+  VIDEO_OWNERSHIP_CHANGED_REJECTED: 28,
+
+  CHANNEL_OWNERSHIP_CHANGED_REQUEST: 29,
+  CHANNEL_OWNERSHIP_CHANGED_ACCEPTED: 30,
+  CHANNEL_OWNERSHIP_CHANGED_REJECTED: 31,
+
+  AUTOMATIC_BLOCKLIST_UPDATE: 32,
+
+  MY_VIDEO_STUDIO_EDITION_ERROR: 33,
+  MY_VIDEO_DUPLICATION_ERROR: 34
+} as const
+
+export type UserNotificationType_Type = typeof UserNotificationType[keyof typeof UserNotificationType]
+
+export interface VideoInfo {
+  id: number
+  uuid: string
+  shortUUID: string
+  name: string
+  state: {
+    id: VideoStateType
+    label: string
+  }
+}
+
+export interface AvatarInfo {
+  width: number
+
+  fileUrl: string
+}
+
+export interface ActorInfo {
+  id: number
+  displayName: string
+  name: string
+  host: string
+
+  avatars: AvatarInfo[]
+  avatar: AvatarInfo
+}
+
+export interface UserNotification {
+  id: number
+  type: UserNotificationType_Type
+  read: boolean
+  data: UserNotificationData
+
+  video?: VideoInfo & {
+    channel: ActorInfo
+  }
+
+  videoImport?: {
+    id: number
+    video?: VideoInfo
+    torrentName?: string
+    magnetUri?: string
+    targetUrl?: string
+  }
+
+  comment?: {
+    id: number
+    threadId: number
+    account: ActorInfo
+    video: VideoInfo
+    heldForReview: boolean
+  }
+
+  abuse?: {
+    id: number
+    state: AbuseStateType
+
+    video?: VideoInfo
+
+    comment?: {
+      threadId: number
+
+      video: VideoInfo
+    }
+
+    account?: ActorInfo
+  }
+
+  videoBlacklist?: {
+    id: number
+    video: VideoInfo
+  }
+
+  account?: ActorInfo
+
+  actorFollow?: {
+    id: number
+    follower: ActorInfo
+    state: FollowState
+
+    following: {
+      type: 'account' | 'channel' | 'instance'
+      name: string
+      displayName: string
+      host: string
+    }
+  }
+
+  plugin?: {
+    name: string
+    type: PluginType_Type
+    latestVersion: string
+  }
+
+  peertube?: {
+    latestVersion: string
+  }
+
+  registration?: {
+    id: number
+    username: string
+  }
+
+  videoCaption?: {
+    id: number
+    language: ConstantLabel<string>
+    video: VideoInfo
+  }
+
+  videoChannelCollaborator?: {
+    id: number
+
+    state: ConstantLabel<VideoChannelCollaboratorStateType>
+
+    channel: ActorInfo
+    channelOwner: ActorInfo
+    account: ActorInfo
+  }
+
+  changeOwnership?: {
+    id: number
+
+    state: ConstantLabel<ChangeOwnershipStateType>
+
+    initiatorAccount: ActorInfo
+    nextOwnerAccount: ActorInfo
+
+    video: VideoInfo
+    channel: ActorInfo
+  }
+
+  createdAt: string
+  updatedAt: string
+}

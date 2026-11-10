@@ -1,36 +1,37 @@
+import { Component, OnDestroy, OnInit, inject, ChangeDetectionStrategy } from '@angular/core'
+import { FormsModule, ReactiveFormsModule } from '@angular/forms'
+import { ActivatedRoute } from '@angular/router'
+import { HooksService, Notifier, PluginService, ServerService } from '@app/core'
+import { BuildFormArgument } from '@app/shared/form-validators/form-validator.model'
+import { FormReactive } from '@app/shared/shared-forms/form-reactive'
+import { FormReactiveService } from '@app/shared/shared-forms/form-reactive.service'
+import { PeerTubePlugin, PluginType, RegisterServerSettingOptions } from '@peertube/peertube-models'
 import { Subscription } from 'rxjs'
 import { map, switchMap } from 'rxjs/operators'
-import { Component, OnDestroy, OnInit } from '@angular/core'
-import { ActivatedRoute } from '@angular/router'
-import { HooksService, Notifier, PluginService } from '@app/core'
-import { BuildFormArgument } from '@app/shared/form-validators'
-import { FormReactive, FormValidatorService } from '@app/shared/shared-forms'
-import { PeerTubePlugin, RegisterServerSettingOptions } from '@shared/models'
-import { PluginApiService } from '../shared/plugin-api.service'
+import { PluginApiService } from '../../../shared/shared-admin/plugin-api.service'
+import { DynamicFormFieldComponent } from '../../../shared/shared-forms/dynamic-form-field.component'
 
 @Component({
   selector: 'my-plugin-show-installed',
   templateUrl: './plugin-show-installed.component.html',
-  styleUrls: [ './plugin-show-installed.component.scss' ]
+  changeDetection: ChangeDetectionStrategy.Eager,
+  imports: [ FormsModule, ReactiveFormsModule, DynamicFormFieldComponent ]
 })
 export class PluginShowInstalledComponent extends FormReactive implements OnInit, OnDestroy {
+  protected formReactiveService = inject(FormReactiveService)
+  private pluginService = inject(PluginService)
+  private pluginAPIService = inject(PluginApiService)
+  private notifier = inject(Notifier)
+  private hooks = inject(HooksService)
+  private route = inject(ActivatedRoute)
+  private server = inject(ServerService)
+
   plugin: PeerTubePlugin
   registeredSettings: RegisterServerSettingOptions[] = []
   pluginTypeLabel: string
 
   private sub: Subscription
   private npmName: string
-
-  constructor (
-    protected formValidatorService: FormValidatorService,
-    private pluginService: PluginService,
-    private pluginAPIService: PluginApiService,
-    private notifier: Notifier,
-    private hooks: HooksService,
-    private route: ActivatedRoute
-  ) {
-    super()
-  }
 
   ngOnInit () {
     this.sub = this.route.params.subscribe(
@@ -50,13 +51,14 @@ export class PluginShowInstalledComponent extends FormReactive implements OnInit
     const settings = this.form.value
 
     this.pluginAPIService.updatePluginSettings(this.plugin.name, this.plugin.type, settings)
-        .subscribe(
-          () => {
-            this.notifier.success($localize`Settings updated.`)
-          },
+      .pipe(switchMap(() => this.server.resetConfig()))
+      .subscribe({
+        next: () => {
+          this.notifier.success($localize`Settings updated.`)
+        },
 
-          err => this.notifier.error(err.message)
-        )
+        error: err => this.notifier.handleError(err)
+      })
   }
 
   hasRegisteredSettings () {
@@ -77,25 +79,33 @@ export class PluginShowInstalledComponent extends FormReactive implements OnInit
     return setting.name + '-wrapper'
   }
 
+  isTheme () {
+    return this.plugin.type === PluginType.THEME
+  }
+
+  isPlugin () {
+    return this.plugin.type === PluginType.PLUGIN
+  }
+
   private loadPlugin (npmName: string) {
     this.pluginAPIService.getPlugin(npmName)
-        .pipe(switchMap(plugin => {
-          return this.pluginAPIService.getPluginRegisteredSettings(plugin.name, plugin.type)
-            .pipe(map(data => ({ plugin, registeredSettings: data.registeredSettings })))
-        }))
-        .subscribe(
-          async ({ plugin, registeredSettings }) => {
-            this.plugin = plugin
+      .pipe(switchMap(plugin => {
+        return this.pluginAPIService.getPluginRegisteredSettings(plugin.name, plugin.type)
+          .pipe(map(data => ({ plugin, registeredSettings: data.registeredSettings })))
+      }))
+      .subscribe({
+        next: async ({ plugin, registeredSettings }) => {
+          this.plugin = plugin
 
-            this.registeredSettings = await this.translateSettings(registeredSettings)
+          this.registeredSettings = await this.translateSettings(registeredSettings)
 
-            this.pluginTypeLabel = this.pluginAPIService.getPluginTypeLabel(this.plugin.type)
+          this.pluginTypeLabel = this.pluginAPIService.getPluginTypeLabel(this.plugin.type)
 
-            this.buildSettingsForm()
-          },
+          this.buildSettingsForm()
+        },
 
-          err => this.notifier.error(err.message)
-        )
+        error: err => this.notifier.handleError(err)
+      })
   }
 
   private buildSettingsForm () {
@@ -103,21 +113,21 @@ export class PluginShowInstalledComponent extends FormReactive implements OnInit
     const settingsValues: any = {}
 
     for (const setting of this.registeredSettings) {
-      buildOptions[ setting.name ] = null
-      settingsValues[ setting.name ] = this.getSetting(setting.name)
+      buildOptions[setting.name] = null
+      settingsValues[setting.name] = this.getSetting(setting.name)
     }
 
     this.buildForm(buildOptions)
 
     this.form.patchValue(settingsValues)
 
-    setTimeout(() => this.hooks.runAction('action:admin-plugin-settings.init', 'admin-plugin', { npmName: this.npmName }))
+    this.hooks.runAction('action:admin-plugin-settings.init', 'admin-plugin', { npmName: this.npmName })
   }
 
   private getSetting (name: string) {
     const settings = this.plugin.settings
 
-    if (settings && settings[name] !== undefined) return settings[name]
+    if (settings?.[name] !== undefined) return settings[name]
 
     const registered = this.registeredSettings.find(r => r.name === name)
 
@@ -126,25 +136,9 @@ export class PluginShowInstalledComponent extends FormReactive implements OnInit
 
   private async translateSettings (settings: RegisterServerSettingOptions[]) {
     for (const setting of settings) {
-      for (const key of [ 'label', 'html', 'descriptionHTML' ]) {
-        if (setting[key]) setting[key] = await this.pluginService.translateBy(this.npmName, setting[key])
-      }
-
-      if (Array.isArray(setting.options)) {
-        const newOptions = []
-
-        for (const o of setting.options) {
-          newOptions.push({
-            value: o.value,
-            label: await this.pluginService.translateBy(this.npmName, o.label)
-          })
-        }
-
-        setting.options = newOptions
-      }
+      await this.pluginService.translateSetting(this.npmName, setting)
     }
 
     return settings
   }
-
 }

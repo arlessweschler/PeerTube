@@ -1,0 +1,42 @@
+import { Transaction } from 'sequelize'
+import { ActivityAudience, ActivityLike } from '@peertube/peertube-models'
+import { createLogger } from '../../../helpers/logger.js'
+import { MActor, MActorAudience, MVideoAccountLight, MVideoUrl } from '../../../types/models/index.js'
+import { audiencify, getPublicAudience } from '../audience.js'
+import { getVideoLikeActivityPubUrlByLocalActor } from '../url.js'
+import { sendVideoRelatedActivityToOrigin } from './shared/send-utils.js'
+
+const logger = createLogger()
+
+function sendLike (byActor: MActor, video: MVideoAccountLight, transaction: Transaction) {
+  logger.info('Creating job to like %s.', video.url)
+
+  const activityBuilder = (audience: ActivityAudience) => {
+    const url = getVideoLikeActivityPubUrlByLocalActor(byActor, video)
+
+    return buildLikeActivity(url, byActor, video, audience)
+  }
+
+  return sendVideoRelatedActivityToOrigin(activityBuilder, { byActor, video, transaction, contextType: 'Rate' })
+}
+
+function buildLikeActivity (url: string, byActor: MActorAudience, video: MVideoUrl, audience?: ActivityAudience): ActivityLike {
+  if (!audience) audience = getPublicAudience(byActor)
+
+  return audiencify(
+    {
+      id: url,
+      type: 'Like',
+      actor: byActor.url,
+      object: video.url
+    },
+    audience
+  )
+}
+
+// ---------------------------------------------------------------------------
+
+export {
+  sendLike,
+  buildLikeActivity
+}

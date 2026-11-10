@@ -1,18 +1,27 @@
-.comment-flagged-account,
-.account-flagged-handle {
-  font-size: 11px;
-  color: var(--greyForegroundColor);
-}
+@use '_variables' as *;
+@use '_mixins' as *;
 
-.abuse-states .glyphicon-comment {
-  margin-left: 0.5rem;
+.comment-flagged-account,
+.account-flagged-handle,
+.video-owner {
+  font-size: 11px;
+  color: pvar(--fg-300);
 }
 
 .abuse-messages {
   my-global-icon {
-    width: 22px;
-    margin-left: 3px;
     position: relative;
-    top: -2px;
+    top: -1px;
+
+    @include global-icon-size(22px);
+    @include margin-left(3px);
   }
+}
+
+.table-video-text my-global-icon,
+my-video-cell my-global-icon {
+  position: relative;
+  top: -2px;
+
+  @include global-icon-size(15px);
 }

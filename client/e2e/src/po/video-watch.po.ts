@@ -1,131 +1,231 @@
-import { browser, by, element, ElementFinder, ExpectedConditions } from 'protractor'
-import { browserSleep, isMobileDevice } from '../utils'
+import { browserSleep, FIXTURE_URLS, go, waitForDisplayedFresh } from '../utils'
 
 export class VideoWatchPage {
-  async goOnVideosList (isMobileDevice: boolean, isSafari: boolean) {
-    let url: string
-
-    // We did not upload a file on a mobile device
-    if (isMobileDevice === true || isSafari === true) {
-      url = 'https://peertube2.cpy.re/videos/local'
-    } else {
-      url = '/videos/recently-added'
-    }
-
-    await browser.get(url, 20000)
-
-    // Waiting the following element does not work on Safari...
-    if (isSafari) return browserSleep(3000)
-
-    const elem = element.all(by.css('.videos .video-miniature .video-miniature-name')).first()
-    return browser.wait(browser.ExpectedConditions.visibilityOf(elem))
+  constructor (private isSafari: boolean) {
   }
 
-  getVideosListName () {
-    return element.all(by.css('.videos .video-miniature .video-miniature-name'))
-                  .getText()
-                  .then((texts: any) => texts.map((t: any) => t.trim()))
-  }
+  waitWatchVideoName (videoName: string, maxTime?: number) {
+    if (this.isSafari) return browserSleep(5000)
 
-  waitWatchVideoName (videoName: string, isMobileDevice: boolean, isSafari: boolean) {
-    if (isSafari) return browserSleep(5000)
-
-    // On mobile we display the first node, on desktop the second
-    const index = isMobileDevice ? 0 : 1
-
-    const elem = element.all(by.css('.video-info .video-info-name')).get(index)
-    return browser.wait(browser.ExpectedConditions.textToBePresentInElement(elem, videoName))
+    // On mobile we display the first node, on desktop the second one
+    return browser.waitUntil(async () => {
+      return (await this.getVideoName()) === videoName
+    }, { timeout: maxTime })
   }
 
   getVideoName () {
-    return this.getVideoNameElement().getText()
+    return this.getVideoNameElement().then(e => e.getText())
   }
 
-  async goOnAssociatedEmbed () {
-    let url = await browser.getCurrentUrl()
-    url = url.replace('/w/', '/embed/')
-    url = url.replace(':3333', ':9001')
-
-    return browser.get(url)
+  getPrivacy () {
+    return $('.attribute-privacy .attribute-value').getText()
   }
 
-  async goOnP2PMediaLoaderEmbed () {
-    return browser.get('https://peertube2.cpy.re/videos/embed/969bf103-7818-43b5-94a0-de159e13de50')
+  getLicence () {
+    return $('.attribute-licence .attribute-value').getText()
   }
 
-  async goOnP2PMediaLoaderPlaylistEmbed () {
-    return browser.get('https://peertube2.cpy.re/video-playlists/embed/73804a40-da9a-40c2-b1eb-2c6d9eec8f0a')
-  }
+  async isDownloadEnabled () {
+    try {
+      await this.clickOnMoreDropdownIcon()
 
-  async clickOnVideo (videoName: string) {
-    const video = element.all(by.css('.videos .video-miniature .video-miniature-name'))
-    .filter(e => e.getText().then(t => t === videoName ))
-    .first()
-
-    await browser.wait(browser.ExpectedConditions.elementToBeClickable(video))
-    await video.click()
-
-    await browser.wait(browser.ExpectedConditions.urlContains('/w/'))
-  }
-
-  async clickOnFirstVideo () {
-    const video = element.all(by.css('.videos .video-miniature .video-thumbnail')).first()
-    const videoName = element.all(by.css('.videos .video-miniature .video-miniature-name')).first()
-
-    // Don't know why but the expectation fails on Safari
-    await browser.wait(browser.ExpectedConditions.elementToBeClickable(video))
-
-    const textToReturn = videoName.getText()
-    await video.click()
-
-    await browser.wait(browser.ExpectedConditions.urlContains('/w/'))
-    return textToReturn
-  }
-
-  async clickOnUpdate () {
-    const dropdown = element(by.css('my-video-actions-dropdown .action-button'))
-    await dropdown.click()
-
-    const items: ElementFinder[] = await element.all(by.css('.dropdown-menu.show .dropdown-item'))
-
-    for (const item of items) {
-      const href = await item.getAttribute('href')
-
-      if (href && href.includes('/update/')) {
-        await item.click()
-        return
-      }
+      return await $('.dropdown-item .icon-download').isExisting()
+    } catch {
+      return $('.action-button-download').isDisplayed()
     }
   }
 
-  async clickOnSave () {
-    return element(by.css('.action-button-save')).click()
+  areCommentsEnabled () {
+    return $('my-video-comment-add').isExisting()
   }
 
-  async createPlaylist (name: string) {
-    await element(by.css('.new-playlist-button')).click()
-
-    await element(by.css('#displayName')).sendKeys(name)
-
-    return element(by.css('.new-playlist-block input[type=submit]')).click()
+  isPrivacyWarningDisplayed () {
+    return $('.privacy-concerns-text').isDisplayed()
   }
 
-  async saveToPlaylist (name: string) {
-    return element.all(by.css('my-video-add-to-playlist .playlist'))
-                  .filter(p => p.getText().then(t => t === name))
-                  .click()
+  async goOnAssociatedEmbed (passwordProtected = false) {
+    let url = await browser.getUrl()
+    url = url.replace('/w/', '/videos/embed/')
+    url = url.replace(':3333', ':9001')
+
+    await go(url)
+
+    if (passwordProtected) await this.waitEmbedForVideoPasswordForm()
+    else await this.waitEmbedForDisplayed()
   }
 
-  waitUntilVideoName (name: string, maxTime: number) {
-    const elem = this.getVideoNameElement()
+  waitEmbedForDisplayed () {
+    return $('.vjs-big-play-button').waitForDisplayed()
+  }
 
-    return browser.wait(ExpectedConditions.textToBePresentInElement(elem, name), maxTime)
+  waitEmbedForVideoPasswordForm () {
+    return $('#video-password-input').waitForDisplayed()
+  }
+
+  isEmbedWarningDisplayed () {
+    return $('.peertube-dock-description').isDisplayed()
+  }
+
+  goOnP2PMediaLoaderEmbed () {
+    return go(FIXTURE_URLS.HLS_EMBED)
+  }
+
+  goOnP2PMediaLoaderPlaylistEmbed () {
+    return go(FIXTURE_URLS.HLS_PLAYLIST_EMBED)
+  }
+
+  getModalTitleEl () {
+    return $('.modal-content .modal-title')
+  }
+
+  confirmModal () {
+    return $('.modal-content .modal-footer .primary-button').click()
   }
 
   private getVideoNameElement () {
-    // We have 2 video info name block, pick the first that is not empty
-    return element.all(by.css('.video-info-first-row .video-info-name'))
-                  .filter(e => e.getText().then(t => !!t))
-                  .first()
+    return $('.video-info-first-row .video-info-name')
+  }
+
+  // ---------------------------------------------------------------------------
+  // Video password
+  // ---------------------------------------------------------------------------
+
+  async fillVideoPassword (videoPassword: string) {
+    const videoPasswordInput = $('input#confirmInput')
+    await videoPasswordInput.waitForClickable()
+    await videoPasswordInput.clearValue()
+    await videoPasswordInput.setValue(videoPassword)
+
+    const confirmButton = $('input[value="Confirm"]')
+    await confirmButton.waitForClickable()
+    return confirmButton.click()
+  }
+
+  // ---------------------------------------------------------------------------
+  // Video actions
+  // ---------------------------------------------------------------------------
+
+  async like () {
+    const likeButton = $('.action-button-like')
+    const isActivated = (await likeButton.getAttribute('class')).includes('activated')
+
+    let count: number
+    try {
+      count = parseInt(await $('.action-button-like > .count').getText())
+    } catch (error) {
+      count = 0
+    }
+
+    await likeButton.waitForClickable()
+    await likeButton.click()
+
+    if (isActivated) {
+      if (count === 1) {
+        return expect(!await $('.action-button-like > .count').isExisting())
+      } else {
+        return expect(parseInt(await $('.action-button-like > .count').getText())).toBe(count - 1)
+      }
+    } else {
+      return expect(parseInt(await $('.action-button-like > .count').getText())).toBe(count + 1)
+    }
+  }
+
+  async clickOnManage () {
+    await this.clickOnMoreDropdownIcon()
+
+    // We need the await expression
+    return $$('.dropdown-menu.show .dropdown-item').forEach(async item => {
+      const content = await item.getText()
+
+      if (content.includes('Manage')) {
+        await item.click()
+        await $('#name').waitForClickable()
+        return
+      }
+    })
+  }
+
+  async clickOnMoreDropdownIcon () {
+    const dropdown = $('my-video-actions-dropdown .action-button')
+    await dropdown.scrollIntoView({ block: 'center' })
+    await dropdown.click()
+
+    await $('.dropdown-menu.show .dropdown-item').waitForDisplayed()
+  }
+
+  // ---------------------------------------------------------------------------
+  // Playlists
+  // ---------------------------------------------------------------------------
+
+  async clickOnSave () {
+    const button = $('.action-button-save')
+
+    await button.scrollIntoView({ block: 'center' })
+
+    return button.click()
+  }
+
+  async createPlaylist (name: string) {
+    const newPlaylistButton = () => $('.new-playlist-button')
+
+    await newPlaylistButton().waitForClickable()
+    await newPlaylistButton().click()
+
+    const displayName = () => $('#displayName')
+
+    await displayName().waitForDisplayed()
+    await displayName().setValue(name)
+
+    return $('my-playlist-create-block input[type=submit]').click()
+  }
+
+  async saveToPlaylist (name: string) {
+    const playlist = () => $('my-video-add-to-playlist').$(`.playlist=${name}`)
+
+    await playlist().waitForDisplayed()
+
+    return playlist().click()
+  }
+
+  // ---------------------------------------------------------------------------
+  // Comments
+  // ---------------------------------------------------------------------------
+
+  async createThread (comment: string) {
+    const textarea = $('my-video-comment-add textarea')
+    await textarea.waitForClickable()
+
+    await textarea.setValue(comment)
+
+    const confirmButton = $('.comment-buttons .primary-button')
+    await confirmButton.waitForClickable()
+    await confirmButton.click()
+
+    const createdComment = await $('.comment-html p').getText()
+
+    return expect(createdComment).toBe(comment)
+  }
+
+  async createReply (comment: string) {
+    const replyButton = $('button.comment-action-reply')
+    await replyButton.waitForClickable()
+    await replyButton.scrollIntoView({ block: 'center' })
+    await replyButton.click()
+
+    const textarea = $('my-video-comment my-video-comment-add textarea')
+    await textarea.waitForClickable()
+    await textarea.setValue(comment)
+
+    const confirmButton = $('my-video-comment .comment-buttons .primary-button')
+    await confirmButton.waitForClickable()
+    await replyButton.scrollIntoView({ block: 'center' })
+    await confirmButton.click()
+
+    // The reply may be rendered again just after its creation
+    await waitForDisplayedFresh(() => $('.is-child .comment-html p'))
+
+    const createdComment = $('.is-child .comment-html p')
+
+    return expect(await createdComment.getText()).toBe(comment)
   }
 }

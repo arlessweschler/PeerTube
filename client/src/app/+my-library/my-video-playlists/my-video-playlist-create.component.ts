@@ -1,7 +1,8 @@
-import { Component, OnInit } from '@angular/core'
-import { Router } from '@angular/router'
+import { CommonModule, NgClass } from '@angular/common'
+import { ChangeDetectionStrategy, Component, inject, OnInit } from '@angular/core'
+import { FormsModule, ReactiveFormsModule } from '@angular/forms'
+import { Router, RouterLink } from '@angular/router'
 import { AuthService, Notifier, ServerService } from '@app/core'
-import { listUserChannels } from '@app/helpers'
 import {
   setPlaylistChannelValidator,
   VIDEO_PLAYLIST_CHANNEL_ID_VALIDATOR,
@@ -9,29 +10,48 @@ import {
   VIDEO_PLAYLIST_DISPLAY_NAME_VALIDATOR,
   VIDEO_PLAYLIST_PRIVACY_VALIDATOR
 } from '@app/shared/form-validators/video-playlist-validators'
-import { FormValidatorService } from '@app/shared/shared-forms'
-import { VideoPlaylistService } from '@app/shared/shared-video-playlist'
-import { VideoPlaylistCreate } from '@shared/models/videos/playlist/video-playlist-create.model'
-import { VideoPlaylistPrivacy } from '@shared/models/videos/playlist/video-playlist-privacy.model'
+import { FormReactiveService } from '@app/shared/shared-forms/form-reactive.service'
+import { PeertubeCheckboxComponent } from '@app/shared/shared-forms/peertube-checkbox.component'
+import { listChannelsForSelect } from '@app/shared/shared-forms/select/channel/select-channel-helpers'
+import { AlertComponent } from '@app/shared/shared-main/common/alert.component'
+import { VideoPlaylistService } from '@app/shared/shared-video-playlist/video-playlist.service'
+import { VideoPlaylistCreate, VideoPlaylistPrivacy } from '@peertube/peertube-models'
+import { of, switchMap } from 'rxjs'
+import { ImageInputComponent } from '../../shared/shared-forms/image-input.component'
+import { MarkdownTextareaComponent } from '../../shared/shared-forms/markdown-textarea.component'
+import { SelectChannelUserComponent } from '../../shared/shared-forms/select/channel/select-channel-user.component'
+import { SelectOptionsComponent } from '../../shared/shared-forms/select/select-options.component'
+import { HelpComponent } from '../../shared/shared-main/buttons/help.component'
 import { MyVideoPlaylistEdit } from './my-video-playlist-edit'
 
 @Component({
   templateUrl: './my-video-playlist-edit.component.html',
-  styleUrls: [ './my-video-playlist-edit.component.scss' ]
+  styleUrls: [ './my-video-playlist-edit.component.scss' ],
+  changeDetection: ChangeDetectionStrategy.Eager,
+  imports: [
+    CommonModule,
+    RouterLink,
+    FormsModule,
+    ReactiveFormsModule,
+    ImageInputComponent,
+    NgClass,
+    HelpComponent,
+    MarkdownTextareaComponent,
+    SelectOptionsComponent,
+    SelectChannelUserComponent,
+    AlertComponent,
+    PeertubeCheckboxComponent
+  ]
 })
 export class MyVideoPlaylistCreateComponent extends MyVideoPlaylistEdit implements OnInit {
-  error: string
+  protected formReactiveService = inject(FormReactiveService)
+  private authService = inject(AuthService)
+  private notifier = inject(Notifier)
+  private router = inject(Router)
+  private videoPlaylistService = inject(VideoPlaylistService)
+  private serverService = inject(ServerService)
 
-  constructor (
-    protected formValidatorService: FormValidatorService,
-    private authService: AuthService,
-    private notifier: Notifier,
-    private router: Router,
-    private videoPlaylistService: VideoPlaylistService,
-    private serverService: ServerService
-    ) {
-    super()
-  }
+  error: string
 
   ngOnInit () {
     this.buildForm({
@@ -39,6 +59,7 @@ export class MyVideoPlaylistCreateComponent extends MyVideoPlaylistEdit implemen
       privacy: VIDEO_PLAYLIST_PRIVACY_VALIDATOR,
       description: VIDEO_PLAYLIST_DESCRIPTION_VALIDATOR,
       videoChannelId: VIDEO_PLAYLIST_CHANNEL_ID_VALIDATOR,
+      insertAtFirstPosition: null,
       thumbnailfile: null
     })
 
@@ -46,17 +67,19 @@ export class MyVideoPlaylistCreateComponent extends MyVideoPlaylistEdit implemen
       setPlaylistChannelValidator(this.form.get('videoChannelId'), privacy)
     })
 
-    listUserChannels(this.authService)
-      .subscribe(channels => this.userVideoChannels = channels)
+    listChannelsForSelect({
+      authService: this.authService,
+      includeCollaborations: true
+    }).subscribe(channels => this.channels = channels)
 
     this.serverService.getVideoPlaylistPrivacies()
-        .subscribe(videoPlaylistPrivacies => {
-          this.videoPlaylistPrivacies = videoPlaylistPrivacies
+      .subscribe(videoPlaylistPrivacies => {
+        this.videoPlaylistPrivacies = videoPlaylistPrivacies
 
-          this.form.patchValue({
-            privacy: VideoPlaylistPrivacy.PRIVATE
-          })
+        this.form.patchValue({
+          privacy: VideoPlaylistPrivacy.PRIVATE
         })
+      })
   }
 
   formValidated () {
@@ -71,18 +94,43 @@ export class MyVideoPlaylistCreateComponent extends MyVideoPlaylistEdit implemen
       thumbnailfile: body.thumbnailfile || null
     }
 
-    this.videoPlaylistService.createVideoPlaylist(videoPlaylistCreate).subscribe(
-      () => {
-        this.notifier.success($localize`Playlist ${videoPlaylistCreate.displayName} created.`)
-        this.router.navigate([ '/my-library', 'video-playlists' ])
-      },
+    this.videoPlaylistService.createVideoPlaylist(videoPlaylistCreate)
+      .pipe(
+        switchMap(({ videoPlaylist: { id } }) => {
+          if (body.insertAtFirstPosition !== true || !body.videoChannelId) return of(true)
 
-      err => this.error = err.message
-    )
+          const channelName = this.channels.find(c => c.id === body.videoChannelId)?.name
+
+          return this.videoPlaylistService.getVideoPlaylist(id)
+            .pipe(
+              switchMap(playlist => {
+                return this.videoPlaylistService.reorderPlaylistsOfChannel(channelName, playlist.videoChannelPosition, 0)
+              })
+            )
+        })
+      )
+      .subscribe({
+        next: () => {
+          this.notifier.success($localize`Playlist ${videoPlaylistCreate.displayName} created.`)
+          this.router.navigate([ '/my-library', 'video-playlists' ])
+        },
+
+        error: err => {
+          this.error = err.message
+        }
+      })
   }
 
   isCreation () {
     return true
+  }
+
+  isEditor () {
+    return false
+  }
+
+  getOwnerAccountDisplayName () {
+    return this.authService.getUser().account.displayName
   }
 
   getFormButtonTitle () {

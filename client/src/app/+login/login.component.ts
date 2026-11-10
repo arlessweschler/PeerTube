@@ -1,30 +1,77 @@
-import { environment } from 'src/environments/environment'
-import { AfterViewInit, Component, ElementRef, OnInit, ViewChild } from '@angular/core'
-import { ActivatedRoute } from '@angular/router'
-import { AuthService, Notifier, RedirectService, UserService } from '@app/core'
+import { NgClass } from '@angular/common'
+import { AfterViewInit, ChangeDetectionStrategy, Component, ElementRef, LOCALE_ID, OnInit, inject, viewChild } from '@angular/core'
+import { FormsModule, ReactiveFormsModule } from '@angular/forms'
+import { ActivatedRoute, Router, RouterLink } from '@angular/router'
+import { AuthService, Notifier, RedirectService, SessionStorageService, UserService } from '@app/core'
 import { HooksService } from '@app/core/plugins/hooks.service'
 import { LOGIN_PASSWORD_VALIDATOR, LOGIN_USERNAME_VALIDATOR } from '@app/shared/form-validators/login-validators'
-import { FormReactive, FormValidatorService } from '@app/shared/shared-forms'
-import { InstanceAboutAccordionComponent } from '@app/shared/shared-instance'
-import { NgbAccordion, NgbModal, NgbModalRef } from '@ng-bootstrap/ng-bootstrap'
-import { RegisteredExternalAuthConfig, ServerConfig } from '@shared/models'
+import { USER_OTP_TOKEN_VALIDATOR } from '@app/shared/form-validators/user-validators'
+import { FormReactive } from '@app/shared/shared-forms/form-reactive'
+import { FormReactiveService } from '@app/shared/shared-forms/form-reactive.service'
+import { InputTextComponent } from '@app/shared/shared-forms/input-text.component'
+import { InstanceAboutAccordionComponent } from '@app/shared/shared-instance/instance-about-accordion.component'
+import { AlertComponent } from '@app/shared/shared-main/common/alert.component'
+import { NgbAccordionDirective, NgbModal, NgbModalRef } from '@ng-bootstrap/ng-bootstrap'
+import { getCompleteLocale, getExternalAuthHref } from '@peertube/peertube-core-utils'
+import { RegisteredExternalAuthConfig, ServerConfig, ServerErrorCode } from '@peertube/peertube-models'
+import { first, of, switchMap } from 'rxjs'
+import { environment } from '../../environments/environment'
+import { GlobalIconComponent } from '../shared/shared-icons/global-icon.component'
+import { InstanceBannerComponent } from '../shared/shared-instance/instance-banner.component'
+import { AutofocusDirective } from '../shared/shared-main/common/autofocus.directive'
+import { PluginSelectorDirective } from '../shared/shared-main/plugins/plugin-selector.directive'
 
 @Component({
   selector: 'my-login',
   templateUrl: './login.component.html',
-  styleUrls: [ './login.component.scss' ]
+  styleUrls: [ './login.component.scss' ],
+  changeDetection: ChangeDetectionStrategy.Eager,
+  imports: [
+    RouterLink,
+    FormsModule,
+    PluginSelectorDirective,
+    ReactiveFormsModule,
+    AutofocusDirective,
+    NgClass,
+    InputTextComponent,
+    InstanceBannerComponent,
+    InstanceAboutAccordionComponent,
+    GlobalIconComponent,
+    AlertComponent
+  ]
 })
-
 export class LoginComponent extends FormReactive implements OnInit, AfterViewInit {
-  @ViewChild('forgotPasswordModal', { static: true }) forgotPasswordModal: ElementRef
+  protected formReactiveService = inject(FormReactiveService)
+  private route = inject(ActivatedRoute)
+  private modalService = inject(NgbModal)
+  private authService = inject(AuthService)
+  private userService = inject(UserService)
+  private redirectService = inject(RedirectService)
+  private notifier = inject(Notifier)
+  private hooks = inject(HooksService)
+  private storage = inject(SessionStorageService)
+  private router = inject(Router)
+  private localeId = inject(LOCALE_ID)
 
-  accordion: NgbAccordion
+  private static SESSION_STORAGE_REDIRECT_URL_KEY = 'login-previous-url'
+
+  readonly forgotPasswordModal = viewChild<ElementRef>('forgotPasswordModal')
+  readonly otpTokenInput = viewChild<InputTextComponent>('otpTokenInput')
+  readonly instanceAboutAccordion = viewChild<InstanceAboutAccordionComponent>('instanceAboutAccordion')
+
+  accordion: NgbAccordionDirective
+
   error: string = null
+  emailNotVerifiedError = false
+  passwordTooLongError = false
+
   forgotPasswordEmail = ''
 
   isAuthenticatedWithExternalAuth = false
   externalAuthError = false
   externalLogins: string[] = []
+
+  instanceBannerUrl: string
 
   instanceInformationPanels = {
     terms: true,
@@ -34,31 +81,25 @@ export class LoginComponent extends FormReactive implements OnInit, AfterViewIni
     codeOfConduct: false
   }
 
+  otpStep = false
+
   private openedForgotPasswordModal: NgbModalRef
   private serverConfig: ServerConfig
-
-  constructor (
-    protected formValidatorService: FormValidatorService,
-    private route: ActivatedRoute,
-    private modalService: NgbModal,
-    private authService: AuthService,
-    private userService: UserService,
-    private redirectService: RedirectService,
-    private notifier: Notifier,
-    private hooks: HooksService
-    ) {
-    super()
-  }
 
   get signupAllowed () {
     return this.serverConfig.signup.allowed === true
   }
 
+  get instanceName () {
+    return this.serverConfig.instance.name
+  }
+
   onTermsClick (event: Event, instanceInformation: HTMLElement) {
     event.preventDefault()
 
-    if (this.accordion) {
-      this.accordion.expand('terms')
+    const instanceAboutAccordion = this.instanceAboutAccordion()
+    if (instanceAboutAccordion) {
+      instanceAboutAccordion.expandTerms()
       instanceInformation.scrollIntoView({ behavior: 'smooth' })
     }
   }
@@ -67,13 +108,21 @@ export class LoginComponent extends FormReactive implements OnInit, AfterViewIni
     return this.serverConfig.email.enabled === false
   }
 
+  canUploadByDefault () {
+    return this.serverConfig.user.videoQuota !== 0 && this.serverConfig.user.videoQuotaDaily !== 0
+  }
+
   ngOnInit () {
     const snapshot = this.route.snapshot
 
     // Avoid undefined errors when accessing form error properties
     this.buildForm({
-      username: LOGIN_USERNAME_VALIDATOR,
-      password: LOGIN_PASSWORD_VALIDATOR
+      'username': LOGIN_USERNAME_VALIDATOR,
+      'password': LOGIN_PASSWORD_VALIDATOR,
+      'otp-token': {
+        VALIDATORS: [], // Will be set dynamically
+        MESSAGES: USER_OTP_TOKEN_VALIDATOR.MESSAGES
+      }
     })
 
     this.serverConfig = snapshot.data.serverConfig
@@ -87,6 +136,15 @@ export class LoginComponent extends FormReactive implements OnInit, AfterViewIni
       this.externalAuthError = true
       return
     }
+
+    if (snapshot.queryParams.username) {
+      this.form.patchValue({ username: snapshot.queryParams.username })
+    }
+
+    const previousUrl = this.redirectService.getPreviousUrl()
+    if (previousUrl && previousUrl !== '/') {
+      this.storage.setItem(LoginComponent.SESSION_STORAGE_REDIRECT_URL_KEY, previousUrl)
+    }
   }
 
   ngAfterViewInit () {
@@ -97,27 +155,44 @@ export class LoginComponent extends FormReactive implements OnInit, AfterViewIni
     return this.serverConfig.plugin.registeredExternalAuths
   }
 
+  hasExternalLogins () {
+    return this.getExternalLogins().length !== 0
+  }
+
   getAuthHref (auth: RegisteredExternalAuthConfig) {
-    return environment.apiUrl + `/plugins/${auth.name}/${auth.version}/auth/${auth.authName}`
+    return getExternalAuthHref(environment.apiUrl, auth)
   }
 
   login () {
     this.error = null
+    this.emailNotVerifiedError = false
+    this.passwordTooLongError = false
 
-    const { username, password } = this.form.value
+    const options = {
+      username: this.form.value['username'],
+      password: this.form.value['password'],
+      otpToken: this.form.value['otp-token']
+    }
 
-    this.authService.login(username, password)
-      .subscribe(
-        () => this.redirectService.redirectToPreviousRoute(),
-
-        err => this.handleError(err)
+    this.authService.login(options)
+      .pipe(
+        // userInformationLoaded emits on every user refresh: only redirect once after the login
+        switchMap(() => this.authService.userInformationLoaded.pipe(first())),
+        switchMap(() => this.updateUserLanguageIfNeeded())
       )
+      .subscribe({
+        next: () => this.redirectService.redirectToPreviousRoute({ reloadTab: this.shouldReloadTabOnLogin() }),
+
+        error: err => {
+          this.handleError(err)
+        }
+      })
   }
 
   askResetPassword () {
     this.userService.askResetPassword(this.forgotPasswordEmail)
-      .subscribe(
-        () => {
+      .subscribe({
+        next: () => {
           const message = $localize`An email with the reset password instructions will be sent to ${this.forgotPasswordEmail}.
 The link will expire within 1 hour.`
 
@@ -125,12 +200,12 @@ The link will expire within 1 hour.`
           this.hideForgotPasswordModal()
         },
 
-        err => this.notifier.error(err.message)
-      )
+        error: err => this.notifier.handleError(err)
+      })
   }
 
   openForgotPasswordModal () {
-    this.openedForgotPasswordModal = this.modalService.open(this.forgotPasswordModal)
+    this.openedForgotPasswordModal = this.modalService.open(this.forgotPasswordModal())
   }
 
   hideForgotPasswordModal () {
@@ -138,26 +213,97 @@ The link will expire within 1 hour.`
   }
 
   onInstanceAboutAccordionInit (instanceAboutAccordion: InstanceAboutAccordionComponent) {
-    this.accordion = instanceAboutAccordion.accordion
+    this.accordion = instanceAboutAccordion.accordion()
   }
 
   private loadExternalAuthToken (username: string, token: string) {
     this.isAuthenticatedWithExternalAuth = true
 
-    this.authService.login(username, null, token)
-    .subscribe(
-      () => this.redirectService.redirectToPreviousRoute(),
+    this.authService.login({ username, password: null, token })
+      .pipe(
+        // userInformationLoaded emits on every user refresh: only redirect once after the login
+        switchMap(() => this.authService.userInformationLoaded.pipe(first())),
+        switchMap(() => this.updateUserLanguageIfNeeded())
+      )
+      .subscribe({
+        next: () => {
+          const redirectUrl = this.storage.getItem(LoginComponent.SESSION_STORAGE_REDIRECT_URL_KEY)
+          if (redirectUrl) {
+            this.storage.removeItem(LoginComponent.SESSION_STORAGE_REDIRECT_URL_KEY)
+            return this.router.navigateByUrl(redirectUrl)
+          }
 
-      err => {
-        this.handleError(err)
-        this.isAuthenticatedWithExternalAuth = false
-      }
-    )
+          this.redirectService.redirectToLatestSessionRoute({ reloadTab: this.shouldReloadTabOnLogin() })
+        },
+
+        error: err => {
+          this.handleError(err)
+          this.isAuthenticatedWithExternalAuth = false
+        }
+      })
   }
 
   private handleError (err: any) {
-    if (err.message.indexOf('credentials are invalid') !== -1) this.error = $localize`Incorrect username or password.`
-    else if (err.message.indexOf('blocked') !== -1) this.error = $localize`Your account is blocked.`
-    else this.error = err.message
+    if (this.authService.isOTPMissingError(err)) {
+      this.otpStep = true
+
+      setTimeout(() => {
+        this.form.get('otp-token').setValidators(USER_OTP_TOKEN_VALIDATOR.VALIDATORS)
+        this.otpTokenInput().focus()
+      })
+
+      return
+    }
+
+    if (err.body?.code === ServerErrorCode.INVALID_GRANT) {
+      this.error = $localize`Incorrect username or password.`
+      return
+    }
+
+    if (err.body?.code === ServerErrorCode.ACCOUNT_BLOCKED) {
+      this.error = $localize`Your account is blocked.`
+      return
+    }
+
+    if (err.body?.code === ServerErrorCode.ACCOUNT_WAITING_FOR_APPROVAL) {
+      this.error = $localize`This account is awaiting approval by moderators.`
+      return
+    }
+
+    if (err.body?.code === ServerErrorCode.ACCOUNT_APPROVAL_REJECTED) {
+      this.error = $localize`Registration approval has been rejected for this account.`
+      return
+    }
+
+    if (err.body?.code === ServerErrorCode.INVALID_TWO_FACTOR) {
+      this.error = $localize`Invalid two-factor authentication token.`
+      return
+    }
+
+    if (err.body?.code === ServerErrorCode.TOO_LONG_PASSWORD) {
+      this.error = $localize`Your current password is too long. Please reset it.`
+      this.passwordTooLongError = true
+      return
+    }
+
+    if (err.body?.code === ServerErrorCode.EMAIL_NOT_VERIFIED) {
+      this.emailNotVerifiedError = true
+    }
+
+    this.error = err.message
+  }
+
+  private shouldReloadTabOnLogin () {
+    const user = this.authService.getUser()
+
+    return user.language && getCompleteLocale(user.language) !== getCompleteLocale(this.localeId)
+  }
+
+  private updateUserLanguageIfNeeded () {
+    if (this.authService.getUser().language) {
+      return this.userService.updateInterfaceLanguage(this.authService.getUser().language)
+    }
+
+    return of(true)
   }
 }

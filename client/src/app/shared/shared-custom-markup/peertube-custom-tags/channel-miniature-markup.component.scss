@@ -1,9 +1,122 @@
-@import '_variables';
-@import '_mixins';
+@use "_variables" as *;
+@use "_mixins" as *;
+
+$avatar-size: 86px;
+$avatar-overflow: 16px;
+
+$card-bg: pvar(--bg-secondary-400);
+
+$description-line-height: 1.3;
+$description-lines: 3;
+
+$host-height: 26px;
+
+$counters-line-height: 18px;
+
+$metadata-row-gap: 4px;
+
+:host {
+  display: block;
+  height: 100%;
+  // The avatar overflows on top of the card
+  padding-top: $avatar-overflow;
+}
 
 .channel {
-  border-radius: 15px;
-  padding: 10px;
-  width: min-content;
-  border: 1px solid pvar(--mainColor);
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+  padding: 24px 16px;
+  border-radius: 8px;
+  background-color: $card-bg;
+}
+
+.channel-header {
+  display: flex;
+  min-height: $avatar-size - $avatar-overflow - 24px;
+  padding-inline-start: $avatar-size + 13px;
+}
+
+my-actor-avatar {
+  position: absolute;
+  top: -$avatar-overflow;
+
+  @include left(16px);
+}
+
+.channel-info {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  min-width: 1px;
+  width: 100%;
+}
+
+.channel-name {
+  margin: 0;
+  font-size: 1rem;
+  font-weight: $font-bold;
+  line-height: 1.2;
+
+  a {
+    display: block;
+    color: pvar(--fg);
+    text-decoration: none;
+  }
+}
+
+.channel-metadata {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  align-content: flex-start;
+  justify-content: space-between;
+  gap: $metadata-row-gap 8px;
+  // Reserve 2 lines (host tag + counters) so channels in a row stay aligned when the host tag wraps
+  min-height: $host-height + $metadata-row-gap + $counters-line-height;
+}
+
+my-actor-host {
+  --bg: #{$card-bg};
+
+  min-width: 1px;
+  flex-shrink: 1;
+}
+
+.actor-counters {
+  flex-shrink: 0;
+  font-size: 12px;
+  line-height: $counters-line-height;
+  color: pvar(--fg-400);
+
+  @include actor-counters(5px);
+
+  > *:not(:last-child)::after {
+    content: "·";
+    color: inherit;
+  }
+}
+
+.description-html {
+  margin-top: 8px;
+  font-size: 14px;
+  line-height: $description-line-height;
+  color: pvar(--fg-200);
+  // Reserve the height of the description, even if it is shorter or empty, so channels in a row stay aligned
+  height: $description-lines * $description-line-height * 1em;
+
+  ::ng-deep p {
+    margin: 0;
+  }
+}
+
+.video {
+  margin-top: 24px;
+}
+
+.video-label {
+  font-size: 12px;
+  color: pvar(--fg-400);
+  margin-bottom: 8px;
 }

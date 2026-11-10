@@ -1,0 +1,440 @@
+import { exists, forceNumber } from '@peertube/peertube-core-utils'
+import {
+  ManageVideoTorrentPayload,
+  NSFWFlag,
+  VideoChannelActivityAction,
+  VideoPrivacy,
+  VideoPrivacyType,
+  VideoUpdate
+} from '@peertube/peertube-models'
+import { auditLog, AuditLogActor, AuditLogSnapshot, buildVideoAuditEntity } from '@server/lib/audit-log/index.js'
+import { createLogger } from '@server/helpers/logger.js'
+import { runTransaction } from '@server/helpers/database-utils.js'
+import { ScheduleVideoUpdateModel } from '@server/models/video/schedule-video-update.js'
+import { VideoChannelActivityModel } from '@server/models/video/video-channel-activity.js'
+import { VideoPasswordModel } from '@server/models/video/video-password.js'
+import { VideoModel } from '@server/models/video/video.js'
+import { MChannelBannerAccountDefault, MThumbnail, MUserAccountUrl, MVideo, MVideoFull, MVideoUUID } from '@server/types/models/index.js'
+import { FilteredModelAttributes } from '@server/types/sequelize.js'
+import { Transaction } from 'sequelize'
+import { sendDeleteVideo } from './activitypub/send/send-delete.js'
+import { changeVideoChannelShare } from './activitypub/share.js'
+import { buildNonDuplicatedFederateVideoJob, isPrivacyForFederation, isStateForFederation } from './activitypub/videos/index.js'
+import { createVideoAutomaticTagsJob } from './automatic-tags/automatic-tags.js'
+import { acquireDistributedLock } from './distributed-lock.js'
+import { CreateJobTypeAndPayload, JobQueue } from './job-queue/job-queue.js'
+import { autoBlacklistVideoIfNeeded } from './video-blacklist.js'
+import { replaceChaptersFromDescriptionIfNeeded } from './video-chapters.js'
+import { VideoPathManager } from './video-path-manager.js'
+import { isNewVideoForSubscription, isVideoInPrivateDirectory, moveFilesIfPrivacyChanged } from './video-privacy.js'
+import { setVideoTags } from './video.js'
+
+const logger = createLogger('video')
+
+export class LocalVideoUpdater {
+  private readonly oldVideo: MVideoFull
+  private readonly user: MUserAccountUrl | null
+
+  private readonly oldPrivacy: VideoPrivacyType
+  private readonly hadPrivacyForFederation: boolean
+
+  private readonly auditActor: AuditLogActor | null
+  private readonly oldVideoAuditEntity: AuditLogSnapshot
+
+  constructor (options: {
+    video: MVideoFull
+    user: MUserAccountUrl | null
+    // Null if the update doesn't come from a user action
+    auditActor: AuditLogActor | null
+  }) {
+    this.user = options.user
+    this.auditActor = options.auditActor
+    this.oldVideo = options.video
+
+    this.hadPrivacyForFederation = isPrivacyForFederation(this.oldVideo.privacy)
+    this.oldPrivacy = this.oldVideo.privacy
+
+    this.oldVideoAuditEntity = auditLog.snapshot(() => buildVideoAuditEntity(this.oldVideo.toFormattedDetailsJSON()))
+  }
+
+  update (options: Omit<VideoUpdate, 'thumbnailfile' | 'previewfile'> & {
+    thumbnails?: MThumbnail[]
+    channel?: MChannelBannerAccountDefault
+  }) {
+    return logger.withContext([ this.oldVideo.uuid ], () => this.runUpdate(options))
+  }
+
+  private async runUpdate (options: Omit<VideoUpdate, 'thumbnailfile' | 'previewfile'> & {
+    thumbnails?: MThumbnail[]
+    channel?: MChannelBannerAccountDefault
+  }) {
+    const videoUpdateLockReleaser = await acquireDistributedLock('video-update-' + this.oldVideo.uuid)
+
+    const videoFileLockReleaser = this.isFilesMoveNeeded(options.privacy)
+      ? await VideoPathManager.Instance.lockFiles(this.oldVideo.uuid)
+      : undefined
+
+    try {
+      const { video, newVideoForSubscription } = await runTransaction(async t => {
+        // Refresh video to prevent concurrent updates
+        const video = await VideoModel.loadFull(this.oldVideo.id, t)
+
+        const oldName = video.name
+        const oldDescription = video.description
+        const oldVideoChannel = video.VideoChannel
+
+        const keysToUpdate: (keyof VideoUpdate & FilteredModelAttributes<VideoModel>)[] = [
+          'name',
+          'category',
+          'licence',
+          'language',
+          'nsfw',
+          'nsfwFlags',
+          'nsfwSummary',
+          'waitTranscoding',
+          'support',
+          'description',
+          'downloadEnabled',
+          'commentsPolicy',
+          'recommendationScope',
+          'aiUsage',
+          'commercialContent'
+        ]
+
+        for (const key of keysToUpdate) {
+          if (options[key] !== undefined) video.set(key, options[key])
+        }
+
+        // Update sitemapContentUpdatedAt if relevant content fields changed
+        if (this.hasSitemapContentChanged({ ...options, oldName, oldDescription })) {
+          video.sitemapContentUpdatedAt = new Date()
+        }
+
+        const rebuildAutomaticTags = oldName !== video.name || oldDescription !== video.description
+
+        if (video.nsfw !== true) {
+          video.nsfwFlags = NSFWFlag.NONE
+          video.nsfwSummary = null
+        }
+
+        if (options.originallyPublishedAt !== undefined) {
+          video.originallyPublishedAt = options.originallyPublishedAt
+            ? new Date(options.originallyPublishedAt)
+            : null
+        }
+
+        // Privacy update?
+        let newVideoForSubscription = false
+
+        if (options.privacy !== undefined) {
+          newVideoForSubscription = isNewVideoForSubscription({
+            currentPrivacy: video.privacy,
+            newPrivacy: options.privacy,
+            firstPublishedAt: video.firstPublishedAt
+          })
+
+          await this.updateVideoPrivacy({
+            video,
+            privacy: options.privacy,
+            passwords: options.videoPasswords,
+            hadPrivacyForFederation: this.hadPrivacyForFederation,
+            transaction: t
+          })
+        }
+
+        // Force updatedAt attribute change
+        if (!video.changed()) {
+          await video.setAsRefreshed(t)
+        }
+
+        await video.save({ transaction: t })
+
+        if (options.thumbnails && options.thumbnails.length !== 0) {
+          await video.replaceAndSaveThumbnails(options.thumbnails, t)
+        }
+
+        if (options.tags !== undefined) {
+          await setVideoTags({ video, tags: options.tags, transaction: t })
+        }
+
+        // Channel update
+        if (options.channel && video.channelId !== options.channel.id) {
+          const oldChannel = video.VideoChannel
+          const newChannel = options.channel
+
+          if (this.user) {
+            await VideoChannelActivityModel.addVideoActivity({
+              action: VideoChannelActivityAction.REMOVE_CHANNEL_OWNERSHIP,
+              user: this.user,
+              channel: oldChannel,
+              video,
+              transaction: t
+            })
+
+            await VideoChannelActivityModel.addVideoActivity({
+              action: VideoChannelActivityAction.CREATE_CHANNEL_OWNERSHIP,
+              user: this.user,
+              channel: newChannel,
+              video,
+              transaction: t
+            })
+          }
+
+          await video.$set('VideoChannel', newChannel, { transaction: t })
+          video.VideoChannel = newChannel
+
+          if (this.hadPrivacyForFederation === true) {
+            await changeVideoChannelShare(video, oldVideoChannel, t)
+          }
+        } else if (this.user) {
+          await VideoChannelActivityModel.addVideoActivity({
+            action: VideoChannelActivityAction.UPDATE,
+            user: this.user,
+            channel: video.VideoChannel,
+            video,
+            transaction: t
+          })
+        }
+
+        // Schedule an update?
+        await this.updateScheduleIfNeeded({
+          video,
+          scheduleUpdate: options.scheduleUpdate,
+          transaction: t
+        })
+
+        if (oldDescription !== video.description) {
+          await replaceChaptersFromDescriptionIfNeeded({
+            video,
+            newDescription: video.description,
+            transaction: t,
+            oldDescription
+          })
+        }
+
+        // The video is already published: don't hold it while its automatic tags are rebuilt, or a simple metadata
+        // edit would block it and re-announce it to the subscribers once released
+        await autoBlacklistVideoIfNeeded({
+          video,
+          user: this.user,
+          isRemote: false,
+          isNew: false,
+          isNewFile: false,
+          holdIfAutoTagPolicy: false,
+          transaction: t
+        })
+
+        if (rebuildAutomaticTags) {
+          createVideoAutomaticTagsJob({ video, moderation: 'apply', transaction: t })
+        }
+
+        if (this.auditActor) {
+          auditLog.update(
+            this.auditActor,
+            () => buildVideoAuditEntity(video.toFormattedDetailsJSON()),
+            this.oldVideoAuditEntity,
+            { transaction: t }
+          )
+        }
+
+        logger.info('Video with name %s and uuid %s updated.', video.name, video.uuid)
+
+        return { video, newVideoForSubscription }
+      })
+
+      const nameChanged = exists(options.name)
+
+      const filePathChanged = exists(this.oldPrivacy)
+        ? await moveFilesIfPrivacyChanged(video, this.oldPrivacy)
+        : false
+
+      await this.rebuildHLSInfoHashesIfNeeded({ video, filePathChanged })
+
+      const jobs: CreateJobTypeAndPayload[] = []
+
+      jobs.push(...this.buildUpdateTorrentJobIfNeeded({ video, nameChanged, filePathChanged }))
+      jobs.push(...this.buildFederationJob({ video }))
+      jobs.push(...this.buildNotifyJobIfNeeded({ video, newVideoForSubscription }))
+
+      await JobQueue.Instance.createSequentialJobFlow(...jobs)
+
+      return video
+    } finally {
+      if (videoFileLockReleaser) videoFileLockReleaser()
+
+      await videoUpdateLockReleaser()
+    }
+  }
+
+  // Return a boolean indicating if the video is considered as "new" for remote instances in the federation
+  private async updateVideoPrivacy (options: {
+    video: MVideoFull
+    privacy: VideoUpdate['privacy']
+    passwords: VideoUpdate['videoPasswords']
+    hadPrivacyForFederation: boolean
+    transaction: Transaction
+  }) {
+    const { video, privacy, passwords, hadPrivacyForFederation, transaction } = options
+
+    const newPrivacy = forceNumber(privacy) as VideoPrivacyType
+    this.setVideoPrivacy(video, newPrivacy)
+
+    // Delete passwords if video is not anymore password protected
+    if (video.privacy === VideoPrivacy.PASSWORD_PROTECTED && newPrivacy !== VideoPrivacy.PASSWORD_PROTECTED) {
+      await VideoPasswordModel.deleteAllPasswords(video.id, transaction)
+    }
+
+    if (newPrivacy === VideoPrivacy.PASSWORD_PROTECTED && exists(passwords)) {
+      await VideoPasswordModel.deleteAllPasswords(video.id, transaction)
+      await VideoPasswordModel.addPasswords(passwords, video.id, transaction)
+    }
+
+    // Unfederate the video if the new privacy is not compatible with federation
+    if (hadPrivacyForFederation && !isPrivacyForFederation(video.privacy)) {
+      await sendDeleteVideo({ video, deleteForPrivacyChange: true, transaction })
+    }
+  }
+
+  private async updateScheduleIfNeeded (options: {
+    video: MVideoFull
+    scheduleUpdate: VideoUpdate['scheduleUpdate']
+    transaction: Transaction
+  }) {
+    const { video, scheduleUpdate, transaction } = options
+
+    if (scheduleUpdate) {
+      const updateAt = new Date(scheduleUpdate.updateAt)
+
+      video.publishedAt = updateAt
+      await video.save({ transaction })
+
+      await ScheduleVideoUpdateModel.upsert({
+        videoId: video.id,
+        updateAt,
+        privacy: scheduleUpdate.privacy || null
+      }, { transaction })
+
+      return
+    }
+
+    if (scheduleUpdate === null) {
+      const deleted = await ScheduleVideoUpdateModel.deleteByVideoId(video.id, transaction)
+
+      if (deleted) {
+        video.publishedAt = new Date()
+        await video.save({ transaction })
+      }
+    }
+  }
+
+  private setVideoPrivacy (video: MVideo, newPrivacy: VideoPrivacyType) {
+    if (video.privacy === VideoPrivacy.PRIVATE && newPrivacy !== VideoPrivacy.PRIVATE) {
+      video.publishedAt = new Date()
+
+      // A video that is still processed (transcoding, import, duplication...) is published at the end of its processing
+      // Don't set its first publication date now, or it would not be considered as a new video then
+      if (!video.firstPublishedAt && isStateForFederation(video.state)) {
+        video.firstPublishedAt = video.publishedAt
+      }
+    }
+
+    video.privacy = newPrivacy
+  }
+
+  private isFilesMoveNeeded (privacy: VideoUpdate['privacy']) {
+    if (privacy === undefined || !exists(this.oldPrivacy)) return false
+
+    return isVideoInPrivateDirectory(forceNumber(privacy) as VideoPrivacyType) !== isVideoInPrivateDirectory(this.oldPrivacy)
+  }
+
+  private async rebuildHLSInfoHashesIfNeeded (options: {
+    video: MVideoFull
+    filePathChanged: boolean
+  }) {
+    const { video, filePathChanged } = options
+
+    const hls = video.getHLSPlaylist()
+
+    if (filePathChanged && hls) {
+      logger.debug('Updating HLS playlist file paths after privacy change')
+
+      await hls.buildAndSetInfoHashes(video, hls.VideoFiles)
+      await hls.save()
+    }
+  }
+
+  private buildUpdateTorrentJobIfNeeded (options: {
+    video: MVideoFull
+    nameChanged: boolean
+    filePathChanged: boolean
+  }) {
+    const { video, nameChanged, filePathChanged } = options
+
+    const jobs: CreateJobTypeAndPayload[] = []
+
+    if (!video.isLive && (nameChanged || filePathChanged)) {
+      logger.debug('Updating video torrent metadata after name or file path change')
+
+      for (const file of (video.VideoFiles || [])) {
+        const payload: ManageVideoTorrentPayload = { action: 'update-metadata', videoId: video.id, videoFileId: file.id }
+
+        jobs.push({ type: 'manage-video-torrent', payload })
+      }
+
+      const hls = video.getHLSPlaylist()
+
+      for (const file of (hls?.VideoFiles || [])) {
+        const payload: ManageVideoTorrentPayload = { action: 'update-metadata', streamingPlaylistId: hls.id, videoFileId: file.id }
+
+        jobs.push({ type: 'manage-video-torrent', payload })
+      }
+    }
+
+    return jobs
+  }
+
+  private buildFederationJob (options: {
+    video: MVideoFull
+  }): CreateJobTypeAndPayload[] {
+    const { video } = options
+
+    return [ buildNonDuplicatedFederateVideoJob({ video }) ]
+  }
+
+  private buildNotifyJobIfNeeded (options: {
+    video: MVideoUUID
+    newVideoForSubscription: boolean
+  }): CreateJobTypeAndPayload[] {
+    const { video, newVideoForSubscription } = options
+    if (!newVideoForSubscription) return []
+
+    logger.debug('Video is considered new for subscriptions: create the notification job')
+
+    return [
+      {
+        type: 'notify',
+        payload: {
+          action: 'new-video',
+          videoUUID: video.uuid
+        }
+      }
+    ]
+  }
+
+  private hasSitemapContentChanged (options: {
+    name?: string
+    description?: string
+    thumbnails?: MThumbnail[]
+
+    oldName: string
+    oldDescription: string
+  }) {
+    const { name, description, thumbnails, oldName, oldDescription } = options
+
+    const nameChanged = name !== undefined && name !== oldName
+    const descriptionChanged = description !== undefined && description !== oldDescription
+    const thumbnailChanged = thumbnails !== undefined && thumbnails.length !== 0
+
+    return nameChanged || descriptionChanged || thumbnailChanged
+  }
+}

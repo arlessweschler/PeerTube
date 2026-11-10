@@ -1,9 +1,22 @@
-import { Component, ElementRef, EventEmitter, Input, OnInit, Output, ViewChild } from '@angular/core'
-import { DomSanitizer, SafeResourceUrl } from '@angular/platform-browser'
+import {
+  ChangeDetectionStrategy,
+  Component,
+  ElementRef,
+  OnChanges,
+  OnInit,
+  booleanAttribute,
+  inject,
+  input,
+  output,
+  viewChild
+} from '@angular/core'
 import { Notifier, ServerService } from '@app/core'
-import { Account, VideoChannel } from '@app/shared/shared-main'
-import { NgbPopover } from '@ng-bootstrap/ng-bootstrap'
+import { NgbDropdown, NgbDropdownMenu, NgbDropdownToggle, NgbTooltip } from '@ng-bootstrap/ng-bootstrap'
+import { ActorImage } from '@peertube/peertube-models'
 import { getBytes } from '@root-helpers/bytes'
+import { imageToDataURL } from '@root-helpers/images'
+import { ActorAvatarComponent, ActorAvatarInput } from '../shared-actor-image/actor-avatar.component'
+import { GlobalIconComponent } from '../shared-icons/global-icon.component'
 
 @Component({
   selector: 'my-actor-avatar-edit',
@@ -11,48 +24,58 @@ import { getBytes } from '@root-helpers/bytes'
   styleUrls: [
     './actor-image-edit.scss',
     './actor-avatar-edit.component.scss'
-  ]
+  ],
+  changeDetection: ChangeDetectionStrategy.Eager,
+  imports: [ ActorAvatarComponent, NgbTooltip, GlobalIconComponent, NgbDropdown, NgbDropdownToggle, NgbDropdownMenu ]
 })
-export class ActorAvatarEditComponent implements OnInit {
-  @ViewChild('avatarfileInput') avatarfileInput: ElementRef<HTMLInputElement>
-  @ViewChild('avatarPopover') avatarPopover: NgbPopover
+export class ActorAvatarEditComponent implements OnInit, OnChanges {
+  private serverService = inject(ServerService)
+  private notifier = inject(Notifier)
 
-  @Input() actor: VideoChannel | Account
-  @Input() editable = true
-  @Input() displaySubscribers = true
-  @Input() displayUsername = true
-  @Input() previewImage = false
+  readonly avatarfileInput = viewChild<ElementRef<HTMLInputElement>>('avatarfileInput')
 
-  @Output() avatarChange = new EventEmitter<FormData>()
-  @Output() avatarDelete = new EventEmitter<void>()
+  readonly actorType = input.required<'channel' | 'account'>()
+  readonly avatars = input.required<ActorImage[]>()
+  readonly username = input.required<string>()
+
+  readonly displayName = input<string>(undefined)
+  readonly subscribers = input<number>(undefined)
+
+  readonly displayUsername = input(true, { transform: booleanAttribute })
+  readonly editable = input(true, { transform: booleanAttribute })
+  readonly previewImage = input(false, { transform: booleanAttribute })
+
+  readonly avatarChange = output<FormData>()
+  readonly avatarDelete = output()
 
   avatarFormat = ''
   maxAvatarSize = 0
   avatarExtensions = ''
 
-  preview: SafeResourceUrl
+  previewUrl: string
 
-  constructor (
-    private sanitizer: DomSanitizer,
-    private serverService: ServerService,
-    private notifier: Notifier
-  ) { }
+  actor: ActorAvatarInput
 
   ngOnInit (): void {
-    this.serverService.getConfig()
-        .subscribe(config => {
-          this.maxAvatarSize = config.avatar.file.size.max
-          this.avatarExtensions = config.avatar.file.extensions.join(', ')
+    const config = this.serverService.getHTMLConfig()
 
-          this.avatarFormat = `${$localize`max size`}: 192*192px, ` +
-                              `${getBytes(this.maxAvatarSize)} ${$localize`extensions`}: ${this.avatarExtensions}`
-        })
+    this.maxAvatarSize = config.avatar.file.size.max
+    this.avatarExtensions = config.avatar.file.extensions.join(', ')
+
+    this.avatarFormat = $localize`max size: ${getBytes(this.maxAvatarSize)} extensions: ${this.avatarExtensions}`
   }
 
-  onAvatarChange (input: HTMLInputElement) {
-    this.avatarfileInput = new ElementRef(input)
+  ngOnChanges () {
+    this.previewUrl = undefined
 
-    const avatarfile = this.avatarfileInput.nativeElement.files[ 0 ]
+    this.actor = {
+      avatars: this.avatars(),
+      name: this.username()
+    }
+  }
+
+  onAvatarChange () {
+    const avatarfile = this.avatarfileInput().nativeElement.files[0]
     if (avatarfile.size > this.maxAvatarSize) {
       this.notifier.error('Error', $localize`This image is too large.`)
       return
@@ -60,36 +83,26 @@ export class ActorAvatarEditComponent implements OnInit {
 
     const formData = new FormData()
     formData.append('avatarfile', avatarfile)
-    this.avatarPopover?.close()
     this.avatarChange.emit(formData)
 
-    if (this.previewImage) {
-      this.preview = this.sanitizer.bypassSecurityTrustResourceUrl(URL.createObjectURL(avatarfile))
+    if (this.previewImage()) {
+      imageToDataURL(avatarfile).then(result => this.previewUrl = result)
     }
   }
 
   deleteAvatar () {
-    this.preview = undefined
+    if (this.previewImage()) {
+      this.previewUrl = null
+      this.actor.avatars = []
+    }
+
     this.avatarDelete.emit()
   }
 
   hasAvatar () {
-    return !!this.preview || !!this.actor.avatar
-  }
+    // User deleted the avatar
+    if (this.previewUrl === null) return false
 
-  isChannel () {
-    return !!(this.actor as VideoChannel).ownerAccount
-  }
-
-  getChannel (): VideoChannel {
-    if (this.isChannel()) return this.actor as VideoChannel
-
-    return undefined
-  }
-
-  getAccount (): Account {
-    if (this.isChannel()) return undefined
-
-    return this.actor as Account
+    return !!this.previewUrl || this.avatars().length !== 0
   }
 }

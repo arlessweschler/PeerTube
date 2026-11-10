@@ -1,0 +1,65 @@
+import { CONFIG } from '@server/initializers/config.js'
+import { OBJECT_STORAGE_PROXY_PATHS, WEBSERVER } from '@server/initializers/constants.js'
+import { MVideoUUID } from '@server/types/models/index.js'
+import { BucketInfo, buildKey, getEndpoint, objectStorageLogger as logger } from './shared/index.js'
+
+// ---------------------------------------------------------------------------
+
+export function buildObjectStoragePublicFileUrl (options: {
+  bucket: BucketInfo
+  key: string
+}) {
+  return buildBaseUrl(options.bucket) + buildKey(options.key, options.bucket)
+}
+
+// ---------------------------------------------------------------------------
+
+export function buildObjectStorageHLSPrivateFileUrl (video: MVideoUUID, filename: string) {
+  return WEBSERVER.URL + OBJECT_STORAGE_PROXY_PATHS.STREAMING_PLAYLISTS.PRIVATE_HLS + video.uuid + `/${filename}`
+}
+
+export function buildObjectStorageWebVideoPrivateFileUrl (filename: string) {
+  return WEBSERVER.URL + OBJECT_STORAGE_PROXY_PATHS.PRIVATE_WEB_VIDEOS + filename
+}
+
+// ---------------------------------------------------------------------------
+// Private
+// ---------------------------------------------------------------------------
+
+function buildBaseUrl (bucketInfo: BucketInfo) {
+  const endpointParsed = getEndpointParsed()
+  if (!endpointParsed) return ''
+
+  const baseUrlConfig = bucketInfo.BASE_URL
+  if (baseUrlConfig) {
+    if (!baseUrlConfig.endsWith('/')) return `${baseUrlConfig}/`
+
+    return baseUrlConfig
+  }
+
+  if (CONFIG.OBJECT_STORAGE.FORCE_PATH_STYLE) {
+    return `${endpointParsed.protocol}//${endpointParsed.host}/${bucketInfo.BUCKET_NAME}/`
+  }
+
+  return `${endpointParsed.protocol}//${bucketInfo.BUCKET_NAME}.${endpointParsed.host}/`
+}
+
+let endpointParsed: URL
+
+function getEndpointParsed () {
+  if (!endpointParsed) {
+    try {
+      endpointParsed = new URL(getEndpoint())
+    } catch (error) {
+      logger.error(
+        `Invalid object storage endpoint URL: ${getEndpoint()}. ` +
+          `If you enabled object storage, ensure object_storage.endpoint is correctly configured. ` +
+          `Otherwise, check that you have correctly moved all your videos to your local filesystem.`
+      )
+
+      return undefined
+    }
+  }
+
+  return endpointParsed
+}

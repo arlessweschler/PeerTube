@@ -1,0 +1,26 @@
+@use "_variables" as *;
+@use "_mixins" as *;
+
+my-embed {
+  display: block;
+  max-width: 500px;
+  width: 50%;
+}
+
+.pt-badge,
+my-privacy-badge,
+my-video-nsfw-badge {
+  @include margin-right(5px);
+}
+
+.video-expanded-info {
+  display: flex;
+
+  my-global-icon {
+    position: relative;
+    top: -2px;
+
+    @include global-icon-size(16px);
+    @include margin-left(3px);
+  }
+}

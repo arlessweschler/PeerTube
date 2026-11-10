@@ -1,0 +1,20 @@
+{
+  "name": "@peertube/tests",
+  "private": true,
+  "version": "0.0.0",
+  "type": "module",
+  "devDependencies": {
+    "@peertube/peertube-server": "workspace:*",
+    "@peertube/peertube-transcription-devtools": "workspace:*",
+    "@types/superagent": "^8.1.11",
+    "@types/supertest": "^7.2.1",
+    "fast-xml-parser": "^5.11.2",
+    "fast-xml-validator": "^1.4.1",
+    "supertest": "^7.3.1"
+  },
+  "scripts": {
+    "build": "tsc",
+    "watch": "tsc -w",
+    "install-dependencies:transcription": "pip install -r ./requirements.txt -r ../transcription-devtools/requirements.txt"
+  }
+}

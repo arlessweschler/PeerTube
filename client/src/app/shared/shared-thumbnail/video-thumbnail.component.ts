@@ -1,69 +1,186 @@
-import { Component, EventEmitter, Input, Output } from '@angular/core'
-import { ScreenService } from '@app/core'
-import { VideoState } from '@shared/models'
-import { Video } from '../shared-main'
+import { CommonModule, getLocaleDirection } from '@angular/common'
+import { booleanAttribute, ChangeDetectionStrategy, Component, inject, input, LOCALE_ID, OnChanges, output, viewChild } from '@angular/core'
+import { RouterLink } from '@angular/router'
+import { dateTimeToHuman } from '@app/helpers'
+import { NgbTooltip } from '@ng-bootstrap/ng-bootstrap'
+import { Video as VideoServerModel, VideoState } from '@peertube/peertube-models'
+import { GlobalIconComponent } from '../shared-icons/global-icon.component'
+import { FromNowPipe } from '../shared-main/date/from-now.pipe'
+import { Video } from '../shared-main/video/video.model'
+
+export type VideoThumbnailInput = Pick<
+  VideoServerModel,
+  | 'duration'
+  | 'id'
+  | 'name'
+  | 'uuid'
+  | 'shortUUID'
+  | 'isLive'
+  | 'state'
+  | 'thumbnails'
+  | 'userHistory'
+  | 'originallyPublishedAt'
+  | 'liveSchedules'
+>
 
 @Component({
   selector: 'my-video-thumbnail',
   styleUrls: [ './video-thumbnail.component.scss' ],
-  templateUrl: './video-thumbnail.component.html'
+  templateUrl: './video-thumbnail.component.html',
+  changeDetection: ChangeDetectionStrategy.Eager,
+  imports: [ CommonModule, RouterLink, NgbTooltip, GlobalIconComponent, FromNowPipe ]
 })
-export class VideoThumbnailComponent {
-  @Input() video: Video
-  @Input() nsfw = false
+export class VideoThumbnailComponent implements OnChanges {
+  private localeId = inject(LOCALE_ID)
 
-  @Input() videoRouterLink: any[]
-  @Input() queryParams: { [ p: string ]: any }
-  @Input() videoHref: string
-  @Input() videoTarget: string
+  readonly video = input.required<VideoThumbnailInput>()
+  readonly sizes = input.required<string>()
 
-  @Input() displayWatchLaterPlaylist: boolean
-  @Input() inWatchLaterPlaylist: boolean
+  readonly videoRouterLink = input<string | any[]>(undefined)
+  readonly queryParams = input<{
+    [p: string]: any
+  }>(undefined)
+  readonly videoHref = input<string>(undefined)
+  readonly videoTarget = input<string>(undefined)
 
-  @Output() watchLaterClick = new EventEmitter<boolean>()
+  readonly displayWatchLaterPlaylist = input<boolean, boolean | string>(false, { transform: booleanAttribute })
+  readonly inWatchLaterPlaylist = input<boolean, boolean | string>(false, { transform: booleanAttribute })
+  readonly playOverlay = input<boolean, boolean | string>(true, { transform: booleanAttribute })
+
+  // Hide the thumbnail link from assistive technologies, for example when the parent component already renders a link to the video
+  readonly ariaHidden = input(false, { transform: booleanAttribute })
+  readonly ariaLabel = input<string>()
+  readonly blur = input.required({ transform: booleanAttribute })
+
+  readonly watchLaterTooltip = viewChild<NgbTooltip>('watchLaterTooltip')
+  readonly watchLaterClick = output<boolean>()
 
   addToWatchLaterText: string
-  addedToWatchLaterText: string
+  removeFromWatchLaterText: string
 
-  constructor (private screenService: ScreenService) {
+  durationLabel: string
+
+  src: string
+  srcset: string
+
+  ariaLabelText: string
+  a11yOverlaysSummary: string
+
+  constructor () {
     this.addToWatchLaterText = $localize`Add to watch later`
-    this.addedToWatchLaterText = $localize`Remove from watch later`
+    this.removeFromWatchLaterText = $localize`Remove from watch later`
   }
 
-  isLiveEnded () {
-    if (!this.video.state) return
+  ngOnChanges () {
+    this.durationLabel = this.video().duration
+      ? Video.buildDurationLabel(this.video())
+      : undefined
 
-    return this.video.state.id === VideoState.LIVE_ENDED
+    const thumbnails = this.video().thumbnails || []
+    this.src = thumbnails.length > 0
+      ? thumbnails[0].fileUrl
+      : undefined
+
+    this.srcset = thumbnails.filter(t => t.aspectRatio === '16:9')
+      .map(t => `${t.fileUrl} ${t.width}w`)
+      .join(', ')
+
+    this.ariaLabelText = this.buildAriaLabel()
+    this.a11yOverlaysSummary = this.buildA11yOverlaysSummary()
   }
 
-  getImageUrl () {
-    if (!this.video) return ''
+  isRTL () {
+    return getLocaleDirection(this.localeId) === 'rtl'
+  }
 
-    if (this.screenService.isInMobileView()) {
-      return this.video.previewUrl
-    }
+  // ---------------------------------------------------------------------------
+  // Accessibility
+  // ---------------------------------------------------------------------------
 
-    return this.video.thumbnailUrl
+  private buildAriaLabel () {
+    return this.ariaLabel() || $localize`Watch video ${this.video().name}`
+  }
+
+  // Text equivalent of the overlays rendered inside the thumbnail link, used when that link is hidden from assistive technologies
+  private buildA11yOverlaysSummary () {
+    const parts: string[] = []
+
+    if (this.video().isLive) parts.push(this.getLiveOverlayLabel())
+    else if (this.getDurationLabel()) parts.push(this.getDurationOverlayLabel())
+
+    const progressPercent = this.getProgressPercent()
+    if (progressPercent) parts.push($localize`You watched ${progressPercent}% of this video`)
+
+    return parts.join('. ')
+  }
+
+  getWatchIconText () {
+    if (this.inWatchLaterPlaylist()) return this.removeFromWatchLaterText
+
+    return this.addToWatchLaterText
+  }
+
+  isLiveStreaming () {
+    // In non moderator mode we only display published live
+    // If in moderator mode, the server adds the state info to the object
+    const video = this.video()
+    if (!video.isLive) return false
+
+    return !video.state || video.state?.id === VideoState.PUBLISHED
+  }
+
+  isEndedLive () {
+    return this.video().state?.id === VideoState.LIVE_ENDED
+  }
+
+  isScheduledLive () {
+    return this.video().state?.id === VideoState.WAITING_FOR_LIVE &&
+      this.video().liveSchedules !== null &&
+      this.video().liveSchedules.length > 0
+  }
+
+  scheduledLiveDate () {
+    return new Date(this.video().liveSchedules[0].startAt)
   }
 
   getProgressPercent () {
-    if (!this.video.userHistory) return 0
+    const video = this.video()
+    if (!video.userHistory) return 0
 
-    const currentTime = this.video.userHistory.currentTime
+    const currentTime = video.userHistory.currentTime
 
-    return (currentTime / this.video.duration) * 100
+    return Math.round(currentTime / video.duration * 100)
+  }
+
+  getDurationOverlayLabel () {
+    return $localize`Video duration is ${this.getDurationLabel()}`
+  }
+
+  getLiveOverlayLabel () {
+    if (this.isLiveStreaming()) return $localize`Live`
+    if (this.isEndedLive()) return $localize`Live ended`
+    if (this.isScheduledLive()) return $localize`Scheduled live ${dateTimeToHuman(this.localeId, this.scheduledLiveDate())}`
+
+    return $localize`Waiting for live`
   }
 
   getVideoRouterLink () {
-    if (this.videoRouterLink) return this.videoRouterLink
+    const videoRouterLink = this.videoRouterLink()
+    if (videoRouterLink) return videoRouterLink
 
-    return [ '/w', this.video.uuid ]
+    return Video.buildWatchUrl(this.video())
   }
 
   onWatchLaterClick (event: Event) {
-    this.watchLaterClick.emit(this.inWatchLaterPlaylist)
+    this.watchLaterClick.emit(this.inWatchLaterPlaylist())
 
     event.stopPropagation()
+    this.watchLaterTooltip().close()
+
     return false
+  }
+
+  getDurationLabel () {
+    return this.durationLabel
   }
 }

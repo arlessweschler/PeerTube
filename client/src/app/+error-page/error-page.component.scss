@@ -1,0 +1,33 @@
+@use '_variables' as *;
+@use '_mixins' as *;
+
+.root {
+  height: 100%;
+  text-align: center;
+  display: flex;
+  justify-content: center;
+  flex-direction: column-reverse;
+
+  @include margin-left(auto);
+  @include margin-right(auto);
+  @include padding-top(9rem);
+  @include rfs(45rem, width);
+
+  .box {
+    text-align: start;
+    padding: 0 15px;
+
+    @include font-size(1.25rem);
+  }
+
+  img {
+    @include margin-left(auto);
+    @include rfs(14rem, width);
+  }
+
+  @media screen and (max-width: $mobile-view) {
+    img {
+      @include margin-right(auto);
+    }
+  }
+}

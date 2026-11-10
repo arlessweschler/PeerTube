@@ -1,113 +1,89 @@
-import { forkJoin, Subscription } from 'rxjs'
-import { first, tap } from 'rxjs/operators'
-import { Component, ComponentFactoryResolver, OnDestroy, OnInit } from '@angular/core'
-import { ActivatedRoute, Router } from '@angular/router'
-import { AuthService, ConfirmService, LocalStorageService, Notifier, ScreenService, ServerService, UserService } from '@app/core'
-import { immutableAssign } from '@app/helpers'
-import { VideoChannel, VideoChannelService, VideoService } from '@app/shared/shared-main'
-import { AbstractVideoList, MiniatureDisplayOptions } from '@app/shared/shared-video-miniature'
-import { VideoFilter } from '@shared/models'
+import { AfterViewInit, Component, OnDestroy, OnInit, inject, viewChild, ChangeDetectionStrategy } from '@angular/core'
+import { ComponentPaginationLight, DisableForReuseHook, HooksService, ScreenService } from '@app/core'
+import { VideoChannel } from '@app/shared/shared-main/channel/video-channel.model'
+import { VideoChannelService } from '@app/shared/shared-main/channel/video-channel.service'
+import { VideoService } from '@app/shared/shared-main/video/video.service'
+import { VideoFilters } from '@app/shared/shared-video-miniature/video-filters.model'
+import { Video, VideoSortField } from '@peertube/peertube-models'
+import { Subscription } from 'rxjs'
+import { VideosListComponent } from '../../shared/shared-video-miniature/videos-list.component'
 
 @Component({
   selector: 'my-video-channel-videos',
-  templateUrl: '../../shared/shared-video-miniature/abstract-video-list.html',
-  styleUrls: [
-    '../../shared/shared-video-miniature/abstract-video-list.scss'
-  ]
+  templateUrl: './video-channel-videos.component.html',
+  changeDetection: ChangeDetectionStrategy.Eager,
+  imports: [ VideosListComponent ]
 })
-export class VideoChannelVideosComponent extends AbstractVideoList implements OnInit, OnDestroy {
-  // No value because we don't want a page title
-  titlePage: string
-  loadOnInit = false
-  loadUserVideoPreferences = true
+export class VideoChannelVideosComponent implements OnInit, AfterViewInit, OnDestroy, DisableForReuseHook {
+  private screenService = inject(ScreenService)
+  private videoChannelService = inject(VideoChannelService)
+  private videoService = inject(VideoService)
+  private hooks = inject(HooksService)
 
-  filter: VideoFilter = null
+  readonly videosList = viewChild<VideosListComponent>('videosList')
 
-  displayOptions: MiniatureDisplayOptions = {
-    date: true,
-    views: true,
-    by: false,
-    avatar: false,
-    privacyLabel: true,
-    privacyText: false,
-    state: false,
-    blacklistInfo: false
-  }
+  getVideosObservableFunction = this.getVideosObservable.bind(this)
+  getSyndicationItemsFunction = this.getSyndicationItems.bind(this)
 
-  private videoChannel: VideoChannel
+  defaultSort = '-publishedAt' as VideoSortField
+
+  videoChannel: VideoChannel
+  disabled = false
+
   private videoChannelSub: Subscription
-
-  constructor (
-    protected router: Router,
-    protected serverService: ServerService,
-    protected route: ActivatedRoute,
-    protected authService: AuthService,
-    protected userService: UserService,
-    protected notifier: Notifier,
-    protected confirmService: ConfirmService,
-    protected screenService: ScreenService,
-    protected storageService: LocalStorageService,
-    protected cfr: ComponentFactoryResolver,
-    private videoChannelService: VideoChannelService,
-    private videoService: VideoService
-  ) {
-    super()
-
-    this.titlePage = $localize`Published videos`
-    this.displayOptions = {
-      ...this.displayOptions,
-      avatar: false
-    }
-  }
+  private alreadyLoaded = false
 
   ngOnInit () {
-    super.ngOnInit()
-
-    this.enableAllFilterIfPossible()
-
     // Parent get the video channel for us
-    this.videoChannelSub = forkJoin([
-      this.videoChannelService.videoChannelLoaded.pipe(first()),
-      this.onUserLoadedSubject.pipe(first())
-    ]).subscribe(([ videoChannel ]) => {
-      this.videoChannel = videoChannel
+    this.videoChannelSub = this.videoChannelService.videoChannelLoaded
+      .subscribe(videoChannel => {
+        if (this.videoChannel?.id === videoChannel.id) return
 
-      this.reloadVideos()
-      this.generateSyndicationList()
-    })
+        this.videoChannel = videoChannel
+        if (this.alreadyLoaded) this.videosList().reloadVideos()
+
+        this.hooks.runAction('action:video-channel-videos.video-channel.loaded', 'video-channel', { videoChannel })
+
+        this.alreadyLoaded = true
+      })
+  }
+
+  ngAfterViewInit () {
+    this.hooks.runAction('action:video-channel-videos.init', 'video-channel')
   }
 
   ngOnDestroy () {
     if (this.videoChannelSub) this.videoChannelSub.unsubscribe()
-
-    super.ngOnDestroy()
   }
 
-  getVideosObservable (page: number) {
-    const newPagination = immutableAssign(this.pagination, { currentPage: page })
-    const options = {
+  getVideosObservable (pagination: ComponentPaginationLight, filters: VideoFilters) {
+    return this.videoService.listChannelVideos({
+      ...filters.toVideosAPIObject(),
+
+      videoPagination: pagination,
       videoChannel: this.videoChannel,
-      videoPagination: newPagination,
-      sort: this.sort,
-      nsfwPolicy: this.nsfwPolicy,
-      videoFilter: this.filter
-    }
-
-    return this.videoService
-               .getVideoChannelVideos(options)
+      includeScheduledLive: true,
+      skipCount: true
+    })
   }
 
-  generateSyndicationList () {
-    this.syndicationItems = this.videoService.getVideoChannelFeedUrls(this.videoChannel.id)
-  }
-
-  toggleModerationDisplay () {
-    this.filter = this.buildLocalFilter(this.filter, null)
-
-    this.reloadVideos()
+  getSyndicationItems () {
+    return this.videoService.getVideoChannelFeedUrls(this.videoChannel.id)
   }
 
   displayAsRow () {
     return this.screenService.isInMobileView()
+  }
+
+  disableForReuse () {
+    this.disabled = true
+  }
+
+  enabledForReuse () {
+    this.disabled = false
+  }
+
+  onVideosLoaded (videos: Video[]) {
+    this.hooks.runAction('action:video-channel-videos.videos.loaded', 'video-channel', { videos })
   }
 }

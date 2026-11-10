@@ -1,20 +1,11 @@
-import { by, element } from 'protractor'
+import { VideoManage } from './video-manage'
 
-export class VideoUpdatePage {
-
+export class VideoUpdatePage extends VideoManage {
   async updateName (videoName: string) {
-    const nameInput = element(by.css('input#name'))
-    await nameInput.clear()
-    await nameInput.sendKeys(videoName)
-  }
+    const nameInput = $('input#name')
 
-  async validUpdate () {
-    const submitButton = await this.getSubmitButton()
-
-    return submitButton.click()
-  }
-
-  private getSubmitButton () {
-    return element(by.css('.submit-container .action-button'))
+    await nameInput.waitForDisplayed()
+    await nameInput.clearValue()
+    await nameInput.setValue(videoName)
   }
 }

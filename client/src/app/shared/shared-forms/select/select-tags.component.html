@@ -1,13 +1,11 @@
-<ng-select
-  [items]="availableItems"
-  [(ngModel)]="selectedItems"
+<p-autoComplete
+  class="w-100"
+  [(ngModel)]="selectedItems" [ngModelOptions]="{ standalone: true }"
   (ngModelChange)="onModelChange()"
-  i18n-placeholder placeholder="Enter a new tag"
-  [maxSelectedItems]="5"
-  [clearable]="true"
-  [addTag]="true"
-  [multiple]="true"
-  [isOpen]="false"
-  [searchable]="true"
->
-</ng-select>
+  [placeholder]="placeholder()"
+  [inputId]="inputId()"
+  [separator]="separator"
+  [class.small]="small()"
+  multiple="true"
+  [typeahead]="false"
+></p-autoComplete>

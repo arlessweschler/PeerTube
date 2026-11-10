@@ -1,0 +1,251 @@
+import {
+  PluginPlaylistPrivacyManager,
+  PluginSettingsManager,
+  PluginStorageManager,
+  PluginTranscodingManager,
+  PluginVideoCategoryManager,
+  PluginVideoLanguageManager,
+  PluginVideoLicenceManager,
+  PluginVideoPrivacyManager,
+  RegisterServerHookOptions,
+  RegisterServerSettingOptions,
+  ServerConfig,
+  VideoBlacklistCreate,
+  VideoCommentPolicyType,
+  VideoPrivacyType
+} from '@peertube/peertube-models'
+import { ActorModel } from '@server/models/actor/actor.js'
+import { Response, Router } from 'express'
+import { Server } from 'http'
+import { Logger } from 'winston'
+import { MAutomaticTag, MUserDefault, MVideo, MVideoThumbnails, MVideoWithAllFiles, UserNotificationModelForApi } from '../models/index.js'
+import { RegisterCommentAutoTaggerOptions, RegisterVideoAutoTaggerOptions } from './register-auto-tagger.model.js'
+import {
+  RegisterServerAuthExternalOptions,
+  RegisterServerAuthExternalResult,
+  RegisterServerAuthPassOptions
+} from './register-server-auth.model.js'
+import { RegisterServerWebSocketRouteOptions } from './register-server-websocket-route.model.js'
+
+export type PeerTubeHelpers = {
+  logger: Logger
+
+  database: {
+    query: Function
+  }
+
+  videos: {
+    loadByUrl: (url: string) => Promise<MVideoThumbnails>
+    loadByIdOrUUIDWithFiles: (id: number | string) => Promise<MVideoWithAllFiles>
+    loadByIdOrUUID: (id: number | string) => Promise<MVideoThumbnails>
+
+    removeVideo: (videoId: number) => Promise<void>
+
+    // PeerTube >= 8.3
+    // Update video metadata (does not handle thumbnail/preview files or the video channel)
+    updateVideo: (options: {
+      videoId: number | string
+      attributes: {
+        name?: string
+        category?: number
+        licence?: number
+        language?: string
+        description?: string
+        support?: string
+        privacy?: VideoPrivacyType
+        tags?: string[]
+
+        commentsPolicy?: VideoCommentPolicyType
+
+        downloadEnabled?: boolean
+
+        nsfw?: boolean
+        nsfwSummary?: string
+        nsfwFlags?: number
+
+        waitTranscoding?: boolean
+
+        originallyPublishedAt?: Date | string
+        videoPasswords?: string[]
+      }
+    }) => Promise<void>
+
+    ffprobe: (path: string) => Promise<any>
+
+    // PeerTube >= 8.3
+    // Make a video file available on disk (downloading it from remote storage if needed) so it can be analyzed
+    // The video files of the video are locked until the promise returned by `cb` is resolved/rejected
+    withFile: <T>(
+      options: {
+        videoId: number | string
+        videoFileId: number
+      },
+      cb: (path: string) => Promise<T> | T
+    ) => Promise<T>
+
+    getFiles: (id: number | string) => Promise<{
+      webVideo: {
+        videoFiles: {
+          id: number
+          path: string // Could be null if using remote storage
+          url: string
+          resolution: number
+          size: number
+          fps: number
+        }[]
+      }
+
+      hls: {
+        videoFiles: {
+          id: number
+          path: string // Could be null if using remote storage
+          url: string
+          resolution: number
+          size: number
+          fps: number
+        }[]
+      }
+
+      thumbnails: {
+        // 1 = Thumbnail, 2 = Preview (deprecated, use width/height instead)
+        type: 1 | 2
+
+        height: number
+        width: number
+        path: string
+      }[]
+    }>
+  }
+
+  config: {
+    getWebserverUrl: () => string
+
+    // PeerTube >= 5.1
+    getServerListeningConfig: () => { hostname: string, port: number }
+
+    getServerConfig: () => Promise<ServerConfig>
+  }
+
+  moderation: {
+    blockServer: (options: { byAccountId: number, hostToBlock: string }) => Promise<void>
+    unblockServer: (options: { byAccountId: number, hostToUnblock: string }) => Promise<void>
+    blockAccount: (options: { byAccountId: number, handleToBlock: string }) => Promise<void>
+    unblockAccount: (options: { byAccountId: number, handleToUnblock: string }) => Promise<void>
+
+    blacklistVideo: (options: { videoIdOrUUID: number | string, createOptions: VideoBlacklistCreate }) => Promise<void>
+    unblacklistVideo: (options: { videoIdOrUUID: number | string }) => Promise<void>
+  }
+
+  server: {
+    // PeerTube >= 5.0
+    getHTTPServer: () => Server
+
+    getServerActor: () => Promise<ActorModel>
+  }
+
+  socket: {
+    sendNotification: (userId: number, notification: UserNotificationModelForApi) => void
+    sendVideoLiveNewState: (video: MVideo) => void
+  }
+
+  plugin: {
+    // PeerTube >= 3.2
+    getBaseStaticRoute: () => string
+
+    // PeerTube >= 3.2
+    getBaseRouterRoute: () => string
+    // PeerTube >= 5.0
+    getBaseWebSocketRoute: () => string
+
+    // PeerTube >= 3.2
+    getDataDirectoryPath: () => string
+  }
+
+  user: {
+    // PeerTube >= 3.2
+    getAuthUser: (response: Response) => Promise<MUserDefault>
+
+    // PeerTube >= 4.3
+    loadById: (id: number) => Promise<MUserDefault>
+
+    // PeerTube >= 9.0
+    removeUser: (id: number) => Promise<void>
+  }
+
+  automaticTags: {
+    // PeerTube >= 8.3
+    getServerCommentAutomaticTags: (options: { commentId: number }) => Promise<MAutomaticTag[]>
+    // PeerTube >= 8.3
+    getAccountCommentAutomaticTags: (options: { accountId: number, commentId: number }) => Promise<MAutomaticTag[]>
+
+    // PeerTube >= 8.3
+    getServerVideoAutomaticTags: (options: { videoId: number }) => Promise<MAutomaticTag[]>
+  }
+
+  email: {
+    // PeerTube >= 8.3
+    createJob: (payload: {
+      // Language of the email to send. If not provided, the default language of the instance will be used
+      to: { email: string, language?: string }
+
+      // Email subject
+      subject: string
+
+      // Optional title, injected in HTML email
+      title?: string
+
+      // Text inside the HTML email
+      text: string
+
+      // Button that can be added at the end of the email
+      action?: {
+        url: string
+        text: string
+      }
+    }) => Promise<void>
+  }
+}
+
+export type RegisterServerOptions = {
+  registerHook: (options: RegisterServerHookOptions) => void
+
+  registerSetting: (options: RegisterServerSettingOptions) => void
+
+  settingsManager: PluginSettingsManager
+
+  storageManager: PluginStorageManager
+
+  videoCategoryManager: PluginVideoCategoryManager
+  videoLanguageManager: PluginVideoLanguageManager
+  videoLicenceManager: PluginVideoLicenceManager
+
+  videoPrivacyManager: PluginVideoPrivacyManager
+  playlistPrivacyManager: PluginPlaylistPrivacyManager
+
+  transcodingManager: PluginTranscodingManager
+
+  registerIdAndPassAuth: (options: RegisterServerAuthPassOptions) => void
+  registerExternalAuth: (options: RegisterServerAuthExternalOptions) => RegisterServerAuthExternalResult
+  unregisterIdAndPassAuth: (authName: string) => void
+  unregisterExternalAuth: (authName: string) => void
+
+  registerCommentAutoTagger: (options: RegisterCommentAutoTaggerOptions) => void
+  registerVideoAutoTagger: (options: RegisterVideoAutoTaggerOptions) => void
+  unregisterCommentAutoTagger: (options: RegisterCommentAutoTaggerOptions) => void
+  unregisterVideoAutoTagger: (options: RegisterVideoAutoTaggerOptions) => void
+
+  // Get plugin router to create custom routes
+  // Base routes of this router are
+  //  * /plugins/:pluginName/:pluginVersion/router/...
+  //  * /plugins/:pluginName/router/...
+  getRouter(): Router
+
+  // PeerTube >= 5.0
+  // Register WebSocket route
+  // Base routes of the WebSocket router are
+  //  * /plugins/:pluginName/:pluginVersion/ws/...
+  //  * /plugins/:pluginName/ws/...
+  registerWebSocketRoute: (options: RegisterServerWebSocketRouteOptions) => void
+
+  peertubeHelpers: PeerTubeHelpers
+}

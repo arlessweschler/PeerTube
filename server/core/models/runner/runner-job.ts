@@ -1,0 +1,459 @@
+import {
+  RunnerJob,
+  RunnerJobAdmin,
+  RunnerJobState,
+  type RunnerJobPayload,
+  type RunnerJobPrivatePayload,
+  type RunnerJobStateType,
+  type RunnerJobType
+} from '@peertube/peertube-models'
+import { isArray, isUUIDValid } from '@server/helpers/custom-validators/misc.js'
+import { CONSTRAINTS_FIELDS, RUNNER_JOB_STATES } from '@server/initializers/constants.js'
+import { MRunnerJob, MRunnerJobRunner, MRunnerJobRunnerParent } from '@server/types/models/runners/index.js'
+import { literal, Op, Transaction, WhereOptions } from 'sequelize'
+import {
+  AllowNull,
+  BelongsTo,
+  Column,
+  CreatedAt,
+  DataType,
+  Default,
+  ForeignKey,
+  IsUUID,
+  Scopes,
+  Table,
+  UpdatedAt
+} from 'sequelize-typescript'
+import { getSort, parseAggregateResult, searchAttribute, SequelizeModel } from '../shared/index.js'
+import { RunnerModel } from './runner.js'
+
+enum ScopeNames {
+  WITH_RUNNER = 'WITH_RUNNER',
+  WITH_PARENT = 'WITH_PARENT'
+}
+
+@Scopes(() => ({
+  [ScopeNames.WITH_RUNNER]: {
+    include: [
+      {
+        model: RunnerModel.unscoped(),
+        required: false
+      }
+    ]
+  },
+  [ScopeNames.WITH_PARENT]: {
+    include: [
+      {
+        model: RunnerJobModel.unscoped(),
+        required: false
+      }
+    ]
+  }
+}))
+@Table({
+  tableName: 'runnerJob',
+  indexes: [
+    {
+      fields: [ 'uuid' ],
+      unique: true
+    },
+    {
+      fields: [ 'processingJobToken' ],
+      unique: true
+    },
+    {
+      fields: [ 'runnerId' ]
+    },
+    {
+      fields: [ 'dependsOnRunnerJobId' ]
+    },
+    {
+      // Stalled jobs watchdog
+      name: 'runner_job_state_type_updated_at',
+      fields: [ 'state', 'type', 'updatedAt' ]
+    },
+    {
+      // Polled by runners to list available jobs
+      name: 'runner_job_pending_priority',
+      fields: [ 'priority', 'id' ],
+      where: {
+        state: RunnerJobState.PENDING
+      }
+    }
+  ]
+})
+export class RunnerJobModel extends SequelizeModel<RunnerJobModel> {
+  @AllowNull(false)
+  @IsUUID(4)
+  @Column(DataType.UUID)
+  declare uuid: string
+
+  @AllowNull(false)
+  @Column
+  declare type: RunnerJobType
+
+  @AllowNull(false)
+  @Column(DataType.JSONB)
+  declare payload: RunnerJobPayload
+
+  @AllowNull(false)
+  @Column(DataType.JSONB)
+  declare privatePayload: RunnerJobPrivatePayload
+
+  @AllowNull(false)
+  @Column
+  declare state: RunnerJobStateType
+
+  @AllowNull(false)
+  @Default(0)
+  @Column
+  declare failures: number
+
+  @AllowNull(true)
+  @Column(DataType.STRING(CONSTRAINTS_FIELDS.RUNNER_JOBS.ERROR_MESSAGE.max))
+  declare error: string
+
+  // Less has priority
+  @AllowNull(false)
+  @Column
+  declare priority: number
+
+  // Used to fetch the appropriate job when the runner wants to post the result
+  @AllowNull(true)
+  @Column(DataType.STRING(CONSTRAINTS_FIELDS.RUNNER_JOBS.TOKEN.max))
+  declare processingJobToken: string
+
+  @AllowNull(true)
+  @Column
+  declare progress: number
+
+  @AllowNull(true)
+  @Column
+  declare startedAt: Date
+
+  @AllowNull(true)
+  @Column
+  declare finishedAt: Date
+
+  @CreatedAt
+  declare createdAt: Date
+
+  @UpdatedAt
+  declare updatedAt: Date
+
+  @ForeignKey(() => RunnerJobModel)
+  @Column
+  declare dependsOnRunnerJobId: number
+
+  @BelongsTo(() => RunnerJobModel, {
+    foreignKey: {
+      name: 'dependsOnRunnerJobId',
+      allowNull: true
+    },
+    onDelete: 'cascade'
+  })
+  declare DependsOnRunnerJob: Awaited<RunnerJobModel>
+
+  @ForeignKey(() => RunnerModel)
+  @Column
+  declare runnerId: number
+
+  @BelongsTo(() => RunnerModel, {
+    foreignKey: {
+      name: 'runnerId',
+      allowNull: true
+    },
+    onDelete: 'SET NULL'
+  })
+  declare Runner: Awaited<RunnerModel>
+
+  // ---------------------------------------------------------------------------
+
+  // Only one caller can move the job out of PROCESSING
+  static async setAsCompletingIfProcessing (runnerJob: MRunnerJob) {
+    const [ affectedCount ] = await RunnerJobModel.update({ state: RunnerJobState.COMPLETING }, {
+      where: { id: runnerJob.id, state: RunnerJobState.PROCESSING }
+    })
+
+    if (affectedCount === 0) return false
+
+    runnerJob.state = RunnerJobState.COMPLETING
+    return true
+  }
+
+  static doesUUIDExist (uuid: string) {
+    const query = {
+      attributes: [ 'id' ],
+      where: { uuid },
+      raw: true
+    }
+
+    return RunnerJobModel.findOne(query)
+      .then(e => !!e)
+  }
+
+  static loadWithRunner (uuid: string) {
+    const query = {
+      where: { uuid }
+    }
+
+    return RunnerJobModel.scope(ScopeNames.WITH_RUNNER).findOne<MRunnerJobRunner>(query)
+  }
+
+  static loadByRunnerAndJobTokensWithRunner (options: {
+    uuid: string
+    runnerToken: string
+    jobToken: string
+  }) {
+    const { uuid, runnerToken, jobToken } = options
+
+    const query = {
+      where: {
+        uuid,
+        processingJobToken: jobToken
+      },
+      include: {
+        model: RunnerModel.unscoped(),
+        required: true,
+        where: {
+          runnerToken
+        }
+      }
+    }
+
+    return RunnerJobModel.findOne<MRunnerJobRunner>(query)
+  }
+
+  static listAvailableJobs (jobTypes?: string[]) {
+    const jobTypesWhere = jobTypes
+      ? {
+        type: {
+          [Op.in]: jobTypes
+        }
+      }
+      : {}
+
+    return RunnerJobModel.findAll<MRunnerJob>({
+      limit: 10,
+      order: getSort('priority'),
+      where: {
+        state: RunnerJobState.PENDING,
+
+        ...jobTypesWhere
+      }
+    })
+  }
+
+  static listStalledJobs (options: {
+    staleTimeMS: number
+    types?: RunnerJobType[] // default all types
+    state?: RunnerJobStateType // default PROCESSING
+  }) {
+    const { types, state = RunnerJobState.PROCESSING } = options
+    const before = new Date(Date.now() - options.staleTimeMS)
+
+    const where: WhereOptions = {
+      state,
+      updatedAt: {
+        [Op.lt]: before
+      }
+    }
+
+    if (types) {
+      Object.assign(where, { type: { [Op.in]: types } })
+    }
+
+    return RunnerJobModel.findAll<MRunnerJob>({ where })
+  }
+
+  static listChildrenOf (job: MRunnerJob, transaction?: Transaction) {
+    const query = {
+      where: {
+        dependsOnRunnerJobId: job.id
+      },
+      transaction
+    }
+
+    return RunnerJobModel.findAll<MRunnerJob>(query)
+  }
+
+  static listForApi (options: {
+    start: number
+    count: number
+    sort: string
+    search?: string
+    stateOneOf?: RunnerJobStateType[]
+    typeOneOf?: RunnerJobType[]
+  }) {
+    const { start, count, sort, search, stateOneOf, typeOneOf } = options
+
+    const query = {
+      offset: start,
+      limit: count,
+      order: getSort(sort),
+      where: []
+    }
+
+    if (search) {
+      if (isUUIDValid(search)) {
+        query.where.push({ uuid: search })
+      } else {
+        query.where.push({
+          [Op.or]: [
+            searchAttribute(search, 'type'),
+            searchAttribute(search, '$Runner.name$')
+          ]
+        })
+      }
+    }
+
+    if (isArray(stateOneOf) && stateOneOf.length !== 0) {
+      query.where.push({
+        state: {
+          [Op.in]: stateOneOf
+        }
+      })
+    }
+
+    if (isArray(typeOneOf) && typeOneOf.length !== 0) {
+      query.where.push({
+        type: {
+          [Op.in]: typeOneOf
+        }
+      })
+    }
+
+    return Promise.all([
+      RunnerJobModel.scope([ ScopeNames.WITH_RUNNER ]).count(query),
+      RunnerJobModel.scope([ ScopeNames.WITH_RUNNER, ScopeNames.WITH_PARENT ]).findAll<MRunnerJobRunnerParent>(query)
+    ]).then(([ total, data ]) => ({ total, data }))
+  }
+
+  static getStats () {
+    return RunnerJobModel.findAll<MRunnerJob>({
+      attributes: [
+        'type',
+        'state',
+        [ literal('COUNT(*)'), 'count' ]
+      ],
+      group: [ 'type', 'state' ],
+      raw: true
+    }).then(rows => {
+      return (rows as any[]).map(row => ({
+        jobType: row.type as RunnerJobType,
+        state: row.state as RunnerJobStateType,
+        count: parseAggregateResult(row.count)
+      }))
+    })
+  }
+
+  static updateDependantJobsOf (runnerJob: MRunnerJob) {
+    const where = {
+      dependsOnRunnerJobId: runnerJob.id
+    }
+
+    return RunnerJobModel.update({ state: RunnerJobState.PENDING }, { where })
+  }
+
+  static async hasNonFinishedJobOfVideo (options: { type: RunnerJobType, videoUUID: string }) {
+    const where = {
+      type: options.type,
+      privatePayload: { videoUUID: options.videoUUID },
+      state: {
+        [Op.in]: [ RunnerJobState.COMPLETING, RunnerJobState.PENDING, RunnerJobState.PROCESSING, RunnerJobState.WAITING_FOR_PARENT_JOB ]
+      }
+    } as WhereOptions
+
+    return await RunnerJobModel.count({ where }) !== 0
+  }
+
+  static cancelAllNonFinishedJobs (options: { type: RunnerJobType }) {
+    const where = {
+      type: options.type,
+      state: {
+        [Op.in]: [ RunnerJobState.COMPLETING, RunnerJobState.PENDING, RunnerJobState.PROCESSING, RunnerJobState.WAITING_FOR_PARENT_JOB ]
+      }
+    }
+
+    return RunnerJobModel.update({ state: RunnerJobState.CANCELLED }, { where })
+  }
+
+  // ---------------------------------------------------------------------------
+
+  resetToPending () {
+    this.state = RunnerJobState.PENDING
+    this.processingJobToken = null
+    this.progress = null
+    this.startedAt = null
+    this.runnerId = null
+  }
+
+  setToErrorOrCancel (
+    // oxlint-disable-next-line max-len
+    state:
+      | typeof RunnerJobState.PARENT_ERRORED
+      | typeof RunnerJobState.ERRORED
+      | typeof RunnerJobState.CANCELLED
+      | typeof RunnerJobState.PARENT_CANCELLED
+  ) {
+    this.state = state
+    this.processingJobToken = null
+    this.finishedAt = new Date()
+  }
+
+  toFormattedJSON (this: MRunnerJobRunnerParent): RunnerJob {
+    const runner = this.Runner
+      ? {
+        id: this.Runner.id,
+        name: this.Runner.name,
+        description: this.Runner.description
+      }
+      : null
+
+    const parent = this.DependsOnRunnerJob
+      ? {
+        id: this.DependsOnRunnerJob.id,
+        uuid: this.DependsOnRunnerJob.uuid,
+        type: this.DependsOnRunnerJob.type,
+        state: {
+          id: this.DependsOnRunnerJob.state,
+          label: RUNNER_JOB_STATES[this.DependsOnRunnerJob.state]
+        }
+      }
+      : undefined
+
+    return {
+      uuid: this.uuid,
+      type: this.type,
+
+      state: {
+        id: this.state,
+        label: RUNNER_JOB_STATES[this.state]
+      },
+
+      progress: this.progress,
+      priority: this.priority,
+      failures: this.failures,
+      error: this.error,
+
+      payload: this.payload,
+
+      startedAt: this.startedAt?.toISOString(),
+      finishedAt: this.finishedAt?.toISOString(),
+
+      createdAt: this.createdAt.toISOString(),
+      updatedAt: this.updatedAt.toISOString(),
+
+      parent,
+      runner
+    }
+  }
+
+  toFormattedAdminJSON (this: MRunnerJobRunnerParent): RunnerJobAdmin {
+    return {
+      ...this.toFormattedJSON(),
+
+      privatePayload: this.privatePayload
+    }
+  }
+}

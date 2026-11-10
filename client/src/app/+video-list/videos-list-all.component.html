@@ -1,0 +1,23 @@
+<h1 class="visually-hidden">
+  <ng-container i18n>Browse videos</ng-container> - {{ instanceName }}
+</h1>
+
+<my-videos-list
+  [getVideosObservableFunction]="getVideosObservableFunction"
+  [getSyndicationItemsFunction]="getSyndicationItemsFunction"
+
+  [defaultSort]="defaultSort"
+  [defaultScope]="defaultScope"
+
+  displayFilters="true"
+
+  loadUserVideoPreferences="true"
+  [groupByDate]="groupByDate"
+
+  highlightLives="true"
+
+  [disabled]="disabled"
+
+  (filtersChanged)="onFiltersChanged($event)"
+>
+</my-videos-list>

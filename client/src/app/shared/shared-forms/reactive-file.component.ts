@@ -1,7 +1,9 @@
-import { Component, EventEmitter, forwardRef, Input, OnInit, Output } from '@angular/core'
-import { ControlValueAccessor, NG_VALUE_ACCESSOR } from '@angular/forms'
+import { CommonModule } from '@angular/common'
+import { Component, forwardRef, inject, input, OnChanges, OnInit, output, ChangeDetectionStrategy } from '@angular/core'
+import { ControlValueAccessor, FormsModule, NG_VALUE_ACCESSOR } from '@angular/forms'
 import { Notifier } from '@app/core'
-import { GlobalIconName } from '@app/shared/shared-icons'
+import { GlobalIconComponent, GlobalIconName } from '@app/shared/shared-icons/global-icon.component'
+import { NgbTooltipModule } from '@ng-bootstrap/ng-bootstrap'
 
 @Component({
   selector: 'my-reactive-file',
@@ -13,24 +15,31 @@ import { GlobalIconName } from '@app/shared/shared-icons'
       useExisting: forwardRef(() => ReactiveFileComponent),
       multi: true
     }
-  ]
+  ],
+  changeDetection: ChangeDetectionStrategy.Eager,
+  imports: [ CommonModule, NgbTooltipModule, FormsModule, GlobalIconComponent ]
 })
-export class ReactiveFileComponent implements OnInit, ControlValueAccessor {
-  @Input() inputLabel: string
-  @Input() inputName: string
-  @Input() extensions: string[] = []
-  @Input() maxFileSize: number
-  @Input() displayFilename = false
-  @Input() icon: GlobalIconName
+export class ReactiveFileComponent implements OnInit, OnChanges, ControlValueAccessor {
+  private notifier = inject(Notifier)
 
-  @Output() fileChanged = new EventEmitter<Blob>()
+  readonly theme = input<'primary' | 'secondary'>('secondary')
+  readonly inputLabel = input<string>(undefined)
+  readonly inputName = input<string>(undefined)
+  readonly extensions = input<string[]>([])
+  readonly maxFileSize = input<number>(undefined)
 
+  readonly displayFilename = input(false)
+  readonly displayReset = input(false)
+
+  readonly icon = input<GlobalIconName>(undefined)
+  readonly buttonTooltip = input<string>(undefined)
+
+  readonly fileChanged = output<Blob>()
+
+  classes: { [id: string]: boolean } = {}
   allowedExtensionsMessage = ''
   fileInputValue: any
-
-  private file: File
-
-  constructor (private notifier: Notifier) { }
+  file: File
 
   get filename () {
     if (!this.file) return ''
@@ -39,21 +48,36 @@ export class ReactiveFileComponent implements OnInit, ControlValueAccessor {
   }
 
   ngOnInit () {
-    this.allowedExtensionsMessage = this.extensions.join(', ')
+    this.allowedExtensionsMessage = this.extensions().join(', ')
+
+    this.buildClasses()
+  }
+
+  ngOnChanges () {
+    this.buildClasses()
+  }
+
+  buildClasses () {
+    this.classes = {
+      'with-icon': !!this.icon(),
+      'primary-button': this.theme() === 'primary',
+      'secondary-button': this.theme() === 'secondary',
+      'icon-only': !this.inputLabel()
+    }
   }
 
   fileChange (event: any) {
-    if (event.target.files && event.target.files.length) {
+    if (event.target.files?.length) {
       const [ file ] = event.target.files
 
-      if (file.size > this.maxFileSize) {
+      if (file.size > this.maxFileSize()) {
         this.notifier.error($localize`This file is too large.`)
         return
       }
 
       const extension = '.' + file.name.split('.').pop()
-      if (this.extensions.includes(extension.toLowerCase()) === false) {
-        const message = $localize`PeerTube cannot handle this kind of file. Accepted extensions are ${this.allowedExtensionsMessage}}.`
+      if (this.extensions().includes(extension.toLowerCase()) === false) {
+        const message = $localize`This input cannot handle this kind of file. Accepted extensions are ${this.allowedExtensionsMessage}.`
         this.notifier.error(message)
 
         return
@@ -62,11 +86,19 @@ export class ReactiveFileComponent implements OnInit, ControlValueAccessor {
       this.file = file
 
       this.propagateChange(this.file)
-      this.fileChanged.emit(this.file)
     }
+    this.fileChanged.emit(this.file)
   }
 
-  propagateChange = (_: any) => { /* empty */ }
+  reset () {
+    this.writeValue(undefined)
+    this.propagateChange(undefined)
+    this.fileChanged.emit(undefined)
+  }
+
+  propagateChange = (_: any) => {
+    // empty
+  }
 
   writeValue (file: any) {
     this.file = file

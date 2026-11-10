@@ -1,45 +1,96 @@
-import { Component, OnInit } from '@angular/core'
-import { ActivatedRoute } from '@angular/router'
-import { AuthService, Notifier, UserService } from '@app/core'
+import { ChangeDetectionStrategy, Component, OnInit, inject } from '@angular/core'
+import { ActivatedRoute, RouterLink } from '@angular/router'
+import { SignupService } from '@app/+signup/shared/signup.service'
+import { AuthService, Notifier, ServerService, UserService } from '@app/core'
+import { AlertComponent } from '@app/shared/shared-main/common/alert.component'
+import { UserSignupClient } from '@peertube/peertube-models'
+import { SignupSuccessAfterEmailComponent } from '../../shared/signup-success-after-email.component'
 
 @Component({
   selector: 'my-verify-account-email',
-  templateUrl: './verify-account-email.component.html'
+  templateUrl: './verify-account-email.component.html',
+  changeDetection: ChangeDetectionStrategy.Eager,
+  imports: [ SignupSuccessAfterEmailComponent, RouterLink, AlertComponent ]
 })
-
 export class VerifyAccountEmailComponent implements OnInit {
+  private signupService = inject(SignupService)
+  private userService = inject(UserService)
+  private server = inject(ServerService)
+  private authService = inject(AuthService)
+  private notifier = inject(Notifier)
+  private route = inject(ActivatedRoute)
+
   success = false
   failed = false
   isPendingEmail = false
 
   private userId: number
+  private registrationId: number
   private verificationString: string
 
-  constructor (
-    private userService: UserService,
-    private authService: AuthService,
-    private notifier: Notifier,
-    private route: ActivatedRoute
-    ) {
+  private signupClient: string
+  private username: string
+
+  get instanceName () {
+    return this.server.getHTMLConfig().instance.name
   }
 
   ngOnInit () {
     const queryParams = this.route.snapshot.queryParams
+
     this.userId = queryParams['userId']
+    this.registrationId = queryParams['registrationId']
     this.verificationString = queryParams['verificationString']
     this.isPendingEmail = queryParams['isPendingEmail'] === 'true'
+    this.signupClient = queryParams['signupClient']
+    this.username = queryParams['username']
 
-    if (!this.userId || !this.verificationString) {
-      this.notifier.error($localize`Unable to find user id or verification string.`)
-    } else {
-      this.verifyEmail()
+    if (!this.verificationString) {
+      this.notifier.error($localize`Unable to find verification string in URL query.`)
+      return
     }
+
+    if (!this.userId && !this.registrationId) {
+      this.notifier.error($localize`Unable to find user id or registration id in URL query.`)
+      return
+    }
+
+    this.verifyEmail()
+  }
+
+  isRegistration () {
+    return !this.isPendingEmail
+  }
+
+  isRegistrationRequest () {
+    return !!this.registrationId
+  }
+
+  getMobileAppUsername () {
+    if (!this.isRegistration() || this.isRegistrationRequest()) return undefined
+    if (this.signupClient !== UserSignupClient.PEERTUBE_APP) return undefined
+
+    return this.username
   }
 
   verifyEmail () {
-    this.userService.verifyEmail(this.userId, this.verificationString, this.isPendingEmail)
-      .subscribe(
-        () => {
+    if (this.isRegistrationRequest()) {
+      return this.verifyRegistrationEmail()
+    }
+
+    return this.verifyUserEmail()
+  }
+
+  private verifyUserEmail () {
+    const options = {
+      userId: this.userId,
+      verificationString: this.verificationString,
+      isPendingEmail: this.isPendingEmail
+    }
+
+    this.userService.verifyUserEmail(options)
+      .subscribe({
+        next: () => {
           if (this.authService.isLoggedIn()) {
             this.authService.refreshUserInformation()
           }
@@ -47,11 +98,31 @@ export class VerifyAccountEmailComponent implements OnInit {
           this.success = true
         },
 
-        err => {
+        error: err => {
           this.failed = true
 
-          this.notifier.error(err.message)
+          this.notifier.handleError(err)
         }
-      )
+      })
+  }
+
+  private verifyRegistrationEmail () {
+    const options = {
+      registrationId: this.registrationId,
+      verificationString: this.verificationString
+    }
+
+    this.signupService.verifyRegistrationEmail(options)
+      .subscribe({
+        next: () => {
+          this.success = true
+        },
+
+        error: err => {
+          this.failed = true
+
+          this.notifier.handleError(err)
+        }
+      })
   }
 }

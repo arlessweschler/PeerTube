@@ -1,0 +1,170 @@
+import { addQueryParams, escapeHTML } from '@peertube/peertube-core-utils'
+import { HttpStatusCode, VideoPlaylistPrivacy } from '@peertube/peertube-models'
+import { Memoize } from '@server/helpers/memoize.js'
+import { getPlaylistRSSFeeds } from '@server/lib/rss.js'
+import { VideoPlaylistModel } from '@server/models/video/video-playlist.js'
+import { MVideoPlaylist, MVideoPlaylistFull } from '@server/types/models/index.js'
+import express from 'express'
+import validator from 'validator'
+import { CONFIG } from '../../../initializers/config.js'
+import { MEMOIZE_TTL, WEBSERVER } from '../../../initializers/constants.js'
+import { buildEmptyEmbedHTML } from './common.js'
+import { PageHtml } from './page-html.js'
+import { TagsHtml } from './tags-html.js'
+
+export class PlaylistHtml {
+  static async getWatchPlaylistHTML (videoPlaylistId: string, req: express.Request, res: express.Response) {
+    // Let Angular application handle errors
+    if (!validator.default.isInt(videoPlaylistId) && !validator.default.isUUID(videoPlaylistId, 4)) {
+      res.status(HttpStatusCode.NOT_FOUND_404)
+      return PageHtml.getIndexHTML(req, res)
+    }
+
+    const [ html, videoPlaylist ] = await Promise.all([
+      PageHtml.getIndexHTML(req, res),
+      VideoPlaylistModel.loadWithAccountAndChannel(videoPlaylistId, null)
+    ])
+
+    // Let Angular application handle errors
+    if (!this.canBuildPlaylistTags(videoPlaylist, videoPlaylistId)) {
+      res.status(HttpStatusCode.NOT_FOUND_404)
+      return html
+    }
+
+    return this.buildPlaylistHTML({
+      req,
+      html,
+      playlist: videoPlaylist,
+      addOG: true,
+      addTwitterCard: true,
+      isEmbed: false,
+
+      currentQuery: req.query
+    })
+  }
+
+  @Memoize({ maxAge: MEMOIZE_TTL.EMBED_HTML })
+  static async getEmbedPlaylistHTML (playlistId: string) {
+    const playlistPromise: Promise<MVideoPlaylistFull> = validator.default.isInt(playlistId) || validator.default.isUUID(playlistId, 4)
+      ? VideoPlaylistModel.loadWithAccountAndChannel(playlistId, null)
+      : Promise.resolve(undefined)
+
+    const [ html, playlist ] = await Promise.all([ PageHtml.getEmbedHTML(), playlistPromise ])
+
+    if (!this.canBuildPlaylistTags(playlist, playlistId)) {
+      return buildEmptyEmbedHTML({ html, playlist })
+    }
+
+    return this.buildPlaylistHTML({
+      req: null,
+
+      html,
+      playlist,
+      addOG: false,
+      addTwitterCard: false,
+      isEmbed: true,
+
+      // TODO: Implement it so we can send query params to oembed service
+      currentQuery: {}
+    })
+  }
+
+  // ---------------------------------------------------------------------------
+  // Private
+  // ---------------------------------------------------------------------------
+
+  private static canBuildPlaylistTags (playlist: MVideoPlaylist, playlistId: string) {
+    if (!playlist || playlist.privacy === VideoPlaylistPrivacy.PRIVATE) return false
+
+    // Unlisted playlists can only be fetched using their UUID
+    if (playlist.privacy === VideoPlaylistPrivacy.UNLISTED && !validator.default.isUUID(playlistId, 4)) return false
+
+    return true
+  }
+
+  private static buildPlaylistHTML (options: {
+    req: express.Request
+
+    html: string
+    playlist: MVideoPlaylistFull
+
+    addOG: boolean
+    addTwitterCard: boolean
+
+    isEmbed: boolean
+
+    currentQuery: Record<string, string>
+  }) {
+    const { req, html, playlist, addOG, addTwitterCard, isEmbed, currentQuery = {} } = options
+    const escapedTruncatedDescription = TagsHtml.buildEscapedTruncatedDescription(playlist.description)
+    const thumbnail = playlist.getBestThumbnail('16:9')
+
+    let htmlResult = TagsHtml.addTitleTag(html, playlist.name)
+    htmlResult = TagsHtml.addDescriptionTag(htmlResult, escapedTruncatedDescription)
+    htmlResult = TagsHtml.addServerRenderedContent(htmlResult, {
+      escapedTitle: escapeHTML(playlist.name),
+      markdownDescription: playlist.description
+    })
+
+    return TagsHtml.addTags(htmlResult, {
+      url: WEBSERVER.URL + playlist.getWatchStaticPath(),
+
+      escapedSiteName: escapeHTML(CONFIG.INSTANCE.NAME),
+      escapedTitle: escapeHTML(playlist.name),
+      escapedTruncatedDescription,
+
+      forbidIndexation: isEmbed
+        ? playlist.privacy !== VideoPlaylistPrivacy.PUBLIC && playlist.privacy !== VideoPlaylistPrivacy.UNLISTED
+        : !playlist.isLocal() || playlist.privacy !== VideoPlaylistPrivacy.PUBLIC,
+
+      embedIndexation: isEmbed,
+
+      image: thumbnail
+        ? { url: playlist.getThumbnailUrl(), width: thumbnail.width, height: thumbnail.height }
+        : undefined,
+
+      list: { numberOfItems: playlist.get('videosLength') as number },
+
+      schemaType: 'ItemList',
+
+      ogType: addOG
+        ? 'video'
+        : undefined,
+
+      twitterCard: addTwitterCard
+        ? 'player'
+        : undefined,
+
+      videoOrPlaylist: {
+        embedUrl: WEBSERVER.URL + playlist.getEmbedStaticPath(),
+        oembedUrl: this.getOEmbedUrl(playlist, currentQuery),
+        createdAt: playlist.createdAt.toISOString(),
+        updatedAt: playlist.updatedAt.toISOString(),
+
+        channel: playlist.VideoChannel
+          ? {
+            displayName: playlist.VideoChannel.name,
+            url: playlist.VideoChannel.getClientUrl(false)
+          }
+          : undefined
+      },
+
+      rssFeeds: req
+        ? getPlaylistRSSFeeds({ displayName: playlist.name, id: playlist.id }, req)
+        : []
+    }, { playlist })
+  }
+
+  private static getOEmbedUrl (playlist: MVideoPlaylist, currentQuery: Record<string, string>) {
+    const base = WEBSERVER.URL + playlist.getWatchStaticPath()
+
+    const additionalQuery: Record<string, string> = {}
+    const allowedParams = new Set([ 'playlistPosition' ])
+
+    for (const [ key, value ] of Object.entries(currentQuery)) {
+      if (allowedParams.has(key)) additionalQuery[key] = value
+    }
+
+    return addQueryParams(base, additionalQuery)
+  }
+}

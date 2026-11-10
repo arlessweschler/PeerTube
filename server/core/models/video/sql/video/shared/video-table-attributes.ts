@@ -1,0 +1,347 @@
+import { thumbnailAPIAttributes } from '@server/models/video/thumbnail.js'
+import { TableAttributeOptions } from './table-attributes-options.model.js'
+
+/**
+ * Class to build video attributes/join names we want to fetch from the database
+ */
+export class VideoTableAttributes {
+  constructor (private readonly mode: 'get' | 'list') {
+  }
+
+  getChannelAttributesForUser () {
+    return [ 'id', 'accountId' ]
+  }
+
+  getChannelAttributes () {
+    let attributeKeys = [
+      'id',
+      'name',
+      'description',
+      'accountId'
+    ]
+
+    if (this.mode === 'get') {
+      attributeKeys = attributeKeys.concat([
+        'publicEmail',
+        'support',
+        'createdAt',
+        'updatedAt'
+      ])
+    }
+
+    return attributeKeys
+  }
+
+  getUserAccountAttributes () {
+    return [ 'id', 'userId' ]
+  }
+
+  getAccountAttributes () {
+    let attributeKeys = [ 'id', 'name' ]
+
+    if (this.mode === 'get') {
+      attributeKeys = attributeKeys.concat([
+        'description',
+        'userId',
+        'createdAt',
+        'updatedAt'
+      ])
+    }
+
+    return attributeKeys
+  }
+
+  getThumbnailAttributes () {
+    // We need the id to efficiently build the model
+    let attributeKeys = [ 'id', ...thumbnailAPIAttributes ] as string[]
+
+    if (this.mode === 'get') {
+      attributeKeys = attributeKeys.concat([
+        'cached',
+        'automaticallyGenerated',
+        'videoId',
+        'videoPlaylistId',
+        'createdAt',
+        'updatedAt'
+      ])
+    }
+
+    return attributeKeys
+  }
+
+  getFileAttributes () {
+    return [
+      'id',
+      'createdAt',
+      'updatedAt',
+      'resolution',
+      'size',
+      'extname',
+      'filename',
+      'fileUrl',
+      'torrentFilename',
+      'torrentStorage',
+      'torrentUrl',
+      'fps',
+      'metadataUrl',
+      'videoStreamingPlaylistId',
+      'videoId',
+      'width',
+      'height',
+      'formatFlags',
+      'streams',
+      'storage'
+    ]
+  }
+
+  getStreamingPlaylistAttributes () {
+    return [
+      'id',
+      'playlistUrl',
+      'playlistFilename',
+      'type',
+      'p2pMediaLoaderPeerVersion',
+      'segmentsSha256Filename',
+      'segmentsSha256Url',
+      'videoId',
+      'createdAt',
+      'updatedAt',
+      'storage'
+    ]
+  }
+
+  getUserHistoryAttributes () {
+    return [ 'id', 'currentTime' ]
+  }
+
+  getPlaylistAttributes () {
+    return [
+      'createdAt',
+      'updatedAt',
+      'url',
+      'position',
+      'startTimestamp',
+      'stopTimestamp',
+      'videoPlaylistId'
+    ]
+  }
+
+  getTagAttributes () {
+    return [ 'id', 'name' ]
+  }
+
+  getVideoTagAttributes () {
+    return [ 'videoId', 'tagId', 'createdAt', 'updatedAt' ]
+  }
+
+  getBlacklistedAttributes () {
+    return [ 'id', 'reason', 'unfederated' ]
+  }
+
+  getBlocklistAttributes () {
+    return [ 'id' ]
+  }
+
+  getScheduleUpdateAttributes () {
+    return [
+      'id',
+      'updateAt',
+      'privacy',
+      'videoId',
+      'createdAt',
+      'updatedAt'
+    ]
+  }
+
+  getLiveAttributes () {
+    return [
+      'id',
+      'streamKey',
+      'saveReplay',
+      'permanentLive',
+      'dvrWindow',
+      'latencyMode',
+      'videoId',
+      'replaySettingId',
+      'createdAt',
+      'updatedAt'
+    ]
+  }
+
+  getLiveScheduleAttributes () {
+    return [
+      'id',
+      'startAt',
+      'createdAt',
+      'updatedAt'
+    ]
+  }
+
+  getVideoSourceAttributes () {
+    return [
+      'id',
+      'inputFilename',
+      'keptOriginalFilename',
+      'resolution',
+      'size',
+      'width',
+      'height',
+      'fps',
+      'metadata',
+      'createdAt'
+    ]
+  }
+
+  getTrackerAttributes () {
+    return [ 'id', 'url' ]
+  }
+
+  getVideoTrackerAttributes () {
+    return [
+      'videoId',
+      'trackerId',
+      'createdAt',
+      'updatedAt'
+    ]
+  }
+
+  getVideoAutoTagAttributes () {
+    return [ 'videoId', 'accountId', 'automaticTagId' ]
+  }
+
+  getAutoTagAttributes () {
+    return [ 'id', 'name' ]
+  }
+
+  getRedundancyAttributes (tableAttributeOptions: TableAttributeOptions) {
+    if (tableAttributeOptions?.fullRedundancy === true) {
+      return [ 'id', 'strategy', 'createdAt', 'updatedAt', 'expiresOn', 'fileUrl' ]
+    }
+
+    return [ 'id', 'fileUrl' ]
+  }
+
+  getCaptionAttributes () {
+    return [ 'id', 'language', 'fileUrl', 'storage', 'filename', 'automaticallyGenerated', 'm3u8Filename', 'm3u8Url' ]
+  }
+
+  getStoryboardAttributes () {
+    return [
+      'id',
+      'filename',
+      'totalHeight',
+      'totalWidth',
+      'spriteHeight',
+      'spriteWidth',
+      'spriteDuration',
+      'fileUrl',
+      'cached',
+      'storage',
+      'videoId',
+      'createdAt',
+      'updatedAt'
+    ]
+  }
+
+  getActorAttributes () {
+    let attributeKeys = [
+      'id',
+      'preferredUsername',
+      'url',
+      'serverId',
+      'accountId',
+      'videoChannelId'
+    ]
+
+    if (this.mode === 'get') {
+      attributeKeys = attributeKeys.concat([
+        'type',
+        'followersCount',
+        'followingCount',
+        'inboxUrl',
+        'outboxUrl',
+        'sharedInboxUrl',
+        'followersUrl',
+        'followingUrl',
+        'remoteCreatedAt',
+        'createdAt',
+        'updatedAt'
+      ])
+    }
+
+    return attributeKeys
+  }
+
+  getAvatarAttributes () {
+    let attributeKeys = [
+      'id',
+      'width',
+      'filename',
+      'type',
+      'fileUrl',
+      'cached',
+      'storage',
+      'createdAt',
+      'updatedAt'
+    ]
+
+    if (this.mode === 'get') {
+      attributeKeys = attributeKeys.concat([
+        'height',
+        'width',
+        'type'
+      ])
+    }
+
+    return attributeKeys
+  }
+
+  getServerAttributes () {
+    return [ 'id', 'host' ]
+  }
+
+  getVideoAttributes () {
+    return [
+      'id',
+      'uuid',
+      'name',
+      'category',
+      'licence',
+      'language',
+      'privacy',
+      'nsfw',
+      'nsfwSummary',
+      'nsfwFlags',
+      'description',
+      'support',
+      'duration',
+      'views',
+      'downloads',
+      'likes',
+      'dislikes',
+      'remote',
+      'isLive',
+      'aspectRatio',
+      'url',
+      'commentsPolicy',
+      'recommendationScope',
+      'aiUsage',
+      'commercialContent',
+      'downloadEnabled',
+      'embedPrivacyPolicy',
+      'waitTranscoding',
+      'state',
+      'publishedAt',
+      'originallyPublishedAt',
+      'inputFileUpdatedAt',
+      'remoteUpdatedAt',
+      'firstPublishedAt',
+      'sitemapContentUpdatedAt',
+      'channelId',
+      'createdAt',
+      'updatedAt',
+      'moveJobsRunning',
+      'comments'
+    ]
+  }
+}

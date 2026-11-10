@@ -1,0 +1,205 @@
+import { UserRole } from '@peertube/peertube-models'
+import { isTestOrDevInstance } from '@peertube/peertube-node-utils'
+import { generateRunnerRegistrationToken } from '@server/helpers/token-generator.js'
+import { MIGRATION_SCRIPT_NAMES } from '@server/lib/migration-scripts/migration-scripts.js'
+import { initPNPM } from '@server/lib/plugins/package-manager.js'
+import { RunnerRegistrationTokenModel } from '@server/models/runner/runner-registration-token.js'
+import { ensureDir, remove } from 'fs-extra/esm'
+import { generatePassword } from 'password-generator'
+import { createLogger } from '../helpers/logger.js'
+import { buildUser, createApplicationActor, createUserAccountAndChannelAndPlaylist } from '../lib/user.js'
+import { ApplicationModel } from '../models/application/application.js'
+import { OAuthClientModel } from '../models/oauth/oauth-client.js'
+import { applicationExist, clientsExist, usersExist } from './checker-after-init.js'
+import { CONFIG } from './config.js'
+import { ADMIN_MEMORABLE_PASSWORD_GENERATION_LENGTH, DIRECTORIES, FILES_CACHE, LAST_MIGRATION_VERSION } from './constants.js'
+import { sequelizeTypescript } from './database.js'
+
+const logger = createLogger()
+
+export async function installPrimary () {
+  try {
+    await Promise.all([
+      // Database related
+      sequelizeTypescript.sync()
+        .then(() => {
+          return Promise.all([
+            createApplicationIfNotExist(),
+            createOAuthClientIfNotExist(),
+            createOAuthAdminIfNotExist(),
+            createRunnerRegistrationTokenIfNotExist(),
+            createVideoSearchTriggerIfNotExist(),
+            initPNPM()
+          ])
+        }),
+
+      removeTmpDirectory()
+        .then(() => createDirectoriesIfNotExist())
+    ])
+  } catch (err) {
+    logger.error('Cannot install application.', { err })
+    process.exit(-1)
+  }
+}
+
+export async function installSecondary () {
+  await removeTmpDirectory()
+
+  await createDirectoriesIfNotExist()
+
+  // A secondary installs plugins in its own directory
+  await initPNPM()
+}
+
+// ---------------------------------------------------------------------------
+
+function createDirectoriesIfNotExist () {
+  const storage = CONFIG.STORAGE
+  const cacheDirectories = Object.keys(FILES_CACHE)
+    .map(k => FILES_CACHE[k].DIRECTORY)
+
+  const tasks: Promise<void>[] = []
+  for (const key of Object.keys(storage)) {
+    const dir = storage[key]
+    tasks.push(ensureDir(dir))
+  }
+
+  // Cache directories
+  for (const dir of cacheDirectories) {
+    tasks.push(ensureDir(dir))
+  }
+
+  tasks.push(ensureDir(DIRECTORIES.HLS_STREAMING_PLAYLIST.PRIVATE))
+  tasks.push(ensureDir(DIRECTORIES.HLS_STREAMING_PLAYLIST.PUBLIC))
+  tasks.push(ensureDir(DIRECTORIES.WEB_VIDEOS.PUBLIC))
+  tasks.push(ensureDir(DIRECTORIES.WEB_VIDEOS.PRIVATE))
+  tasks.push(ensureDir(DIRECTORIES.UPLOAD_IMAGES))
+  tasks.push(ensureDir(DIRECTORIES.RESUMABLE_UPLOAD))
+  tasks.push(ensureDir(DIRECTORIES.HLS_REDUNDANCY))
+
+  return Promise.all(tasks)
+}
+
+// ---------------------------------------------------------------------------
+
+async function removeTmpDirectory () {
+  await remove(CONFIG.STORAGE.TMP_DIR)
+}
+
+async function createOAuthClientIfNotExist () {
+  const exist = await clientsExist()
+  // Nothing to do, clients already exist
+  if (exist === true) return undefined
+
+  logger.info('Creating a default OAuth Client.')
+
+  const id = await generatePassword(32, false, /[a-z0-9]/)
+  const secret = await generatePassword(32, false, /[a-zA-Z0-9]/)
+  const client = new OAuthClientModel({
+    clientId: id,
+    clientSecret: secret,
+    grants: [ 'password', 'refresh_token' ],
+    redirectUris: null
+  })
+
+  const createdClient = await client.save()
+  logger.info('Client id: ' + createdClient.clientId)
+  logger.info('Client secret: ' + createdClient.clientSecret)
+
+  return undefined
+}
+
+async function createOAuthAdminIfNotExist () {
+  const exist = await usersExist()
+  // Nothing to do, users already exist
+  if (exist === true) return undefined
+
+  logger.info('Creating the administrator.')
+
+  const username = 'root'
+  const role = UserRole.ADMINISTRATOR
+  const email = CONFIG.ADMIN.EMAIL
+  let validatePassword = true
+  let password = ''
+
+  // Do not generate a random password for test and dev environments
+  if (isTestOrDevInstance()) {
+    password = 'test'
+
+    if (process.env.NODE_APP_INSTANCE) {
+      password += process.env.NODE_APP_INSTANCE
+    }
+
+    // Our password is weak so do not validate it
+    validatePassword = false
+  } else if (process.env.PT_INITIAL_ROOT_PASSWORD) {
+    password = process.env.PT_INITIAL_ROOT_PASSWORD
+  } else {
+    password = await generatePassword(ADMIN_MEMORABLE_PASSWORD_GENERATION_LENGTH, true)
+  }
+
+  const user = buildUser({
+    username,
+    email,
+    password,
+    role,
+    emailVerified: true,
+    videoQuota: -1,
+    videoQuotaDaily: -1
+  })
+
+  await createUserAccountAndChannelAndPlaylist({ userToCreate: user, channelNames: undefined, validateUser: validatePassword })
+  logger.info('Username: ' + username)
+  logger.info('User password: ' + password)
+}
+
+async function createApplicationIfNotExist () {
+  const exist = await applicationExist()
+  // Nothing to do, application already exist
+  if (exist === true) return undefined
+
+  logger.info('Creating application account.')
+
+  const application = await ApplicationModel.create({
+    migrationVersion: LAST_MIGRATION_VERSION,
+    manualMigrationScriptsRun: MIGRATION_SCRIPT_NAMES
+  })
+
+  return createApplicationActor(application.id)
+}
+
+async function createRunnerRegistrationTokenIfNotExist () {
+  const total = await RunnerRegistrationTokenModel.countTotal()
+  if (total !== 0) return undefined
+
+  const token = new RunnerRegistrationTokenModel({
+    registrationToken: generateRunnerRegistrationToken()
+  })
+
+  await token.save()
+}
+
+async function createVideoSearchTriggerIfNotExist () {
+  try {
+    // video_search_vector() is created in database.ts
+    await sequelizeTypescript.query(`
+    CREATE OR REPLACE FUNCTION "video_search_vector_update"() RETURNS trigger AS $$
+    BEGIN
+      INSERT INTO "videoSearch" ("videoId", "searchVector")
+      VALUES (NEW."id", video_search_vector(NEW.name, NEW.description))
+      ON CONFLICT ("videoId") DO UPDATE SET
+        "searchVector" = EXCLUDED."searchVector";
+      RETURN NEW;
+    END;
+    $$ LANGUAGE plpgsql
+  `)
+
+    await sequelizeTypescript.query(`
+    CREATE OR REPLACE TRIGGER "video_search_vector_trigger"
+    AFTER INSERT OR UPDATE OF name, description ON "video"
+    FOR EACH ROW EXECUTE FUNCTION "video_search_vector_update"()
+  `)
+  } catch (err) {
+    logger.error('Cannot create video search trigger.', { err })
+  }
+}

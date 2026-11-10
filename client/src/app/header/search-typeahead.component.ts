@@ -1,26 +1,40 @@
-import { of } from 'rxjs'
-import { first, tap } from 'rxjs/operators'
 import { ListKeyManager } from '@angular/cdk/a11y'
-import { AfterViewChecked, AfterViewInit, Component, OnDestroy, OnInit, QueryList, ViewChildren } from '@angular/core'
+import { AfterViewChecked, Component, Injector, OnDestroy, OnInit, inject, viewChildren, ChangeDetectionStrategy } from '@angular/core'
+import { FormsModule } from '@angular/forms'
 import { ActivatedRoute, Params, Router } from '@angular/router'
 import { AuthService, ServerService } from '@app/core'
-import { SearchTargetType, ServerConfig } from '@shared/models'
+import { HTMLServerConfig, SearchTargetType } from '@peertube/peertube-models'
+import { logger } from '@root-helpers/logger'
+import debug from 'debug'
+import { of } from 'rxjs'
+import { first, tap } from 'rxjs/operators'
+import { GlobalIconComponent } from '../shared/shared-icons/global-icon.component'
 import { SuggestionComponent, SuggestionPayload, SuggestionPayloadType } from './suggestion.component'
+
+const debugLogger = debug('peertube:search')
 
 @Component({
   selector: 'my-search-typeahead',
   templateUrl: './search-typeahead.component.html',
-  styleUrls: [ './search-typeahead.component.scss' ]
+  styleUrls: [ './search-typeahead.component.scss' ],
+  changeDetection: ChangeDetectionStrategy.Eager,
+  imports: [ FormsModule, GlobalIconComponent, SuggestionComponent ]
 })
-export class SearchTypeaheadComponent implements OnInit, AfterViewInit, AfterViewChecked, OnDestroy {
-  @ViewChildren(SuggestionComponent) suggestionItems: QueryList<SuggestionComponent>
+export class SearchTypeaheadComponent implements OnInit, AfterViewChecked, OnDestroy {
+  private authService = inject(AuthService)
+  private router = inject(Router)
+  private route = inject(ActivatedRoute)
+  private serverService = inject(ServerService)
+  private injector = inject(Injector)
+
+  readonly suggestionItems = viewChildren(SuggestionComponent)
 
   hasChannel = false
   inChannel = false
   areSuggestionsOpened = true
 
   search = ''
-  serverConfig: ServerConfig
+  serverConfig: HTMLServerConfig
 
   inThisChannelText: string
 
@@ -31,31 +45,18 @@ export class SearchTypeaheadComponent implements OnInit, AfterViewInit, AfterVie
 
   private scheduleKeyboardEventsInit = false
 
-  constructor (
-    private authService: AuthService,
-    private router: Router,
-    private route: ActivatedRoute,
-    private serverService: ServerService
-  ) {}
-
   ngOnInit () {
     this.route.queryParams
       .pipe(first(params => this.isOnSearch() && params.search !== undefined && params.search !== null))
       .subscribe(params => this.search = params.search)
-  }
 
-  ngAfterViewInit () {
-    this.serverService.getConfig()
+    this.serverConfig = this.serverService.getHTMLConfig()
+    this.computeTypeahead()
+
+    this.serverService.configReloaded
       .subscribe(config => {
         this.serverConfig = config
-
         this.computeTypeahead()
-
-        this.serverService.configReloaded
-          .subscribe(config => {
-            this.serverConfig = config
-            this.computeTypeahead()
-          })
       })
   }
 
@@ -70,17 +71,11 @@ export class SearchTypeaheadComponent implements OnInit, AfterViewInit, AfterVie
     if (this.keyboardEventsManager) this.keyboardEventsManager.change.unsubscribe()
   }
 
-  areInstructionsDisplayed () {
-    return !this.search
-  }
-
   showSearchGlobalHelp () {
-    return this.search && this.areSuggestionsOpened && this.keyboardEventsManager?.activeItem?.result?.type === 'search-index'
+    return this.search && this.areSuggestionsOpened && this.keyboardEventsManager?.activeItem?.result()?.type === 'search-index'
   }
 
   canSearchAnyURI () {
-    if (!this.serverConfig) return false
-
     return this.authService.isLoggedIn()
       ? this.serverConfig.search.remoteUri.users
       : this.serverConfig.search.remoteUri.anonymous
@@ -93,11 +88,11 @@ export class SearchTypeaheadComponent implements OnInit, AfterViewInit, AfterVie
   initKeyboardEventsManager () {
     if (this.keyboardEventsManager) return
 
-    this.keyboardEventsManager = new ListKeyManager(this.suggestionItems)
+    this.keyboardEventsManager = new ListKeyManager(this.suggestionItems, this.injector)
 
-    const activeIndex = this.suggestionItems.toArray().findIndex(i => i.result.default === true)
+    const activeIndex = this.suggestionItems().findIndex(i => i.result().default === true)
     if (activeIndex === -1) {
-      console.error('Cannot find active index.', { suggestionItems: this.suggestionItems })
+      logger.error('Cannot find active index.', { suggestionItems: this.suggestionItems() })
     }
 
     this.updateItemsState(activeIndex)
@@ -140,17 +135,21 @@ export class SearchTypeaheadComponent implements OnInit, AfterViewInit, AfterVie
     }
 
     this.scheduleKeyboardEventsInit = true
+
+    debugLogger('Typeahead rebuilt', this.results)
   }
 
   updateItemsState (index?: number) {
+    if (!this.keyboardEventsManager) return
+
     if (index !== undefined) {
       this.keyboardEventsManager.setActiveItem(index)
     }
 
-    for (const item of this.suggestionItems) {
+    for (const item of this.suggestionItems()) {
       if (this.keyboardEventsManager.activeItem && this.keyboardEventsManager.activeItem === item) {
         item.active = true
-        this.activeSearch = item.result.type
+        this.activeSearch = item.result().type
         continue
       }
 
@@ -158,7 +157,7 @@ export class SearchTypeaheadComponent implements OnInit, AfterViewInit, AfterVie
     }
   }
 
-  onSuggestionlicked (payload: SuggestionPayload) {
+  onSuggestionClicked (payload: SuggestionPayload) {
     this.doSearch(this.buildSearchTarget(payload))
   }
 
@@ -176,6 +175,11 @@ export class SearchTypeaheadComponent implements OnInit, AfterViewInit, AfterVie
 
         this.keyboardEventsManager.onKeydown(event)
         break
+
+      case 'Enter':
+        event.stopPropagation()
+        this.doSearch()
+        break
     }
   }
 
@@ -192,26 +196,31 @@ export class SearchTypeaheadComponent implements OnInit, AfterViewInit, AfterVie
     }
 
     if (!searchTarget) {
-      searchTarget = this.buildSearchTarget(this.keyboardEventsManager.activeItem.result)
+      searchTarget = this.buildSearchTarget(this.keyboardEventsManager.activeItem.result())
     }
 
     Object.assign(queryParams, { search: this.search, searchTarget })
 
-    const o = this.authService.isLoggedIn()
-      ? this.loadUserLanguagesIfNeeded(queryParams)
+    // On the search page, keep the filters of the user (a missing filter means "all")
+    const o = this.authService.isLoggedIn() && !this.isOnSearch()
+      ? this.loadUserVideoFilters(queryParams)
       : of(true)
 
     o.subscribe(() => this.router.navigate([ '/search' ], { queryParams }))
   }
 
-  private loadUserLanguagesIfNeeded (queryParams: any) {
-    if (queryParams && queryParams.languageOneOf) return of(queryParams)
-
+  private loadUserVideoFilters (queryParams: Params) {
     return this.authService.userInformationLoaded
-               .pipe(
-                 first(),
-                 tap(() => Object.assign(queryParams, { languageOneOf: this.authService.getUser().videoLanguages }))
-               )
+      .pipe(
+        first(),
+        tap(() => {
+          const user = this.authService.getUser()
+
+          queryParams.languageOneOf = user.videoLanguages
+          queryParams.categoryOneOf = user.videoCategories
+          if (user.videoLive !== 'both') queryParams.isLive = user.videoLive
+        })
+      )
   }
 
   private buildSearchTarget (result: SuggestionPayload): SearchTargetType {

@@ -1,0 +1,66 @@
+import { ActivityLike } from '@peertube/peertube-models'
+import { createLogger } from '@server/helpers/logger.js'
+import { VideoModel } from '@server/models/video/video.js'
+import { retryTransactionWrapper, runTransaction } from '../../../helpers/database-utils.js'
+import { getAPId } from '../../../lib/activitypub/activity.js'
+import { AccountVideoRateModel } from '../../../models/account/account-video-rate.js'
+import { APProcessorOptions } from '../../../types/activitypub-processor.model.js'
+import { MActorSignature } from '../../../types/models/index.js'
+import { loadRateOfActivity } from '../video-rates.js'
+import { canVideoBeFederated, maybeGetOrCreateAPVideo, scheduleVideoFederation } from '../videos/index.js'
+
+const logger = createLogger()
+
+async function processLikeActivity (options: APProcessorOptions<ActivityLike>) {
+  const { activity, byActor } = options
+
+  return retryTransactionWrapper(() => processLikeVideo(byActor, activity))
+}
+
+// ---------------------------------------------------------------------------
+
+export {
+  processLikeActivity
+}
+
+// ---------------------------------------------------------------------------
+
+async function processLikeVideo (byActor: MActorSignature, activity: ActivityLike) {
+  const videoUrl = getAPId(activity.object)
+
+  const byAccount = byActor.Account
+  if (!byAccount) throw new Error('Cannot create like with the non account actor ' + byActor.url)
+
+  const { video: onlyVideo } = await maybeGetOrCreateAPVideo({ videoObject: videoUrl, fetchType: 'with-blacklist' })
+  if (!onlyVideo?.isLocal()) return
+
+  if (!canVideoBeFederated(onlyVideo)) {
+    logger.warn(`Do not process like on video ${videoUrl} that cannot be federated`)
+    return
+  }
+
+  return runTransaction(async t => {
+    const video = await VideoModel.load(onlyVideo.id, t)
+
+    const existingRate = await loadRateOfActivity({ byActor, account: byAccount, video, activityId: activity.id, transaction: t })
+    if (existingRate?.type === 'like') return
+
+    if (existingRate?.type === 'dislike') {
+      await video.decrement('dislikes', { transaction: t })
+      video.dislikes--
+    }
+
+    await video.increment('likes', { transaction: t })
+    video.likes++
+
+    const rate = existingRate || new AccountVideoRateModel()
+    rate.type = 'like'
+    rate.videoId = video.id
+    rate.accountId = byAccount.id
+    rate.url = activity.id
+
+    await rate.save({ transaction: t })
+
+    scheduleVideoFederation({ video, transaction: t })
+  })
+}

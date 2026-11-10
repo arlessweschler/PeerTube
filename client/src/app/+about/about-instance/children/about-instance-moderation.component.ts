@@ -1,0 +1,34 @@
+import { Component, OnInit, inject, ChangeDetectionStrategy } from '@angular/core'
+import { ActivatedRoute } from '@angular/router'
+import { ServerService } from '@app/core'
+import { GlobalIconComponent } from '@app/shared/shared-icons/global-icon.component'
+import { AboutHTML } from '@app/shared/shared-main/instance/instance.service'
+import { PluginSelectorDirective } from '@app/shared/shared-main/plugins/plugin-selector.directive'
+import { ResolverData } from '../about-instance.resolver'
+
+@Component({
+  templateUrl: './about-instance-moderation.component.html',
+  styleUrls: [ './about-instance-common.component.scss' ],
+  changeDetection: ChangeDetectionStrategy.Eager,
+  imports: [ PluginSelectorDirective, GlobalIconComponent ]
+})
+export class AboutInstanceModerationComponent implements OnInit {
+  private route = inject(ActivatedRoute)
+  private serverService = inject(ServerService)
+
+  aboutHTML: AboutHTML
+
+  get instanceName () {
+    return this.serverService.getHTMLConfig().instance.name
+  }
+
+  isPublicBlocklistEnabled () {
+    return this.serverService.getHTMLConfig().blocklist.publicLog.enabled === true
+  }
+
+  ngOnInit () {
+    const { aboutHTML }: ResolverData = this.route.parent.snapshot.data.instanceData
+
+    this.aboutHTML = aboutHTML
+  }
+}

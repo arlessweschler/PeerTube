@@ -1,8 +1,6 @@
-import { Observable, of, ReplaySubject } from 'rxjs'
-import { catchError, first, map, shareReplay } from 'rxjs/operators'
 import { HttpClient } from '@angular/common/http'
-import { Inject, Injectable, LOCALE_ID, NgZone } from '@angular/core'
-import { VideoEditType } from '@app/+videos/+video-edit/shared/video-edit.type'
+import { inject, Injectable, LOCALE_ID, NgZone } from '@angular/core'
+import { VideoManageType } from '@app/+videos-publish-manage/shared-manage/common/video-manage.type'
 import { AuthService } from '@app/core/auth'
 import { Notifier } from '@app/core/notification'
 import { MarkdownService } from '@app/core/renderer'
@@ -10,182 +8,129 @@ import { RestExtractor } from '@app/core/rest'
 import { ServerService } from '@app/core/server/server.service'
 import { getDevLocale, isOnDevLocale } from '@app/helpers'
 import { CustomModalComponent } from '@app/modal/custom-modal.component'
-import { FormFields, Hooks, loadPlugin, PluginInfo, runHook } from '@root-helpers/plugins'
-import { getCompleteLocale, isDefaultLocale, peertubeTranslate } from '@shared/core-utils/i18n'
+import { getCompleteLocale, getKeys, isDefaultLocale, objectKeysTyped, peertubeTranslate } from '@peertube/peertube-core-utils'
 import {
+  ClientDoActionCallback,
+  ClientDoActionName,
   ClientHook,
   ClientHookName,
   PluginClientScope,
   PluginTranslation,
   PluginType,
+  PluginType_Type,
   PublicServerSetting,
-  RegisterClientSettingsScript,
+  RegisterClientFormFieldOptions,
+  RegisterClientRouteOptions,
+  RegisterClientSettingsScriptOptions,
+  RegisterClientVideoFieldOptions,
   ServerConfigPlugin
-} from '@shared/models'
+} from '@peertube/peertube-models'
+import { logger } from '@root-helpers/logger'
+import { PluginInfo, PluginsManager } from '@root-helpers/plugins-manager'
+import { firstValueFrom, Observable, of } from 'rxjs'
+import { catchError, map, shareReplay } from 'rxjs/operators'
 import { environment } from '../../../environments/environment'
 import { RegisterClientHelpers } from '../../../types/register-client-option.model'
+import { Router } from '@angular/router'
+
+type FormFields = {
+  video: {
+    pluginInfo: PluginInfo
+    commonOptions: RegisterClientFormFieldOptions
+    videoFormOptions: RegisterClientVideoFieldOptions
+  }[]
+}
 
 @Injectable()
 export class PluginService implements ClientHook {
+  private authService = inject(AuthService)
+  private notifier = inject(Notifier)
+  private markdownRenderer = inject(MarkdownService)
+  private server = inject(ServerService)
+  private zone = inject(NgZone)
+  private authHttp = inject(HttpClient)
+  private restExtractor = inject(RestExtractor)
+  private localeId = inject(LOCALE_ID)
+  private router = inject(Router)
+
   private static BASE_PLUGIN_API_URL = environment.apiUrl + '/api/v1/plugins'
   private static BASE_PLUGIN_URL = environment.apiUrl + '/plugins'
-
-  pluginsBuilt = new ReplaySubject<boolean>(1)
-
-  pluginsLoaded: { [ scope in PluginClientScope ]: ReplaySubject<boolean> } = {
-    common: new ReplaySubject<boolean>(1),
-    'admin-plugin': new ReplaySubject<boolean>(1),
-    search: new ReplaySubject<boolean>(1),
-    'video-watch': new ReplaySubject<boolean>(1),
-    signup: new ReplaySubject<boolean>(1),
-    login: new ReplaySubject<boolean>(1),
-    'video-edit': new ReplaySubject<boolean>(1),
-    embed: new ReplaySubject<boolean>(1)
-  }
 
   translationsObservable: Observable<PluginTranslation>
 
   customModal: CustomModalComponent
 
-  private plugins: ServerConfigPlugin[] = []
-  private helpers: { [ npmName: string ]: RegisterClientHelpers } = {}
-
-  private scopes: { [ scopeName: string ]: PluginInfo[] } = {}
-
-  private loadedScripts: { [ script: string ]: boolean } = {}
-  private loadedScopes: PluginClientScope[] = []
-  private loadingScopes: { [id in PluginClientScope]?: boolean } = {}
-
-  private hooks: Hooks = {}
   private formFields: FormFields = {
     video: []
   }
-  private settingsScripts: { [ npmName: string ]: RegisterClientSettingsScript } = {}
+  private settingsScripts: { [npmName: string]: RegisterClientSettingsScriptOptions } = {}
+  private clientRoutes: {
+    [parentRoute in RegisterClientRouteOptions['parentRoute']]?: {
+      [route: string]: RegisterClientRouteOptions
+    }
+  } = {}
 
-  constructor (
-    private authService: AuthService,
-    private notifier: Notifier,
-    private markdownRenderer: MarkdownService,
-    private server: ServerService,
-    private zone: NgZone,
-    private authHttp: HttpClient,
-    private restExtractor: RestExtractor,
-    @Inject(LOCALE_ID) private localeId: string
-  ) {
+  private pluginsManager: PluginsManager
+
+  private actions = new Map<ClientDoActionName, ClientDoActionCallback>()
+  constructor () {
     this.loadTranslations()
+
+    this.pluginsManager = new PluginsManager({
+      router: this.buildRouter(),
+      doAction: this.doAction.bind(this),
+      peertubeHelpersFactory: this.buildPeerTubeHelpers.bind(this),
+      onFormFields: this.onFormFields.bind(this),
+      onSettingsScripts: this.onSettingsScripts.bind(this),
+      onClientRoute: this.onClientRoute.bind(this)
+    })
+  }
+
+  addAction (actionName: ClientDoActionName, callback: ClientDoActionCallback) {
+    this.actions.set(actionName, callback)
+  }
+
+  removeAction (actionName: ClientDoActionName) {
+    this.actions.delete(actionName)
   }
 
   initializePlugins () {
-    this.server.getConfig()
-      .subscribe(config => {
-        this.plugins = config.plugin.registered
+    this.pluginsManager.loadPluginsList(this.server.getHTMLConfig())
 
-        this.buildScopeStruct()
-
-        this.pluginsBuilt.next(true)
-      })
+    return this.pluginsManager.ensurePluginsAreLoaded('common')
   }
 
   initializeCustomModal (customModal: CustomModalComponent) {
     this.customModal = customModal
   }
 
-  ensurePluginsAreBuilt () {
-    return this.pluginsBuilt.asObservable()
-               .pipe(first(), shareReplay())
-               .toPromise()
-  }
-
-  ensurePluginsAreLoaded (scope: PluginClientScope) {
-    this.loadPluginsByScope(scope)
-
-    return this.pluginsLoaded[scope].asObservable()
-               .pipe(first(), shareReplay())
-               .toPromise()
-  }
-
-  addPlugin (plugin: ServerConfigPlugin, isTheme = false) {
-    const pathPrefix = this.getPluginPathPrefix(isTheme)
-
-    for (const key of Object.keys(plugin.clientScripts)) {
-      const clientScript = plugin.clientScripts[key]
-
-      for (const scope of clientScript.scopes) {
-        if (!this.scopes[scope]) this.scopes[scope] = []
-
-        this.scopes[scope].push({
-          plugin,
-          clientScript: {
-            script: `${pathPrefix}/${plugin.name}/${plugin.version}/client-scripts/${clientScript.script}`,
-            scopes: clientScript.scopes
-          },
-          pluginType: isTheme ? PluginType.THEME : PluginType.PLUGIN,
-          isTheme
-        })
-
-        this.loadedScripts[clientScript.script] = false
-      }
-    }
-  }
-
-  removePlugin (plugin: ServerConfigPlugin) {
-    for (const key of Object.keys(this.scopes)) {
-      this.scopes[key] = this.scopes[key].filter(o => o.plugin.name !== plugin.name)
-    }
-  }
-
-  async reloadLoadedScopes () {
-    for (const scope of this.loadedScopes) {
-      await this.loadPluginsByScope(scope, true)
-    }
-  }
-
-  async loadPluginsByScope (scope: PluginClientScope, isReload = false) {
-    if (this.loadingScopes[scope]) return
-    if (!isReload && this.loadedScopes.includes(scope)) return
-
-    this.loadingScopes[scope] = true
-
-    try {
-      await this.ensurePluginsAreBuilt()
-
-      if (!isReload) this.loadedScopes.push(scope)
-
-      const toLoad = this.scopes[ scope ]
-      if (!Array.isArray(toLoad)) {
-        this.loadingScopes[scope] = false
-        this.pluginsLoaded[scope].next(true)
-
-        return
-      }
-
-      const promises: Promise<any>[] = []
-      for (const pluginInfo of toLoad) {
-        const clientScript = pluginInfo.clientScript
-
-        if (this.loadedScripts[ clientScript.script ]) continue
-
-        promises.push(this.loadPlugin(pluginInfo))
-
-        this.loadedScripts[ clientScript.script ] = true
-      }
-
-      await Promise.all(promises)
-
-      this.pluginsLoaded[scope].next(true)
-      this.loadingScopes[scope] = false
-    } catch (err) {
-      console.error('Cannot load plugins by scope %s.', scope, err)
-    }
-  }
-
-  runHook <T> (hookName: ClientHookName, result?: T, params?: any): Promise<T> {
+  runHook<T> (hookName: ClientHookName, result?: T, params?: any): Promise<T> {
     return this.zone.runOutsideAngular(() => {
-      return runHook(this.hooks, hookName, result, params)
+      return this.pluginsManager.runHook(hookName, result, params)
     })
   }
 
-  nameToNpmName (name: string, type: PluginType) {
+  ensurePluginsAreLoaded (scope: PluginClientScope) {
+    return this.pluginsManager.ensurePluginsAreLoaded(scope)
+  }
+
+  reloadLoadedScopes () {
+    return this.pluginsManager.reloadLoadedScopes()
+  }
+
+  getPluginsManager () {
+    return this.pluginsManager
+  }
+
+  addPlugin (plugin: ServerConfigPlugin, isTheme = false) {
+    return this.pluginsManager.addPlugin(plugin, isTheme)
+  }
+
+  removePlugin (plugin: ServerConfigPlugin) {
+    return this.pluginsManager.removePlugin(plugin)
+  }
+
+  nameToNpmName (name: string, type: PluginType_Type) {
     const prefix = type === PluginType.PLUGIN
       ? 'peertube-plugin-'
       : 'peertube-theme-'
@@ -193,13 +138,7 @@ export class PluginService implements ClientHook {
     return prefix + name
   }
 
-  pluginTypeFromNpmName (npmName: string) {
-    return npmName.startsWith('peertube-plugin-')
-      ? PluginType.PLUGIN
-      : PluginType.THEME
-  }
-
-  getRegisteredVideoFormFields (type: VideoEditType) {
+  getRegisteredVideoFormFields (type: VideoManageType) {
     return this.formFields.video.filter(f => f.videoFormOptions.type === type)
   }
 
@@ -207,64 +146,154 @@ export class PluginService implements ClientHook {
     return this.settingsScripts[npmName]
   }
 
-  translateBy (npmName: string, toTranslate: string) {
-    const helpers = this.helpers[npmName]
-    if (!helpers) {
-      console.error('Unknown helpers to translate %s from %s.', toTranslate, npmName)
-      return toTranslate
+  getRegisteredClientRoute (route: string, parentRoute: RegisterClientRouteOptions['parentRoute']) {
+    if (!this.clientRoutes[parentRoute]) {
+      return undefined
     }
 
-    return helpers.translate(toTranslate)
+    return this.clientRoutes[parentRoute][route]
   }
 
-  private loadPlugin (pluginInfo: PluginInfo) {
-    return this.zone.runOutsideAngular(() => {
-      const npmName = this.nameToNpmName(pluginInfo.plugin.name, pluginInfo.pluginType)
+  getAllRegisteredClientRoutesForParent (parentRoute: RegisterClientRouteOptions['parentRoute']) {
+    return this.clientRoutes[parentRoute]
+  }
 
-      const helpers = this.buildPeerTubeHelpers(pluginInfo)
-      this.helpers[npmName] = helpers
+  getAllRegisteredClientRoutes () {
+    return objectKeysTyped(this.clientRoutes)
+      .map((parentRoute: RegisterClientRouteOptions['parentRoute']) => {
+        return Object.keys(this.clientRoutes[parentRoute])
+          .map(route => {
+            if (parentRoute === '/') return route
 
-      return loadPlugin({
-        hooks: this.hooks,
-        formFields: this.formFields,
-        onSettingsScripts: options => this.settingsScripts[npmName] = options,
-        pluginInfo,
-        peertubeHelpersFactory: () => helpers
+            return parentRoute + route
+          })
       })
+      .flat()
+  }
+
+  async translateSetting (npmName: string, setting: RegisterClientFormFieldOptions) {
+    for (const key of getKeys(setting, [ 'label', 'html', 'descriptionHTML' ])) {
+      // eslint-disable-next-line require-atomic-updates
+      if (setting[key]) setting[key] = await this.translateBy(npmName, setting[key])
+    }
+
+    if (Array.isArray(setting.options)) {
+      const newOptions = []
+
+      for (const o of setting.options) {
+        newOptions.push({
+          value: o.value,
+          label: await this.translateBy(npmName, o.label)
+        })
+      }
+
+      setting.options = newOptions
+    }
+  }
+
+  translateBy (npmName: string, toTranslate: string) {
+    const obs = this.translationsObservable
+      .pipe(
+        map(allTranslations => allTranslations[npmName]),
+        map(translations => peertubeTranslate(toTranslate, translations))
+      )
+
+    return firstValueFrom(obs)
+  }
+
+  private doAction (actionName: ClientDoActionName) {
+    if (!this.actions.has(actionName)) {
+      logger.warn(`Plugin tried to do unknown action: ${actionName}`)
+    }
+
+    try {
+      return this.actions.get(actionName)()
+    } catch (err: any) {
+      logger.warn(`Cannot run action ${actionName}`, err)
+    }
+  }
+
+  private onFormFields (
+    pluginInfo: PluginInfo,
+    commonOptions: RegisterClientFormFieldOptions,
+    videoFormOptions: RegisterClientVideoFieldOptions
+  ) {
+    this.formFields.video.push({
+      pluginInfo,
+      commonOptions,
+      videoFormOptions
     })
   }
 
-  private buildScopeStruct () {
-    for (const plugin of this.plugins) {
-      this.addPlugin(plugin)
+  private onSettingsScripts (pluginInfo: PluginInfo, options: RegisterClientSettingsScriptOptions) {
+    this.settingsScripts[pluginInfo.plugin.npmName] = options
+  }
+
+  private onClientRoute (options: RegisterClientRouteOptions) {
+    const parentRoute = options.parentRoute || '/'
+
+    const route = options.route.startsWith('/')
+      ? options.route
+      : `/${options.route}`
+
+    if (!this.clientRoutes[parentRoute]) {
+      this.clientRoutes[parentRoute] = {}
+    }
+
+    this.clientRoutes[parentRoute][route] = options
+  }
+
+  private buildRouter () {
+    return {
+      navigateByUrl: (url: string) => this.router.navigateByUrl(url)
     }
   }
 
   private buildPeerTubeHelpers (pluginInfo: PluginInfo): RegisterClientHelpers {
     const { plugin } = pluginInfo
-    const npmName = this.nameToNpmName(pluginInfo.plugin.name, pluginInfo.pluginType)
+    const npmName = pluginInfo.plugin.npmName
 
     return {
       getBaseStaticRoute: () => {
-        const pathPrefix = this.getPluginPathPrefix(pluginInfo.isTheme)
+        const pathPrefix = PluginsManager.getPluginPathPrefix(pluginInfo.isTheme)
         return environment.apiUrl + `${pathPrefix}/${plugin.name}/${plugin.version}/static`
+      },
+
+      getBaseRouterRoute: () => {
+        const pathPrefix = PluginsManager.getPluginPathPrefix(pluginInfo.isTheme)
+        return environment.apiUrl + `${pathPrefix}/${plugin.name}/${plugin.version}/router`
+      },
+
+      getBaseWebSocketRoute: () => {
+        const pathPrefix = PluginsManager.getPluginPathPrefix(pluginInfo.isTheme)
+        return environment.apiUrl + `${pathPrefix}/${plugin.name}/${plugin.version}/ws`
+      },
+
+      getBasePluginClientPath: () => {
+        return '/p'
       },
 
       getSettings: () => {
         const path = PluginService.BASE_PLUGIN_API_URL + '/' + npmName + '/public-settings'
 
-        return this.authHttp.get<PublicServerSetting>(path)
-                   .pipe(
-                     map(p => p.publicSettings),
-                     catchError(res => this.restExtractor.handleError(res))
-                   )
-                   .toPromise()
+        const obs = this.authHttp.get<PublicServerSetting>(path)
+          .pipe(
+            map(p => p.publicSettings),
+            catchError(res => this.restExtractor.handleError(res))
+          )
+
+        return firstValueFrom(obs)
+      },
+
+      getUser: () => {
+        return this.authService.getUser()
       },
 
       getServerConfig: () => {
-        return this.server.getConfig()
+        const obs = this.server.getConfig()
           .pipe(catchError(res => this.restExtractor.handleError(res)))
-          .toPromise()
+
+        return firstValueFrom(obs)
       },
 
       isLoggedIn: () => {
@@ -275,40 +304,37 @@ export class PluginService implements ClientHook {
         if (!this.authService.isLoggedIn()) return undefined
 
         const value = this.authService.getRequestHeaderValue()
-        return { 'Authorization': value }
+        return { Authorization: value }
       },
 
       notifier: {
-        info: (text: string, title?: string, timeout?: number) => this.notifier.info(text, title, timeout),
-        error: (text: string, title?: string, timeout?: number) => this.notifier.error(text, title, timeout),
-        success: (text: string, title?: string, timeout?: number) => this.notifier.success(text, title, timeout)
+        info: (text: string, title?: string, timeout?: number) => this.zone.run(() => this.notifier.info(text, title, timeout)),
+        error: (text: string, title?: string, timeout?: number) => this.zone.run(() => this.notifier.error(text, title, timeout)),
+        success: (text: string, title?: string, timeout?: number) => this.zone.run(() => this.notifier.success(text, title, timeout))
       },
 
       showModal: (input: {
-        title: string,
-        content: string,
-        close?: boolean,
-        cancel?: { value: string, action?: () => void },
+        title: string
+        content: string
+        close?: boolean
+        cancel?: { value: string, action?: () => void }
         confirm?: { value: string, action?: () => void }
       }) => {
-        this.customModal.show(input)
+        this.zone.run(() => this.customModal.show(input))
       },
 
       markdownRenderer: {
         textMarkdownToHTML: (textMarkdown: string) => {
-          return this.markdownRenderer.textMarkdownToHTML(textMarkdown)
+          return this.markdownRenderer.textMarkdownToHTML({ markdown: textMarkdown, userGeneratedLinks: false })
         },
 
         enhancedMarkdownToHTML: (enhancedMarkdown: string) => {
-          return this.markdownRenderer.enhancedMarkdownToHTML(enhancedMarkdown)
+          return this.markdownRenderer.enhancedMarkdownToHTML({ markdown: enhancedMarkdown, userGeneratedLinks: false })
         }
       },
 
       translate: (value: string) => {
-        return this.translationsObservable
-            .pipe(map(allTranslations => allTranslations[npmName]))
-            .pipe(map(translations => peertubeTranslate(value, translations)))
-            .toPromise()
+        return this.translateBy(npmName, value)
       }
     }
   }
@@ -320,11 +346,7 @@ export class PluginService implements ClientHook {
     if (isDefaultLocale(completeLocale)) this.translationsObservable = of({}).pipe(shareReplay())
 
     this.translationsObservable = this.authHttp
-        .get<PluginTranslation>(PluginService.BASE_PLUGIN_URL + '/translations/' + completeLocale + '.json')
-        .pipe(shareReplay())
-  }
-
-  private getPluginPathPrefix (isTheme: boolean) {
-    return isTheme ? '/themes' : '/plugins'
+      .get<PluginTranslation>(PluginService.BASE_PLUGIN_URL + '/translations/' + completeLocale + '.json')
+      .pipe(shareReplay())
   }
 }

@@ -1,0 +1,40 @@
+<my-signup-step-title mascotImageName="success">
+  @if (requiresApproval()) {
+    <strong i18n>Account request sent</strong>
+  } @else {
+    <ng-container i18n>
+      <strong>Welcome</strong>
+      <div>to {{ instanceName() }}</div>
+    </ng-container>
+  }
+</my-signup-step-title>
+
+<my-alert type="primary">
+  @if (requiresApproval()) {
+    <p i18n>Your account request has been sent!</p>
+  } @else {
+    <p i18n>Your account has been created!</p>
+  }
+
+  @if (requiresEmailVerification()) {
+    @if (requiresApproval()) {
+      <p i18n>
+        <strong>Check your email</strong> to validate your account and complete your registration request.
+      </p>
+    } @else {
+      <p i18n>
+        <strong>Check your email</strong> to validate your account and complete your registration.
+      </p>
+    }
+  } @else {
+    @if (requiresApproval()) {
+      <p i18n>
+        A moderator will check your registration request soon and you'll receive an email when it is accepted or rejected.
+      </p>
+    } @else {
+      <p i18n>
+        If you need help using PeerTube, you can have a look at the <a class="link-primary" href="https://docs.joinpeertube.org/use/setup-account" target="_blank" rel="noopener noreferrer">documentation</a>.
+      </p>
+    }
+  }
+</my-alert>

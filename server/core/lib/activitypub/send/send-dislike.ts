@@ -1,0 +1,42 @@
+import { Transaction } from 'sequelize'
+import { ActivityAudience, ActivityDislike } from '@peertube/peertube-models'
+import { createLogger } from '../../../helpers/logger.js'
+import { MActor, MActorAudience, MVideoAccountLight, MVideoUrl } from '../../../types/models/index.js'
+import { audiencify, getPublicAudience } from '../audience.js'
+import { getVideoDislikeActivityPubUrlByLocalActor } from '../url.js'
+import { sendVideoRelatedActivityToOrigin } from './shared/send-utils.js'
+
+const logger = createLogger()
+
+function sendDislike (byActor: MActor, video: MVideoAccountLight, transaction: Transaction) {
+  logger.info('Creating job to dislike %s.', video.url)
+
+  const activityBuilder = (audience: ActivityAudience) => {
+    const url = getVideoDislikeActivityPubUrlByLocalActor(byActor, video)
+
+    return buildDislikeActivity(url, byActor, video, audience)
+  }
+
+  return sendVideoRelatedActivityToOrigin(activityBuilder, { byActor, video, transaction, contextType: 'Rate' })
+}
+
+function buildDislikeActivity (url: string, byActor: MActorAudience, video: MVideoUrl, audience?: ActivityAudience): ActivityDislike {
+  if (!audience) audience = getPublicAudience(byActor)
+
+  return audiencify(
+    {
+      id: url,
+      type: 'Dislike',
+      actor: byActor.url,
+      object: video.url
+    },
+    audience
+  )
+}
+
+// ---------------------------------------------------------------------------
+
+export {
+  sendDislike,
+  buildDislikeActivity
+}

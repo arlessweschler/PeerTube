@@ -1,75 +1,42 @@
-@import '_variables';
-@import '_mixins';
+@use "_variables" as *;
+@use "_mixins" as *;
+@use "_form-mixins" as *;
 
-.btn-group-subscribe {
-  @include peertube-button;
-  @include disable-default-a-behaviour;
-
-  float: right;
+.btn-group {
   padding: 0;
+  opacity: 0;
 
-  > .btn,
-  > .dropdown > .dropdown-toggle {
-    font-size: 15px;
+  &.loaded {
+    opacity: 1;
+  }
+
+  .peertube-button {
+    // Prevent weird border radius blur on chrome
+    z-index: unset !important;
+    padding: pvar(--input-y-padding) 10px;
+  }
+
+  .dropdown-toggle::after {
+    position: relative;
+    top: 1px;
+  }
+
+  .dropdown-toggle:not(.dropdown-toggle-split)::after {
+    margin-left: 0.5rem;
+  }
+
+  .dropdown-toggle-split {
+    padding-left: 8px;
+    padding-right: 8px;
   }
 
   &:not(.big) {
     white-space: nowrap;
   }
 
-  &.big {
-    height: 35px;
-
-    > button:first-child {
-      width: max-content;
-      min-width: 175px;
-    }
-
-    button .extra-text {
-      span:first-child {
-        line-height: 80%;
-      }
-
-      span:not(:first-child) {
-        font-size: 75%;
-      }
-    }
-  }
-
-  // Unlogged
-  > .dropdown > .dropdown-toggle span {
-    padding-right: 3px;
-  }
-
-  // Logged
-  > .btn {
-    padding-right: 4px;
-
-    + .dropdown > button {
-      padding-left: 2px;
-
-      &::after {
-        position: relative;
-        top: 1px;
-      }
-    }
-  }
-
-  &.subscribe-button {
-    .btn {
-      @include orange-button;
-      font-weight: 600;
-    }
-
-    span.followers-count {
-      padding-left: 5px;
-    }
-  }
-  &.unsubscribe-button {
-    .btn {
-      @include grey-button;
-      font-weight: 600;
-    }
+  &.big > button:first-child {
+    width: max-content;
+    min-width: 175px;
   }
 
   .dropdown-menu {
@@ -77,6 +44,12 @@
 
     button {
       cursor: pointer;
+    }
+
+    .dropdown-item {
+      @media screen and (max-width: $mobile-view) {
+        white-space: normal;
+      }
     }
 
     .dropdown-item-neutral {
@@ -95,19 +68,5 @@
 
   input {
     @include peertube-input-text(100%);
-  }
-}
-
-.extra-text {
-  display: flex;
-  flex-direction: column;
-
-  span:first-child {
-    line-height: 75%;
-  }
-
-  span:not(:first-child) {
-    font-size: 60%;
-    text-align: left;
   }
 }

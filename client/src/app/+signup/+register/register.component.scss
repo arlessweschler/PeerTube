@@ -1,74 +1,49 @@
-@import '_variables';
-@import '_mixins';
+@use '_variables' as *;
+@use '_mixins' as *;
 
-.alert {
-  font-size: 15px;
-  text-align: center;
+my-signup-step-title strong {
+  font-weight: $font-bold;
 }
 
-.wrapper {
-  display: flex;
-  flex-direction: column;
-
-  .register-form {
-    max-width: 600px;
-    align-self: center;
-  }
-
-  .register-form,
-  .instance-information {
-    width: 100%;
-  }
-
-  .instance-information {
-    margin-bottom: 15px;
-  }
+.signup-disabled {
+  padding-top: 30vh;
 }
 
-.form-group-terms {
-  margin: 30px 0;
-}
-
-.input-group {
-  @include peertube-input-group(100%);
-}
-
-.input-group-append {
-  height: 30px;
-}
-
-.form-group-terms {
-  width: 100% !important;
-}
-
-input:not([type=submit]) {
-  @include peertube-input-text(100%);
+my-instance-about-accordion {
   display: block;
-
-  &#username,
-  &#name {
-    width: auto !important;
-    flex-grow: 1;
-  }
+  margin-bottom: 30px;
 }
 
-input[type=submit],
-button {
-  @include peertube-button;
+.step-buttons {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
 
-  &[cdkStepperNext] {
-    @include orange-button;
-    float: inline-end;
+  .skip-step {
+    display: inline-block;
+
+    @include margin-right(30px);
   }
 
-  &[cdkStepperPrevious] {
-    @include grey-button;
-    float: inline-start;
+  .skip-step-description {
+    margin-top: 5px;
+    font-size: 14px;
   }
-}
 
-.name-information {
-  margin-top: 10px;
+  > button,
+  .skip-step {
+    margin-top: 20px;
+    margin-bottom: 20px;
+  }
+
+  .skip-step,
+  button[cdkStepperNext] {
+    @include margin-left(auto);
+  }
+
+  .skip-step + button[cdkStepperNext] {
+    @include margin-left(0);
+  }
 }
 
 .done-loader {
@@ -79,13 +54,16 @@ button {
 
   my-loader {
     margin-bottom: 20px;
+  }
+}
 
-    ::ng-deep .loader div {
-      border-color: pvar(--mainColor) transparent transparent transparent;
-    }
+@media screen and (max-width: $small-view) {
+  .step-buttons {
+    justify-content: space-between;
 
-    + div {
-      font-size: 15px;
+    .skip-step,
+    button[cdkStepperNext] {
+      @include margin-left(0);
     }
   }
 }

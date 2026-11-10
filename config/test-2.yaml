@@ -2,7 +2,6 @@ listen:
   port: 9002
 
 webserver:
-  hostname: 'localhost'
   port: 9002
 
 database:
@@ -11,17 +10,23 @@ database:
 # From the project root directory
 storage:
   tmp: 'test2/tmp/'
+  tmp_persistent: 'test2/tmp-persistent/'
+  bin: 'test2/bin/'
   avatars: 'test2/avatars/'
-  videos: 'test2/videos/'
+  web_videos: 'test2/web-videos/'
   streaming_playlists: 'test2/streaming-playlists/'
+  original_video_files: 'test2/original-video-files/'
   redundancy: 'test2/redundancy/'
   logs: 'test2/logs/'
   previews: 'test2/previews/'
   thumbnails: 'test2/thumbnails/'
+  storyboards: 'test2/storyboards/'
   torrents: 'test2/torrents/'
   captions: 'test2/captions/'
   cache: 'test2/cache/'
   plugins: 'test2/plugins/'
+  well_known: 'test2/well-known/'
+  uploads: 'test2/uploads/'
   client_overrides: 'test2/client-overrides/'
 
 admin:
@@ -34,3 +39,7 @@ transcoding:
   enabled: true
   allow_additional_extensions: true
   allow_audio_files: true
+
+live:
+  rtmp:
+    port: 1937

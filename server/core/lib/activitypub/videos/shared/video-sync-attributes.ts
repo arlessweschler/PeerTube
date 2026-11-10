@@ -1,0 +1,122 @@
+import { ActivityPubOrderedCollection, ActivitypubHttpFetcherPayload, VideoObject } from '@peertube/peertube-models'
+import { runInReadCommittedTransaction } from '@server/helpers/database-utils.js'
+import { createLogger } from '@server/helpers/logger.js'
+import { getRemoteErrorLogLevel } from '@server/helpers/remote-errors.js'
+import { JobQueue } from '@server/lib/job-queue/index.js'
+import { VideoCommentModel } from '@server/models/video/video-comment.js'
+import { VideoShareModel } from '@server/models/video/video-share.js'
+import { VideoModel } from '@server/models/video/video.js'
+import { MVideo } from '@server/types/models/index.js'
+import validator from 'validator'
+import { fetchAP } from '../../activity.js'
+import { crawlCollectionPage } from '../../crawl.js'
+import { addVideoShares } from '../../share.js'
+import { addVideoComments } from '../../video-comments.js'
+
+const logger = createLogger('ap', 'video')
+
+export type SyncParam = {
+  rates: boolean
+  shares: boolean
+  comments: boolean
+  refreshVideo?: boolean
+}
+
+export function syncVideoExternalAttributes (
+  video: MVideo,
+  fetchedVideo: VideoObject,
+  syncParam: Pick<SyncParam, 'rates' | 'shares' | 'comments'>,
+  options: {
+    skipRates?: boolean
+  } = {}
+) {
+  return logger.withContext([ video.uuid, video.url ], async () => {
+    logger.info('Adding likes/dislikes/shares/comments of video %s.', video.uuid)
+
+    if (options.skipRates !== true) {
+      const ratePromise = updateVideoRates(video, fetchedVideo)
+      if (syncParam.rates) await ratePromise
+    }
+
+    await syncShares(video, fetchedVideo, syncParam.shares)
+
+    await syncComments(video, fetchedVideo, syncParam.comments)
+  })
+}
+
+// Never throws: rates are not essential, so a remote error must not fail the video creation/update
+export async function updateVideoRates (video: MVideo, fetchedVideo: VideoObject) {
+  try {
+    const [ likes, dislikes ] = await Promise.all([
+      getRatesCount('like', video, fetchedVideo),
+      getRatesCount('dislike', video, fetchedVideo)
+    ])
+
+    // Remote video may not provide likes/dislikes collections
+    if (likes === undefined && dislikes === undefined) return
+
+    await runInReadCommittedTransaction(async t => {
+      if (likes !== undefined) await VideoModel.updateRatesOf(video.id, 'like', likes, t)
+      if (dislikes !== undefined) await VideoModel.updateRatesOf(video.id, 'dislike', dislikes, t)
+    })
+  } catch (err) {
+    logger.warn('Cannot sync rates of video %s.', video.url, { err })
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Private
+// ---------------------------------------------------------------------------
+
+async function getRatesCount (type: 'like' | 'dislike', video: MVideo, fetchedVideo: VideoObject) {
+  const uri = type === 'like'
+    ? fetchedVideo.likes
+    : fetchedVideo.dislikes
+
+  if (!uri) return
+
+  logger.info('Sync %s of video %s', type, video.url)
+
+  const { body } = await fetchAP<ActivityPubOrderedCollection<any>>(uri, { preventCrossHostRedirect: false })
+
+  if (!validator.default.isInt(body?.totalItems + '', { min: 0 })) {
+    logger.warn('Cannot sync %s of video %s, totalItems is not a positive integer', type, video.url, { body })
+    return
+  }
+
+  return parseInt(body.totalItems + '', 10)
+}
+
+function syncShares (video: MVideo, fetchedVideo: VideoObject, isSync: boolean) {
+  const uri = fetchedVideo.shares
+  if (!uri) return
+
+  if (!isSync) {
+    return createJob({ uri, videoId: video.id, type: 'video-shares' })
+  }
+
+  const handler = items => addVideoShares(items, video)
+  const cleaner = crawlStartDate => VideoShareModel.cleanOldSharesOf(video.id, crawlStartDate)
+
+  return crawlCollectionPage<string>(uri, handler, cleaner)
+    .catch(err => logger.log(getRemoteErrorLogLevel(err), 'Cannot add shares of video %s.', video.uuid, { err, rootUrl: uri }))
+}
+
+function syncComments (video: MVideo, fetchedVideo: VideoObject, isSync: boolean) {
+  const uri = fetchedVideo.comments
+  if (!uri) return
+
+  if (!isSync) {
+    return createJob({ uri, videoId: video.id, type: 'video-comments' })
+  }
+
+  const handler = items => addVideoComments(items)
+  const cleaner = crawlStartDate => VideoCommentModel.cleanOldCommentsOf(video.id, crawlStartDate)
+
+  return crawlCollectionPage<string>(uri, handler, cleaner)
+    .catch(err => logger.log(getRemoteErrorLogLevel(err), 'Cannot add comments of video %s.', video.uuid, { err, rootUrl: uri }))
+}
+
+function createJob (payload: ActivitypubHttpFetcherPayload) {
+  return JobQueue.Instance.createJob({ type: 'activitypub-http-fetcher', payload })
+}

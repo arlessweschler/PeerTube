@@ -1,22 +1,23 @@
-import { forkJoin } from 'rxjs'
-import { Component, OnInit } from '@angular/core'
+import { Component, OnInit, inject, ChangeDetectionStrategy } from '@angular/core'
 import { ActivatedRoute, Router } from '@angular/router'
-import { VideoChannel } from '@app/shared/shared-main'
-import { SearchService } from '@app/shared/shared-search'
+import { VideoChannel } from '@app/shared/shared-main/channel/video-channel.model'
+import { AlertComponent } from '@app/shared/shared-main/common/alert.component'
+import { Video } from '@app/shared/shared-main/video/video.model'
+import { SearchService } from '@app/shared/shared-search/search.service'
+import { forkJoin } from 'rxjs'
 
 @Component({
   selector: 'my-remote-interaction',
   templateUrl: './remote-interaction.component.html',
-  styleUrls: ['./remote-interaction.component.scss']
+  changeDetection: ChangeDetectionStrategy.Eager,
+  imports: [ AlertComponent ]
 })
 export class RemoteInteractionComponent implements OnInit {
-  error = ''
+  private route = inject(ActivatedRoute)
+  private router = inject(Router)
+  private search = inject(SearchService)
 
-  constructor (
-    private route: ActivatedRoute,
-    private router: Router,
-    private search: SearchService
-  ) { }
+  error = ''
 
   ngOnInit () {
     const uri = this.route.snapshot.queryParams['uri']
@@ -39,7 +40,7 @@ export class RemoteInteractionComponent implements OnInit {
       if (videoResult.data.length !== 0) {
         const video = videoResult.data[0]
 
-        redirectUrl = '/w/' + video.uuid
+        redirectUrl = Video.buildWatchUrl(video)
       } else if (channelResult.data.length !== 0) {
         const channel = new VideoChannel(channelResult.data[0])
 
@@ -52,5 +53,4 @@ export class RemoteInteractionComponent implements OnInit {
       this.router.navigateByUrl(redirectUrl)
     })
   }
-
 }

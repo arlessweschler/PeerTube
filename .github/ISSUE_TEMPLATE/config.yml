@@ -1,11 +1,11 @@
 blank_issues_enabled: false
 contact_links:
+  - name: 📱 Mobile Application bug/feature request
+    url: https://framagit.org/framasoft/peertube/mobile-application/-/issues
+    about: Use the mobile application repository to report bugs or request new features
+  - name: 🤷 Question/Forum
+    url: https://framacolibri.org/c/peertube
+    about: You can ask and answer other questions here
   - name: 💬 Matrix
     url: https://matrix.to/#/#peertube:matrix.org
     about: Chat with us via Matrix for quick Q/A here
-  - name: 💬 IRC
-    url: https://kiwiirc.com/nextclient/irc.libera.chat/#peertube
-    about: Chat with us via IRC for quick Q/A here
-  - name: 🤷💻🤦 Forum
-    url: https://framacolibri.org/c/peertube
-    about: You can ask and answer other questions here

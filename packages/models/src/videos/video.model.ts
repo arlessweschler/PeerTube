@@ -1,0 +1,177 @@
+import { Account, AccountSummary } from '../actors/index.js'
+import { VideoChannel, VideoChannelSummary } from './channel/video-channel.model.js'
+import { VideoCommentPolicyType } from './comment/video-comment-policy.enum.js'
+import { VideoEmbedPrivacyPolicyType } from './embed-privacy/video-embed-privacy-policy.enum.js'
+import { VideoFile } from './file/index.js'
+import { LiveVideoScheduleEdit } from './live/live-video-schedule.model.js'
+import { Thumbnail } from './thumbnail/thumbnail.model.js'
+import { ConstantLabel } from '../common/constant-label.model.js'
+import { VideoAIUsageType } from './video-ai-usage.enum.js'
+import { VideoCommercialContentType } from './video-commercial-content.enum.js'
+import { VideoPrivacyType } from './video-privacy.enum.js'
+import { VideoRecommendationScopeType } from './video-recommendation-scope.enum.js'
+import { VideoScheduleUpdate } from './video-schedule-update.model.js'
+import { VideoSource } from './video-source.model.js'
+import { VideoStateType } from './video-state.enum.js'
+import { VideoStreamingPlaylist } from './video-streaming-playlist.model.js'
+
+export interface Video extends Partial<VideoAdditionalAttributes> {
+  id: number
+  uuid: string
+  shortUUID: string
+
+  createdAt: Date | string
+  updatedAt: Date | string
+  publishedAt: Date | string
+  originallyPublishedAt: Date | string
+  category: ConstantLabel<number>
+  licence: ConstantLabel<number>
+  language: ConstantLabel<string>
+  privacy: ConstantLabel<VideoPrivacyType>
+
+  // Deprecated in 5.0 in favour of truncatedDescription
+  description: string
+  truncatedDescription: string
+
+  duration: number
+  isLocal: boolean
+  name: string
+
+  aspectRatio: number | null
+
+  isLive: boolean
+  liveSchedules?: LiveVideoScheduleEdit[]
+
+  /**
+   * @deprecated in 8.1, use thumbnails array instead
+   */
+  thumbnailPath: string
+
+  /**
+   * @deprecated in 8.1, use thumbnails array instead
+   */
+  thumbnailUrl?: string
+
+  /**
+   * @deprecated in 8.1, use thumbnails array instead
+   */
+  previewPath: string
+
+  /**
+   * @deprecated in 8.1, use thumbnails array instead
+   */
+  previewUrl?: string
+
+  thumbnails: Thumbnail[]
+
+  embedPath: string
+  embedUrl?: string
+
+  url: string
+
+  views: number
+  viewers: number
+
+  downloads: number
+
+  likes: number
+  dislikes: number
+  comments: number
+
+  nsfw: boolean
+  nsfwFlags: number
+  nsfwSummary: string
+
+  aiUsage: ConstantLabel<VideoAIUsageType>
+
+  commercialContent: ConstantLabel<VideoCommercialContentType>
+
+  recommendationScope: ConstantLabel<VideoRecommendationScopeType>
+
+  account: AccountSummary
+  channel: VideoChannelSummary
+
+  userHistory?: {
+    currentTime: number
+  }
+
+  /**
+   * Languages of the video captions, only available in videos lists
+   */
+  captionLanguages?: string[]
+
+  pluginData?: any
+}
+
+// Not included by default, needs query params
+export interface VideoAdditionalAttributes {
+  waitTranscoding: boolean
+  state: ConstantLabel<VideoStateType>
+  scheduledUpdate: VideoScheduleUpdate
+
+  blacklisted: boolean
+  blacklistedReason: string
+
+  /**
+   * @deprecated in 8.2, use GET /api/v1/blocklist/status instead
+   */
+  blockedOwner: boolean
+
+  /**
+   * @deprecated in 8.2, use GET /api/v1/blocklist/status instead
+   */
+  blockedServer: boolean
+
+  files: VideoFile[]
+  streamingPlaylists: VideoStreamingPlaylist[]
+
+  videoSource: VideoSource
+
+  automaticTags: string[]
+  tags: string[]
+
+  liveSchedules: LiveVideoScheduleEdit[]
+}
+
+export interface VideoDetails extends Video {
+  support: string
+  channel: VideoChannel
+  account: Account
+  tags: string[]
+
+  commentsPolicy: {
+    id: VideoCommentPolicyType
+    label: string
+  }
+
+  downloadEnabled: boolean
+
+  // Not optional in details (unlike in parent Video)
+  waitTranscoding: boolean
+  state: ConstantLabel<VideoStateType>
+
+  trackerUrls: string[]
+
+  files: VideoFile[]
+  streamingPlaylists: VideoStreamingPlaylist[]
+
+  inputFileUpdatedAt: string | Date
+
+  embedPrivacyPolicy: ConstantLabel<VideoEmbedPrivacyPolicyType>
+}
+
+export type VideoSummary =
+  & Pick<
+    Video,
+    | 'id'
+    | 'uuid'
+    | 'shortUUID'
+    | 'name'
+    | 'nsfw'
+    | 'publishedAt'
+    | 'isLive'
+    | 'thumbnails'
+  >
+  & {
+    channel: VideoChannelSummary
+  }

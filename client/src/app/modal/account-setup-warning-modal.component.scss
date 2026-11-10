@@ -1,0 +1,30 @@
+@use '_variables' as *;
+@use '_mixins' as *;
+
+.modal-body {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+}
+
+.mascot-fw {
+  width: 170px;
+}
+
+.mascot {
+  display: block;
+  width: 170px;
+  height: 220px;
+
+  @include margin-right(2rem);
+}
+
+.subtitle {
+  font-weight: $font-semibold;
+  margin-bottom: 10px;
+}
+
+li {
+  margin-bottom: 10px;
+}

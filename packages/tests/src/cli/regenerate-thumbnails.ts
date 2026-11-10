@@ -1,0 +1,277 @@
+import { minBy } from '@peertube/peertube-core-utils'
+import { HttpStatusCode, Thumbnail, Video, VideoPlaylist } from '@peertube/peertube-models'
+import { areMockObjectStorageTestsDisabled } from '@peertube/peertube-node-utils'
+import {
+  cleanupTests,
+  createMultipleServers,
+  doubleFollow,
+  makeRawRequest,
+  ObjectStorageCommand,
+  PeerTubeServer,
+  setAccessTokensToServers,
+  waitJobs
+} from '@peertube/peertube-server-commands'
+import { expectStartWith } from '@tests/shared/checks.js'
+import { checkDirectoryIsEmpty } from '@tests/shared/directories.js'
+import { expect } from 'chai'
+import { writeFile } from 'fs/promises'
+import { basename, join } from 'path'
+
+async function testCurrentThumbnail (server: PeerTubeServer, videoId: number | string) {
+  const video = await server.videos.get({ id: videoId })
+
+  for (const thumbnail of video.thumbnails) {
+    const { body } = await makeRawRequest({ url: thumbnail.fileUrl, expectedStatus: HttpStatusCode.OK_200 })
+    expect(body).to.not.have.lengthOf(0)
+  }
+}
+
+async function testCurrentPlaylistThumbnail (server: PeerTubeServer, playlistId: number | string) {
+  const playlist = await server.playlists.get({ playlistId })
+
+  for (const thumbnail of playlist.thumbnails) {
+    const { body } = await makeRawRequest({ url: thumbnail.fileUrl, expectedStatus: HttpStatusCode.OK_200 })
+    expect(body).to.not.have.lengthOf(0)
+  }
+}
+
+describe('Test regenerate thumbnails CLI', function () {
+  let servers: PeerTubeServer[]
+
+  let video1: Video
+  let video2: Video
+  let remoteVideo: Video
+  let playlist1: VideoPlaylist
+
+  let localSmallestThumbnailPath: string
+  let localSmallestPlaylistThumbnailPath: string
+  let remoteSmallestThumbnailPath: string
+
+  function isTruncatedThumbnail (thumbnail: Thumbnail) {
+    return basename(thumbnail.fileUrl) === basename(localSmallestThumbnailPath) ||
+      basename(thumbnail.fileUrl) === basename(localSmallestPlaylistThumbnailPath) ||
+      basename(thumbnail.fileUrl) === basename(remoteSmallestThumbnailPath)
+  }
+
+  before(async function () {
+    this.timeout(60000)
+
+    servers = await createMultipleServers(2)
+    await setAccessTokensToServers(servers)
+
+    await doubleFollow(servers[0], servers[1])
+
+    {
+      const videoUUID1 = (await servers[0].videos.quickUpload({ name: 'video 1' })).uuid
+      video1 = await servers[0].videos.get({ id: videoUUID1 })
+
+      const smallestThumbnail = minBy(video1.thumbnails, 'width')
+      localSmallestThumbnailPath = join(join(servers[0].servers.buildDirectory('thumbnails'), basename(smallestThumbnail.fileUrl)))
+
+      const videoUUID2 = (await servers[0].videos.quickUpload({ name: 'video 2' })).uuid
+      video2 = await servers[0].videos.get({ id: videoUUID2 })
+
+      const playlistUUID = (await servers[0].playlists.quickCreate({ displayName: 'playlist 1' })).uuid
+      await servers[0].playlists.addElement({ playlistId: playlistUUID, attributes: { videoId: videoUUID1 } })
+
+      playlist1 = await servers[0].playlists.get({ playlistId: playlistUUID })
+
+      const smallestPlaylistThumbnail = minBy(playlist1.thumbnails, 'width')
+      localSmallestPlaylistThumbnailPath = join(
+        join(servers[0].servers.buildDirectory('thumbnails'), basename(smallestPlaylistThumbnail.fileUrl))
+      )
+    }
+
+    {
+      const videoUUID = (await servers[1].videos.quickUpload({ name: 'video 3' })).uuid
+      await waitJobs(servers)
+
+      remoteVideo = await servers[0].videos.get({ id: videoUUID })
+
+      // Load remote thumbnails on disk
+      for (const thumbnail of remoteVideo.thumbnails) {
+        await makeRawRequest({ url: thumbnail.fileUrl, expectedStatus: HttpStatusCode.OK_200 })
+      }
+
+      const smallestThumbnail = minBy(remoteVideo.thumbnails, 'width')
+      remoteSmallestThumbnailPath = join(
+        servers[0].servers.buildDirectory(join('cache', 'thumbnails')),
+        basename(smallestThumbnail.fileUrl)
+      )
+    }
+
+    await writeFile(localSmallestThumbnailPath, '')
+    await writeFile(localSmallestPlaylistThumbnailPath, '')
+    await writeFile(remoteSmallestThumbnailPath, '')
+  })
+
+  it('Should have empty thumbnails', async function () {
+    for (const thumbnail of [ ...video1.thumbnails, ...remoteVideo.thumbnails ]) {
+      const { body } = await makeRawRequest({ url: thumbnail.fileUrl, expectedStatus: HttpStatusCode.OK_200 })
+
+      if (isTruncatedThumbnail(thumbnail)) {
+        expect(body).to.have.lengthOf(0)
+      } else {
+        expect(body).to.not.have.lengthOf(0)
+      }
+    }
+
+    for (const thumbnail of video2.thumbnails) {
+      const { body } = await makeRawRequest({ url: thumbnail.fileUrl, expectedStatus: HttpStatusCode.OK_200 })
+      expect(body).to.not.have.lengthOf(0)
+    }
+
+    for (const thumbnail of playlist1.thumbnails) {
+      const { body } = await makeRawRequest({ url: thumbnail.fileUrl, expectedStatus: HttpStatusCode.OK_200 })
+
+      if (isTruncatedThumbnail(thumbnail)) {
+        expect(body).to.have.lengthOf(0)
+      } else {
+        expect(body).to.not.have.lengthOf(0)
+      }
+    }
+  })
+
+  it('Should regenerate local thumbnails from the CLI', async function () {
+    await servers[0].cli.execWithEnv(`npm run regenerate-thumbnails`)
+  })
+
+  it('Should have generated new thumbnail files', async function () {
+    await testCurrentThumbnail(servers[0], video1.uuid)
+    await testCurrentThumbnail(servers[0], video2.uuid)
+    await testCurrentPlaylistThumbnail(servers[0], playlist1.uuid)
+  })
+
+  it('Should have deleted old local thumbnails files', async function () {
+    for (const thumbnail of [ ...video1.thumbnails, ...video2.thumbnails, ...playlist1.thumbnails ]) {
+      await makeRawRequest({ url: thumbnail.fileUrl, expectedStatus: HttpStatusCode.NOT_FOUND_404 })
+    }
+  })
+
+  it('Should regenerate remote thumbnails', async function () {
+    await servers[1].cli.execWithEnv(`npm run regenerate-thumbnails`)
+
+    await waitJobs(servers)
+
+    for (const server of servers) {
+      const video = await server.videos.get({ id: remoteVideo.uuid })
+
+      for (const thumbnail of video.thumbnails) {
+        const { body } = await makeRawRequest({ url: thumbnail.fileUrl, expectedStatus: HttpStatusCode.OK_200 })
+
+        expect(body).to.not.have.lengthOf(0)
+      }
+    }
+  })
+
+  it('Should not have cached previous remote thumbnails on server 1', async function () {
+    for (const thumbnail of remoteVideo.thumbnails) {
+      await makeRawRequest({ url: thumbnail.fileUrl, expectedStatus: HttpStatusCode.NOT_FOUND_404 })
+    }
+  })
+
+  it('Should have the appropriate thumbnails count', async function () {
+    expect(await servers[0].servers.countFiles('thumbnails')).to.equal(15)
+    expect(await servers[0].servers.countFiles('cache/thumbnails')).to.equal(5)
+  })
+
+  describe('On object storage', function () {
+    if (areMockObjectStorageTestsDisabled()) return
+
+    const objectStorage = new ObjectStorageCommand()
+
+    let videoOnObjectStorage: Video
+    let playlistOnObjectStorage: VideoPlaylist
+
+    function buildConfig () {
+      return objectStorage.getDefaultMockConfig()
+    }
+
+    async function getLocalThumbnails () {
+      return [
+        ...(await servers[0].videos.get({ id: video1.uuid })).thumbnails,
+        ...(await servers[0].videos.get({ id: video2.uuid })).thumbnails,
+        ...(await servers[0].videos.get({ id: videoOnObjectStorage.uuid })).thumbnails,
+        ...(await servers[0].playlists.get({ playlistId: playlist1.uuid })).thumbnails,
+        ...(await servers[0].playlists.get({ playlistId: playlistOnObjectStorage.uuid })).thumbnails
+      ]
+    }
+
+    async function checkThumbnailsOnObjectStorage (thumbnails: Thumbnail[]) {
+      for (const thumbnail of thumbnails) {
+        expectStartWith(thumbnail.fileUrl, objectStorage.getMockThumbnailsBaseUrl())
+
+        const { body } = await makeRawRequest({ url: thumbnail.fileUrl, expectedStatus: HttpStatusCode.OK_200 })
+        expect(body).to.not.have.lengthOf(0)
+      }
+    }
+
+    before(async function () {
+      this.timeout(120000)
+
+      await objectStorage.prepareDefaultMockBuckets()
+
+      await servers[0].kill()
+      await servers[0].run(buildConfig())
+
+      const { uuid } = await servers[0].videos.quickUpload({ name: 'video on object storage' })
+
+      const { uuid: playlistUUID } = await servers[0].playlists.quickCreate({ displayName: 'playlist on object storage' })
+      await servers[0].playlists.addElement({ playlistId: playlistUUID, attributes: { videoId: uuid } })
+
+      await waitJobs(servers)
+
+      videoOnObjectStorage = await servers[0].videos.get({ id: uuid })
+      playlistOnObjectStorage = await servers[0].playlists.get({ playlistId: playlistUUID })
+    })
+
+    it('Should have new thumbnails on object storage and previous ones on the file system', async function () {
+      await checkThumbnailsOnObjectStorage([ ...videoOnObjectStorage.thumbnails, ...playlistOnObjectStorage.thumbnails ])
+
+      const video = await servers[0].videos.get({ id: video1.uuid })
+      for (const thumbnail of video.thumbnails) {
+        expectStartWith(thumbnail.fileUrl, servers[0].url)
+      }
+    })
+
+    it('Should regenerate thumbnails in object storage', async function () {
+      this.timeout(120000)
+
+      const oldThumbnails = await getLocalThumbnails()
+
+      await servers[0].cli.execWithEnv(`npm run regenerate-thumbnails`, buildConfig())
+      await waitJobs(servers)
+
+      const thumbnails = await getLocalThumbnails()
+      expect(thumbnails).to.have.lengthOf(oldThumbnails.length)
+
+      // Thumbnails that were on the file system are moved to object storage too
+      await checkThumbnailsOnObjectStorage(thumbnails)
+
+      for (const thumbnail of oldThumbnails) {
+        expect(thumbnails.map(t => t.fileUrl)).to.not.include(thumbnail.fileUrl)
+
+        await makeRawRequest({ url: thumbnail.fileUrl, expectedStatus: HttpStatusCode.NOT_FOUND_404 })
+      }
+
+      await checkDirectoryIsEmpty(servers[0], 'thumbnails')
+    })
+
+    it('Should have federated the new thumbnails', async function () {
+      const video = await servers[1].videos.get({ id: video1.uuid })
+
+      for (const thumbnail of video.thumbnails) {
+        const { body } = await makeRawRequest({ url: thumbnail.fileUrl, expectedStatus: HttpStatusCode.OK_200 })
+        expect(body).to.not.have.lengthOf(0)
+      }
+    })
+
+    after(async function () {
+      await objectStorage.cleanupMock()
+    })
+  })
+
+  after(async function () {
+    await cleanupTests(servers)
+  })
+})

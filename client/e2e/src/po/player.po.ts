@@ -1,54 +1,107 @@
-import { browser, by, element } from 'protractor'
 import { browserSleep, isIOS, isMobileDevice, isSafari } from '../utils'
 
 export class PlayerPage {
+  getWatchVideoPlayerCurrentTime () {
+    const elem = $('video')
 
-  async getWatchVideoPlayerCurrentTime () {
-    const elem = element(by.css('video'))
+    const p = isIOS()
+      ? elem.getAttribute('currentTime')
+      : elem.getProperty('currentTime')
 
-    return elem.getAttribute('currentTime')
+    return p.then(t => parseInt(t + '', 10))
+      .then(t => Math.ceil(t))
   }
 
-  waitUntilPlaylistInfo (text: string) {
-    const elem = element(by.css('.video-js .vjs-playlist-info'))
+  waitUntilPlaylistInfo (text: string, maxTime: number) {
+    return browser.waitUntil(async () => {
+      // Without this we have issues on iphone
+      await $('.video-js').click()
 
-    return browser.wait(browser.ExpectedConditions.textToBePresentInElement(elem, text))
+      return (await $('.video-js .vjs-playlist-info').getText()).includes(text)
+    }, { timeout: maxTime })
   }
 
   waitUntilPlayerWrapper () {
-    const elem = element(by.css('#placeholder-preview'))
-
-    return browser.wait(browser.ExpectedConditions.presenceOf(elem))
+    return $('#video-wrapper').waitForExist()
   }
 
-  async playAndPauseVideo (isAutoplay: boolean) {
-    const videojsEl = element(by.css('div.video-js'))
-    await browser.wait(browser.ExpectedConditions.elementToBeClickable(videojsEl))
+  waitUntilPlaying () {
+    return $('.video-js.vjs-playing').waitForDisplayed()
+  }
 
-    // Autoplay is disabled on iOS and Safari
-    if (await isIOS() || await isSafari() || await isMobileDevice()) {
-      // We can't play the video using protractor if it is not muted
-      await browser.executeScript(`document.querySelector('video').muted = true`)
-      await this.clickOnPlayButton()
-    } else if (isAutoplay === false) {
-      await this.clickOnPlayButton()
+  async playAndPauseVideo (isAutoplay: boolean, waitUntilSec: number) {
+    // Autoplay is disabled on mobile and Safari
+    if (isIOS() || isSafari() || isMobileDevice() || isAutoplay === false) {
+      await this.playVideo()
     }
 
-    await browserSleep(2000)
-    await browser.wait(browser.ExpectedConditions.invisibilityOf(element(by.css('.vjs-loading-spinner'))))
+    await $('div.video-js.vjs-has-started').waitForExist()
 
     await browserSleep(2000)
 
-    await videojsEl.click()
+    await browser.waitUntil(async () => {
+      return (await this.getWatchVideoPlayerCurrentTime()) >= waitUntilSec
+    }, { timeout: Math.max(waitUntilSec * 2 * 1000, 30000) })
+
+    // Pause video
+    await $('div.video-js').click()
   }
 
   async playVideo () {
+    await $('div.video-js.vjs-paused, div.video-js.vjs-playing').waitForExist()
+
+    if (await $('div.video-js.vjs-playing').isExisting()) {
+      if (!isIOS()) return
+
+      // On iOS, the web browser may have aborted player autoplay, so check the video is still autoplayed
+      await browserSleep(5000)
+      if (await $('div.video-js.vjs-playing').isExisting()) return
+    }
+
+    // Autoplay is disabled on iOS and Safari
+    if (isIOS() || isSafari() || isMobileDevice()) {
+      // We can't play the video if it is not muted
+      await browser.execute(`document.querySelector('video').muted = true`)
+    }
+
     return this.clickOnPlayButton()
   }
 
+  getPlayButton () {
+    return $('.vjs-big-play-button')
+  }
+
+  getNSFWContentText () {
+    return $('.video-js .nsfw-info').getText()
+  }
+
+  getNSFWDetailsContent () {
+    return $('.video-js .nsfw-details-content')
+  }
+
+  getMoreNSFWInfoButton () {
+    return $('.video-js .nsfw-info button')
+  }
+
+  async hasPoster () {
+    const img = $('.video-js .vjs-poster img')
+
+    return await img.isDisplayed() && (await img.getAttribute('src')).startsWith('http')
+  }
+
   private async clickOnPlayButton () {
-    const playButton = element(by.css('.vjs-big-play-button'))
-    await browser.wait(browser.ExpectedConditions.elementToBeClickable(playButton))
-    await playButton.click()
+    await this.getPlayButton().waitForClickable()
+    await this.getPlayButton().click()
+  }
+
+  async fillEmbedVideoPassword (videoPassword: string) {
+    const videoPasswordInput = $('input#video-password-input')
+    const confirmButton = $('button#video-password-submit')
+
+    await videoPasswordInput.clearValue()
+    await videoPasswordInput.setValue(videoPassword)
+    await confirmButton.waitForClickable()
+
+    return confirmButton.click()
   }
 }

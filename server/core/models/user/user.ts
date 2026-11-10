@@ -1,0 +1,1257 @@
+import { forceNumber, hasUserRight, sortBy, USER_ROLE_LABELS } from '@peertube/peertube-core-utils'
+import {
+  AbuseState,
+  MyUser,
+  NSFWFlag,
+  User,
+  UserAdminFlag,
+  UserRightType,
+  UserRole,
+  VideoChannelCollaboratorState,
+  VideoPlaylistType,
+  type BooleanBothQuery,
+  type NSFWPolicyType,
+  type UserAdminFlagType,
+  type UserNewFeatureInfoType,
+  type UserRoleType,
+  type VideoAIUsageType
+} from '@peertube/peertube-models'
+import { isNSFWFlagsValid, isVideoAIUsageArrayValid } from '@server/helpers/custom-validators/videos.js'
+import { englishLanguage } from '@server/helpers/i18n.js'
+import { CONFIG } from '@server/initializers/config.js'
+import { TokensCache } from '@server/lib/auth/tokens-cache.js'
+import { LiveQuotaStore } from '@server/lib/live/index.js'
+import {
+  MChannelFormattable,
+  MMyUserFormattable,
+  MUser,
+  MUserAccountUrl,
+  MUserDefault,
+  MUserFormattable,
+  MUserNotifSettingChannelDefault,
+  MUserWithNotificationSetting
+} from '@server/types/models/index.js'
+import { col, FindOptions, fn, literal, Op, QueryTypes, ScopeOptions, Transaction, where, WhereOptions } from 'sequelize'
+import {
+  AfterDestroy,
+  AfterUpdate,
+  AllowNull,
+  BeforeCreate,
+  BeforeUpdate,
+  Column,
+  CreatedAt,
+  DataType,
+  Default,
+  DefaultScope,
+  HasMany,
+  HasOne,
+  Is,
+  IsEmail,
+  IsUUID,
+  Scopes,
+  Table,
+  UpdatedAt
+} from 'sequelize-typescript'
+import { isThemeNameValid } from '../../helpers/custom-validators/plugins.js'
+import {
+  isUserAdminFlagsValid,
+  isUserAutoPlayNextVideoPlaylistValid,
+  isUserAutoPlayNextVideoValid,
+  isUserAutoPlayVideoValid,
+  isUserBlockedReasonValid,
+  isUserBlockedValid,
+  isUserEmailVerifiedValid,
+  isUserNoModal,
+  isUserNSFWPolicyValid,
+  isUserP2PEnabledValid,
+  isUserRoleValid,
+  isUserVideoCategories,
+  isUserVideoLanguages,
+  isUserVideoLive,
+  isUserVideoQuotaDailyValid,
+  isUserVideoQuotaValid,
+  isUserVideosHistoryEnabledValid
+} from '../../helpers/custom-validators/users.js'
+import { comparePassword, cryptPassword } from '../../helpers/peertube-crypto.js'
+import { DEFAULT_INSTANCE_THEME_NAME, NSFW_POLICY_TYPES } from '../../initializers/constants.js'
+import { getThemeOrDefault } from '../../lib/plugins/theme-utils.js'
+import { AccountModel } from '../account/account.js'
+import { ActorFollowModel } from '../actor/actor-follow.js'
+import { ActorModel } from '../actor/actor.js'
+import { OAuthTokenModel } from '../oauth/oauth-token.js'
+import { buildSQLAttributes, getAdminUsersSort, parseAggregateResult, SequelizeModel, throwIfNotValid } from '../shared/index.js'
+import { VideoChannelCollaboratorModel } from '../video/video-channel-collaborator.js'
+import { VideoChannelModel } from '../video/video-channel.js'
+import { VideoImportModel } from '../video/video-import.js'
+import { VideoLiveModel } from '../video/video-live.js'
+import { VideoPlaylistModel } from '../video/video-playlist.js'
+import { VideoModel } from '../video/video.js'
+import { ListUserOptions, UserListQueryBuilder } from './sql/user/user-list-query-builder.js'
+import { UserExportModel } from './user-export.js'
+import { UserNotificationSettingModel } from './user-notification-setting.js'
+
+enum ScopeNames {
+  WITH_VIDEO_CHANNELS = 'WITH_VIDEO_CHANNELS',
+  WITH_QUOTA = 'WITH_QUOTA',
+  WITH_TOTAL_FILE_SIZES = 'WITH_TOTAL_FILE_SIZES',
+  WITH_STATS = 'WITH_STATS'
+}
+
+type WhereUserIdScopeOptions = { whereUserId?: '$userId' | '"UserModel"."id"' }
+
+@DefaultScope(() => ({
+  include: [
+    {
+      model: AccountModel,
+      required: true
+    },
+    {
+      model: UserNotificationSettingModel,
+      required: true
+    }
+  ]
+}))
+@Scopes(() => ({
+  [ScopeNames.WITH_VIDEO_CHANNELS]: {
+    include: [
+      {
+        model: AccountModel,
+        include: [
+          {
+            model: VideoChannelModel
+          },
+          {
+            attributes: [ 'id', 'name', 'type' ],
+            model: VideoPlaylistModel.unscoped(),
+            required: true,
+            where: {
+              type: {
+                [Op.ne]: VideoPlaylistType.REGULAR
+              }
+            }
+          }
+        ]
+      }
+    ]
+  },
+  [ScopeNames.WITH_QUOTA]: (options: WhereUserIdScopeOptions = {}) => {
+    return {
+      attributes: {
+        include: [
+          [
+            literal(
+              '(' +
+                UserModel.generateUserQuotaBaseSQL({
+                  whereUserId: options.whereUserId ?? '"UserModel"."id"',
+                  daily: false,
+                  onlyMaxResolution: true
+                }) +
+                ')'
+            ),
+            'videoQuotaUsed'
+          ],
+          [
+            literal(
+              '(' +
+                UserModel.generateUserQuotaBaseSQL({
+                  whereUserId: options.whereUserId ?? '"UserModel"."id"',
+                  daily: true,
+                  onlyMaxResolution: true
+                }) +
+                ')'
+            ),
+            'videoQuotaUsedDaily'
+          ]
+        ]
+      }
+    }
+  },
+  [ScopeNames.WITH_TOTAL_FILE_SIZES]: (options: WhereUserIdScopeOptions = {}) => {
+    return {
+      attributes: {
+        include: [
+          [
+            literal(
+              '(' +
+                UserModel.generateUserQuotaBaseSQL({
+                  whereUserId: options.whereUserId ?? '"UserModel"."id"',
+                  daily: false,
+                  onlyMaxResolution: false
+                }) +
+                ')'
+            ),
+            'totalVideoFileSize'
+          ]
+        ]
+      }
+    }
+  },
+  [ScopeNames.WITH_STATS]: (options: WhereUserIdScopeOptions = {}) => {
+    return {
+      attributes: {
+        include: [
+          [
+            literal(
+              '(' +
+                'SELECT COUNT("video"."id") ' +
+                'FROM "video" ' +
+                'INNER JOIN "videoChannel" ON "videoChannel"."id" = "video"."channelId" ' +
+                'INNER JOIN "account" ON "account"."id" = "videoChannel"."accountId" ' +
+                `WHERE "account"."userId" = ${options.whereUserId}` +
+                ')'
+            ),
+            'videosCount'
+          ],
+          [
+            literal(
+              '(' +
+                `SELECT concat_ws(':', "abuses", "acceptedAbuses") ` +
+                'FROM (' +
+                'SELECT COUNT("abuse"."id") AS "abuses", ' +
+                `COUNT("abuse"."id") FILTER (WHERE "abuse"."state" = ${AbuseState.ACCEPTED}) AS "acceptedAbuses" ` +
+                'FROM "abuse" ' +
+                'INNER JOIN "account" ON "account"."id" = "abuse"."flaggedAccountId" ' +
+                `WHERE "account"."userId" = ${options.whereUserId}` +
+                ') t' +
+                ')'
+            ),
+            'abusesCount'
+          ],
+          [
+            literal(
+              '(' +
+                'SELECT COUNT("abuse"."id") ' +
+                'FROM "abuse" ' +
+                'INNER JOIN "account" ON "account"."id" = "abuse"."reporterAccountId" ' +
+                `WHERE "account"."userId" = ${options.whereUserId}` +
+                ')'
+            ),
+            'abusesCreatedCount'
+          ],
+          [
+            literal(
+              '(' +
+                'SELECT COUNT("videoComment"."id") ' +
+                'FROM "videoComment" ' +
+                'INNER JOIN "account" ON "account"."id" = "videoComment"."accountId" ' +
+                `WHERE "account"."userId" = ${options.whereUserId}` +
+                ')'
+            ),
+            'videoCommentsCount'
+          ]
+        ]
+      }
+    }
+  }
+}))
+@Table({
+  tableName: 'user',
+  indexes: [
+    {
+      name: 'user_lower_username',
+      fields: [ fn('lower', col('username')) ]
+    },
+    {
+      name: 'user_lower_email',
+      fields: [ fn('lower', col('email')) ]
+    },
+    {
+      fields: [ 'username' ],
+      unique: true
+    },
+    {
+      fields: [ 'email' ],
+      unique: true
+    },
+    {
+      fields: [ 'pluginAuth', 'pluginAuthExternalId' ],
+      unique: true,
+      where: {
+        pluginAuthExternalId: {
+          [Op.ne]: null
+        }
+      }
+    }
+  ]
+})
+export class UserModel extends SequelizeModel<UserModel> {
+  @AllowNull(true)
+  @Column
+  declare password: string
+
+  @AllowNull(false)
+  @Column
+  declare username: string
+
+  @AllowNull(false)
+  @IsEmail
+  @Column(DataType.STRING(400))
+  declare email: string
+
+  @AllowNull(true)
+  @IsEmail
+  @Column(DataType.STRING(400))
+  declare pendingEmail: string
+
+  @AllowNull(true)
+  @Default(null)
+  @Is('UserEmailVerified', value => throwIfNotValid(value, isUserEmailVerifiedValid, 'email verified boolean', true))
+  @Column
+  declare emailVerified: boolean
+
+  @AllowNull(false)
+  @Is('UserNSFWPolicy', value => throwIfNotValid(value, isUserNSFWPolicyValid, 'NSFW policy'))
+  @Column(DataType.ENUM(...Object.values(NSFW_POLICY_TYPES)))
+  declare nsfwPolicy: NSFWPolicyType
+
+  @AllowNull(false)
+  @Default(0)
+  @Is('UserNSFWFlagsDisplayed', value => throwIfNotValid(value, isNSFWFlagsValid, 'NSFW flags'))
+  @Column
+  declare nsfwFlagsDisplayed: number
+
+  @AllowNull(false)
+  @Default(0)
+  @Is('UserNSFWFlagsHidden', value => throwIfNotValid(value, isNSFWFlagsValid, 'NSFW flags'))
+  @Column
+  declare nsfwFlagsHidden: number
+
+  @AllowNull(false)
+  @Default(0)
+  @Is('nsfwFlagsBlurred', value => throwIfNotValid(value, isNSFWFlagsValid, 'NSFW flags'))
+  @Column
+  declare nsfwFlagsBlurred: number
+
+  @AllowNull(false)
+  @Default(0)
+  @Is('UserNSFWFlagsWarned', value => throwIfNotValid(value, isNSFWFlagsValid, 'NSFW flags'))
+  @Column
+  declare nsfwFlagsWarned: number
+
+  @AllowNull(false)
+  @Default([])
+  @Is('UserAIUsagesHidden', value => throwIfNotValid(value, isVideoAIUsageArrayValid, 'AI usages hidden'))
+  @Column(DataType.ARRAY(DataType.INTEGER))
+  declare aiUsagesHidden: VideoAIUsageType[]
+
+  @AllowNull(false)
+  @Is('p2pEnabled', value => throwIfNotValid(value, isUserP2PEnabledValid, 'P2P enabled'))
+  @Column
+  declare p2pEnabled: boolean
+
+  @AllowNull(false)
+  @Default(true)
+  @Is('UserVideosHistoryEnabled', value => throwIfNotValid(value, isUserVideosHistoryEnabledValid, 'Videos history enabled'))
+  @Column
+  declare videosHistoryEnabled: boolean
+
+  @AllowNull(false)
+  @Default(true)
+  @Is('UserAutoPlayVideo', value => throwIfNotValid(value, isUserAutoPlayVideoValid, 'auto play video boolean'))
+  @Column
+  declare autoPlayVideo: boolean
+
+  @AllowNull(false)
+  @Default(false)
+  @Is('UserAutoPlayNextVideo', value => throwIfNotValid(value, isUserAutoPlayNextVideoValid, 'auto play next video boolean'))
+  @Column
+  declare autoPlayNextVideo: boolean
+
+  @AllowNull(false)
+  @Default(true)
+  @Is(
+    'UserAutoPlayNextVideoPlaylist',
+    value => throwIfNotValid(value, isUserAutoPlayNextVideoPlaylistValid, 'auto play next video for playlists boolean')
+  )
+  @Column
+  declare autoPlayNextVideoPlaylist: boolean
+
+  @AllowNull(true)
+  @Column(DataType.STRING)
+  declare language: string
+
+  @AllowNull(true)
+  @Default(null)
+  @Is('UserVideoLanguages', value => throwIfNotValid(value, isUserVideoLanguages, 'video languages'))
+  @Column(DataType.ARRAY(DataType.STRING))
+  declare videoLanguages: string[]
+
+  @AllowNull(true)
+  @Default(null)
+  @Is('UserVideoCategories', value => throwIfNotValid(value, isUserVideoCategories, 'video categories'))
+  @Column(DataType.ARRAY(DataType.INTEGER))
+  declare videoCategories: number[]
+
+  @AllowNull(false)
+  @Default('both')
+  @Is('UserVideoLive', value => throwIfNotValid(value, isUserVideoLive, 'video live'))
+  @Column(DataType.STRING)
+  declare videoLive: BooleanBothQuery
+
+  @AllowNull(false)
+  @Default(UserAdminFlag.NONE)
+  @Is('UserAdminFlags', value => throwIfNotValid(value, isUserAdminFlagsValid, 'user admin flags'))
+  @Column
+  declare adminFlags: UserAdminFlagType
+
+  @AllowNull(false)
+  @Default(false)
+  @Is('UserBlocked', value => throwIfNotValid(value, isUserBlockedValid, 'blocked boolean'))
+  @Column
+  declare blocked: boolean
+
+  @AllowNull(true)
+  @Default(null)
+  @Is('UserBlockedReason', value => throwIfNotValid(value, isUserBlockedReasonValid, 'blocked reason', true))
+  @Column
+  declare blockedReason: string
+
+  @AllowNull(false)
+  @Is('UserRole', value => throwIfNotValid(value, isUserRoleValid, 'role'))
+  @Column
+  declare role: UserRoleType
+
+  @AllowNull(false)
+  @Is('UserVideoQuota', value => throwIfNotValid(value, isUserVideoQuotaValid, 'video quota'))
+  @Column(DataType.BIGINT)
+  declare videoQuota: number
+
+  @AllowNull(false)
+  @Is('UserVideoQuotaDaily', value => throwIfNotValid(value, isUserVideoQuotaDailyValid, 'video quota daily'))
+  @Column(DataType.BIGINT)
+  declare videoQuotaDaily: number
+
+  @AllowNull(false)
+  @Default(DEFAULT_INSTANCE_THEME_NAME)
+  @Is('UserTheme', value => throwIfNotValid(value, isThemeNameValid, 'theme'))
+  @Column
+  declare theme: string
+
+  @AllowNull(false)
+  @Default(false)
+  @Is(
+    'UserNoInstanceConfigWarningModal',
+    value => throwIfNotValid(value, isUserNoModal, 'no instance config warning modal')
+  )
+  @Column
+  declare noInstanceConfigWarningModal: boolean
+
+  @AllowNull(false)
+  @Default(false)
+  @Is(
+    'UserNoWelcomeModal',
+    value => throwIfNotValid(value, isUserNoModal, 'no welcome modal')
+  )
+  @Column
+  declare noWelcomeModal: boolean
+
+  @AllowNull(false)
+  @Default(false)
+  @Is(
+    'UserNoAccountSetupWarningModal',
+    value => throwIfNotValid(value, isUserNoModal, 'no account setup warning modal')
+  )
+  @Column
+  declare noAccountSetupWarningModal: boolean
+
+  @AllowNull(false)
+  @Column
+  declare newFeaturesInfoRead: UserNewFeatureInfoType
+
+  @AllowNull(true)
+  @Default(null)
+  @Column
+  declare pluginAuth: string
+
+  // Stable identifier of this user at the plugin's identity provider (OIDC `sub` claim, SAML `NameID`...)
+  // Scoped by `pluginAuth`. Nullable so it can stay unset for local accounts and for plugins that don't send it
+  @AllowNull(true)
+  @Default(null)
+  @Column(DataType.STRING(255))
+  declare pluginAuthExternalId: string
+
+  @AllowNull(false)
+  @Default(DataType.UUIDV4)
+  @IsUUID(4)
+  @Column(DataType.UUID)
+  declare feedToken: string
+
+  @AllowNull(true)
+  @Default(null)
+  @Column
+  declare lastLoginDate: Date
+
+  @AllowNull(true)
+  @Default(null)
+  @Column
+  declare otpSecret: string
+
+  @CreatedAt
+  declare createdAt: Date
+
+  @UpdatedAt
+  declare updatedAt: Date
+
+  @HasOne(() => AccountModel, {
+    foreignKey: 'userId',
+    onDelete: 'cascade',
+    hooks: true
+  })
+  declare Account: Awaited<AccountModel>
+
+  @HasOne(() => UserNotificationSettingModel, {
+    foreignKey: 'userId',
+    onDelete: 'cascade',
+    hooks: true
+  })
+  declare NotificationSetting: Awaited<UserNotificationSettingModel>
+
+  @HasMany(() => VideoImportModel, {
+    foreignKey: 'userId',
+    onDelete: 'cascade'
+  })
+  declare VideoImports: Awaited<VideoImportModel>[]
+
+  @HasMany(() => OAuthTokenModel, {
+    foreignKey: 'userId',
+    onDelete: 'cascade'
+  })
+  declare OAuthTokens: Awaited<OAuthTokenModel>[]
+
+  @HasMany(() => UserExportModel, {
+    foreignKey: 'userId',
+    onDelete: 'cascade',
+    hooks: true
+  })
+  declare UserExports: Awaited<UserExportModel>[]
+
+  // Used if we already set an encrypted password in user model
+  skipPasswordEncryption = false
+
+  @BeforeCreate
+  @BeforeUpdate
+  static async cryptPasswordIfNeeded (instance: UserModel) {
+    if (instance.skipPasswordEncryption) return
+    if (!instance.changed('password')) return
+    if (!instance.password) return
+
+    instance.password = await cryptPassword(instance.password)
+  }
+
+  @AfterUpdate
+  @AfterDestroy
+  static removeTokenCache (instance: UserModel) {
+    return TokensCache.Instance.deleteUserTokens(instance.id)
+  }
+
+  // ---------------------------------------------------------------------------
+
+  static getSQLAttributes (tableName: string, aliasPrefix = '') {
+    return buildSQLAttributes({
+      model: this,
+      tableName,
+      aliasPrefix
+    })
+  }
+
+  // ---------------------------------------------------------------------------
+
+  static countTotal () {
+    return UserModel.unscoped().count()
+  }
+
+  static listForAdminApi (parameters: {
+    start: number
+    count: number
+    sort: string
+    search?: string
+    blocked?: boolean
+    role?: UserRoleType
+  }) {
+    const { start, count, sort, search, blocked, role } = parameters
+    const where: WhereOptions = {}
+
+    if (search) {
+      Object.assign(where, {
+        [Op.or]: [
+          {
+            email: {
+              [Op.iLike]: '%' + search + '%'
+            }
+          },
+          {
+            username: {
+              [Op.iLike]: '%' + search + '%'
+            }
+          }
+        ]
+      })
+    }
+
+    if (blocked !== undefined) {
+      Object.assign(where, { blocked })
+    }
+
+    if (role !== undefined) {
+      Object.assign(where, { role })
+    }
+
+    const query: FindOptions = {
+      offset: start,
+      limit: count,
+      order: getAdminUsersSort(sort),
+      where
+    }
+
+    return Promise.all([
+      UserModel.unscoped().count(query),
+      UserModel.scope([ 'defaultScope', ScopeNames.WITH_QUOTA, ScopeNames.WITH_TOTAL_FILE_SIZES ]).findAll(query)
+    ]).then(([ total, data ]) => ({ total, data }))
+  }
+
+  static listWithRight (right: UserRightType): Promise<MUserDefault[]> {
+    const roles = Object.keys(USER_ROLE_LABELS)
+      .map(k => parseInt(k, 10) as UserRoleType)
+      .filter(role => hasUserRight(role, right))
+
+    const query = {
+      where: {
+        role: {
+          [Op.in]: roles
+        }
+      }
+    }
+
+    return UserModel.findAll(query)
+  }
+
+  static listUserSubscribersOf (actorId: number): Promise<MUserWithNotificationSetting[]> {
+    const query = {
+      include: [
+        {
+          model: UserNotificationSettingModel.unscoped(),
+          required: true
+        },
+        {
+          attributes: [ 'userId' ],
+          model: AccountModel.unscoped(),
+          required: true,
+          include: [
+            {
+              attributes: [],
+              model: ActorModel.unscoped(),
+              required: true,
+              where: {
+                serverId: null
+              },
+              include: [
+                {
+                  attributes: [],
+                  as: 'ActorFollowings',
+                  model: ActorFollowModel.unscoped(),
+                  required: true,
+                  where: {
+                    state: 'accepted',
+                    targetActorId: actorId
+                  }
+                }
+              ]
+            }
+          ]
+        }
+      ]
+    }
+
+    return UserModel.unscoped().findAll(query)
+  }
+
+  static listOwnerAndAcceptedCollaboratorsOfChannel (channelId: number): Promise<MUserWithNotificationSetting[]> {
+    const query = {
+      include: [
+        {
+          model: UserNotificationSettingModel.unscoped(),
+          required: true
+        },
+        {
+          model: AccountModel.unscoped(),
+          required: true,
+          include: [
+            {
+              model: VideoChannelModel.unscoped(),
+              required: false,
+              attributes: [ 'id' ],
+              where: {
+                id: channelId
+              }
+            },
+            {
+              model: VideoChannelCollaboratorModel.unscoped(),
+              required: false,
+              attributes: [ 'id' ],
+              where: {
+                channelId,
+                state: VideoChannelCollaboratorState.ACCEPTED
+              }
+            }
+          ]
+        }
+      ],
+      where: {
+        [Op.or]: [
+          { '$Account.VideoChannels.id$': { [Op.ne]: null } },
+          { '$Account.VideoChannelCollaborators.id$': { [Op.ne]: null } }
+        ]
+      }
+    }
+
+    return UserModel.unscoped().findAll(query)
+  }
+
+  static listByUsernames (usernames: string[]): Promise<MUserDefault[]> {
+    const query = {
+      where: {
+        username: usernames
+      }
+    }
+
+    return UserModel.findAll(query)
+  }
+
+  static loadById (id: number): Promise<MUser> {
+    return UserModel.unscoped().findByPk(id)
+  }
+
+  static loadByIdFull (id: number): Promise<MUserDefault> {
+    return UserModel.findByPk(id)
+  }
+
+  static loadByIdWithAccountUrl (id: number): Promise<MUserAccountUrl> {
+    return UserModel.unscoped().findByPk(id, {
+      include: [
+        {
+          attributes: [ 'id' ],
+          model: AccountModel.unscoped(),
+          required: true,
+          include: [
+            {
+              attributes: [ 'id', 'url' ],
+              model: ActorModel.unscoped(),
+              required: true
+            }
+          ]
+        }
+      ]
+    })
+  }
+
+  static loadByIdWithChannels (id: number, withStats = false): Promise<MUserDefault> {
+    const scopes: (string | ScopeOptions)[] = [ ScopeNames.WITH_VIDEO_CHANNELS ]
+
+    if (withStats) {
+      const scopeOptions: WhereUserIdScopeOptions = { whereUserId: '$userId' }
+
+      scopes.push({ method: [ ScopeNames.WITH_QUOTA, scopeOptions ] })
+      scopes.push({ method: [ ScopeNames.WITH_STATS, scopeOptions ] })
+      scopes.push({ method: [ ScopeNames.WITH_TOTAL_FILE_SIZES, scopeOptions ] })
+    }
+
+    return UserModel.scope(scopes).findOne({
+      where: { id },
+      bind: { userId: id }
+    })
+  }
+
+  static loadByUsername (username: string): Promise<MUserDefault> {
+    const query = {
+      where: {
+        username
+      }
+    }
+
+    return UserModel.findOne(query)
+  }
+
+  static async loadForMeAPI (id: number) {
+    const options: ListUserOptions = {
+      userId: forceNumber(id),
+      start: 0,
+      count: 1
+    }
+
+    return new UserListQueryBuilder(UserModel.sequelize, options).get<MUserNotifSettingChannelDefault>()
+  }
+
+  static loadByEmailCaseInsensitive (email: string): Promise<MUserDefault[]> {
+    const query = {
+      where: where(
+        fn('LOWER', col('email')),
+        '=',
+        email.toLowerCase()
+      )
+    }
+
+    return UserModel.findAll(query)
+  }
+
+  static loadByPluginAuthExternalId (pluginAuth: string, pluginAuthExternalId: string): Promise<MUserDefault> {
+    const query = {
+      where: {
+        pluginAuth,
+        pluginAuthExternalId
+      }
+    }
+
+    return UserModel.findOne(query)
+  }
+
+  static loadByPendingEmailCaseInsensitive (pendingEmail: string): Promise<MUserDefault[]> {
+    const query = {
+      where: where(
+        fn('LOWER', col('pendingEmail')),
+        '=',
+        pendingEmail.toLowerCase()
+      )
+    }
+
+    return UserModel.findAll(query)
+  }
+
+  static listByUsernameOrEmailCaseInsensitive (usernameOrEmail: string): Promise<MUserDefault[]> {
+    const query = {
+      where: {
+        [Op.or]: [
+          where(fn('lower', col('username')), fn('lower', usernameOrEmail) as any),
+
+          where(fn('lower', col('email')), fn('lower', usernameOrEmail) as any)
+        ]
+      }
+    }
+
+    return UserModel.findAll(query)
+  }
+
+  // ---------------------------------------------------------------------------
+
+  static loadByVideoId (videoId: number): Promise<MUserDefault> {
+    const query = {
+      include: [
+        {
+          required: true,
+          attributes: [ 'id' ],
+          model: AccountModel.unscoped(),
+          include: [
+            {
+              required: true,
+              attributes: [],
+              model: VideoChannelModel.unscoped(),
+              include: [
+                {
+                  required: true,
+                  attributes: [],
+                  model: VideoModel.unscoped(),
+                  where: {
+                    id: videoId
+                  }
+                }
+              ]
+            }
+          ]
+        }
+      ]
+    }
+
+    return UserModel.findOne(query)
+  }
+
+  static loadByVideoImportId (videoImportId: number): Promise<MUserDefault> {
+    const query = {
+      include: [
+        {
+          required: true,
+          attributes: [ 'id' ],
+          model: VideoImportModel.unscoped(),
+          where: {
+            id: videoImportId
+          }
+        }
+      ]
+    }
+
+    return UserModel.findOne(query)
+  }
+
+  static loadByChannelActorId (videoChannelActorId: number): Promise<MUserDefault> {
+    return UserModel.findOne({
+      include: [
+        {
+          required: true,
+          attributes: [ 'id' ],
+          model: AccountModel.unscoped(),
+          include: [
+            {
+              required: true,
+              attributes: [],
+              model: VideoChannelModel.unscoped(),
+              include: [
+                {
+                  model: ActorModel.unscoped(),
+                  required: true,
+                  attributes: [],
+                  where: {
+                    id: videoChannelActorId
+                  }
+                }
+              ]
+            }
+          ]
+        }
+      ]
+    })
+  }
+
+  static loadByAccountId (accountId: number, transaction?: Transaction): Promise<MUserDefault> {
+    const query = {
+      include: [
+        {
+          required: true,
+          model: AccountModel,
+          where: {
+            id: accountId
+          }
+        }
+      ],
+      transaction
+    }
+
+    return UserModel.findOne(query)
+  }
+
+  static loadByAccountActorId (accountActorId: number): Promise<MUserDefault> {
+    return UserModel.findOne({
+      include: [
+        {
+          required: true,
+          attributes: [ 'id' ],
+          model: AccountModel.unscoped(),
+          include: [
+            {
+              model: ActorModel.unscoped(),
+              required: true,
+              attributes: [ 'id' ],
+              where: {
+                id: accountActorId
+              }
+            }
+          ]
+        }
+      ]
+    })
+  }
+
+  static loadByLiveId (liveId: number): Promise<MUser> {
+    const query = {
+      include: [
+        {
+          attributes: [ 'id' ],
+          model: AccountModel.unscoped(),
+          required: true,
+          include: [
+            {
+              attributes: [],
+              model: VideoChannelModel.unscoped(),
+              required: true,
+              include: [
+                {
+                  attributes: [],
+                  model: VideoModel.unscoped(),
+                  required: true,
+                  include: [
+                    {
+                      attributes: [],
+                      model: VideoLiveModel.unscoped(),
+                      required: true,
+                      where: {
+                        id: liveId
+                      }
+                    }
+                  ]
+                }
+              ]
+            }
+          ]
+        }
+      ]
+    }
+
+    return UserModel.unscoped().findOne(query)
+  }
+
+  static async loadForEmail (id: number) {
+    const user = await UserModel.unscoped().findByPk(id)
+
+    if (!user) return undefined
+
+    return { email: user.email, language: user.getLanguage() }
+  }
+
+  // ---------------------------------------------------------------------------
+
+  static generateUserQuotaBaseSQL (options: {
+    daily: boolean
+    whereUserId: '$userId' | '"UserModel"."id"'
+    onlyMaxResolution: boolean
+  }) {
+    const { daily, whereUserId, onlyMaxResolution } = options
+
+    const andWhere = daily === true
+      ? 'AND "video"."createdAt" > now() - interval \'24 hours\''
+      : ''
+
+    const videoChannelJoin = 'INNER JOIN "videoChannel" ON "videoChannel"."id" = "video"."channelId" ' +
+      'INNER JOIN "account" ON "videoChannel"."accountId" = "account"."id" ' +
+      `WHERE "account"."userId" = ${whereUserId} ${andWhere}`
+
+    const webVideoFiles = 'SELECT "videoFile"."size" AS "size", "video"."id" AS "videoId" FROM "videoFile" ' +
+      'INNER JOIN "video" ON "videoFile"."videoId" = "video"."id" AND "video"."isLive" = false ' +
+      videoChannelJoin
+
+    const hlsFiles = 'SELECT "videoFile"."size" AS "size", "video"."id" AS "videoId" FROM "videoFile" ' +
+      'INNER JOIN "videoStreamingPlaylist" ON "videoFile"."videoStreamingPlaylistId" = "videoStreamingPlaylist".id ' +
+      'INNER JOIN "video" ON "videoStreamingPlaylist"."videoId" = "video"."id" AND "video"."isLive" = false ' +
+      videoChannelJoin
+
+    const sizeSelect = onlyMaxResolution
+      ? 'MAX("t1"."size")'
+      : 'SUM("t1"."size")'
+
+    return 'SELECT COALESCE(SUM("size"), 0) AS "total" ' +
+      'FROM (' +
+      `SELECT ${sizeSelect} AS "size" FROM (${webVideoFiles} UNION ${hlsFiles}) t1 ` +
+      'GROUP BY "t1"."videoId"' +
+      ') t2'
+  }
+
+  static async getUserQuota (options: {
+    userId: number
+    daily: boolean
+  }) {
+    const { daily, userId } = options
+
+    const sql = this.generateUserQuotaBaseSQL({ daily, whereUserId: '$userId', onlyMaxResolution: true })
+
+    const queryOptions = {
+      bind: { userId },
+      type: QueryTypes.SELECT as QueryTypes.SELECT
+    }
+
+    const [ { total } ] = await UserModel.sequelize.query<{ total: string }>(sql, queryOptions)
+    if (!total) return 0
+
+    return parseInt(total, 10)
+  }
+
+  static getStats () {
+    const query = `SELECT ` +
+      `COUNT(*) AS "totalUsers", ` +
+      `COUNT(*) FILTER (WHERE "lastLoginDate" > NOW() - INTERVAL '1d') AS "totalDailyActiveUsers", ` +
+      `COUNT(*) FILTER (WHERE "lastLoginDate" > NOW() - INTERVAL '7d') AS "totalWeeklyActiveUsers", ` +
+      `COUNT(*) FILTER (WHERE "lastLoginDate" > NOW() - INTERVAL '30d') AS "totalMonthlyActiveUsers", ` +
+      `COUNT(*) FILTER (WHERE "lastLoginDate" > NOW() - INTERVAL '180d') AS "totalHalfYearActiveUsers", ` +
+      `COUNT(*) FILTER (WHERE "role" = ${UserRole.MODERATOR}) AS "totalModerators", ` +
+      `COUNT(*) FILTER (WHERE "role" = ${UserRole.ADMINISTRATOR}) AS "totalAdmins" ` +
+      `FROM "user"`
+
+    return UserModel.sequelize.query<any>(query, {
+      type: QueryTypes.SELECT,
+      raw: true
+    }).then(([ row ]) => {
+      return {
+        totalUsers: parseAggregateResult(row.totalUsers),
+        totalDailyActiveUsers: parseAggregateResult(row.totalDailyActiveUsers),
+        totalWeeklyActiveUsers: parseAggregateResult(row.totalWeeklyActiveUsers),
+        totalMonthlyActiveUsers: parseAggregateResult(row.totalMonthlyActiveUsers),
+        totalHalfYearActiveUsers: parseAggregateResult(row.totalHalfYearActiveUsers),
+        totalModerators: parseAggregateResult(row.totalModerators),
+        totalAdmins: parseAggregateResult(row.totalAdmins)
+      }
+    })
+  }
+
+  static autoComplete (search: string) {
+    const query = {
+      where: {
+        username: {
+          [Op.like]: `%${search}%`
+        }
+      },
+      limit: 10
+    }
+
+    return UserModel.findAll(query)
+      .then(u => u.map(u => u.username))
+  }
+
+  hasRight (right: UserRightType) {
+    return hasUserRight(this.role, right)
+  }
+
+  hasAdminFlag (flag: UserAdminFlagType) {
+    return this.adminFlags & flag
+  }
+
+  isPasswordMatch (password: string) {
+    if (!password || !this.password) return false
+
+    return comparePassword(password, this.password)
+  }
+
+  getLanguage () {
+    return this.language || CONFIG.INSTANCE.DEFAULT_LANGUAGE || englishLanguage
+  }
+
+  toFormattedJSON (this: MUserFormattable, parameters: { withAdminFlags?: boolean } = {}): User {
+    const videoQuotaUsed = this.get('videoQuotaUsed')
+    const videoQuotaUsedDaily = this.get('videoQuotaUsedDaily')
+    const videosCount = this.get('videosCount')
+    const [ abusesCount, abusesAcceptedCount ] = (this.get('abusesCount') as string || ':').split(':')
+    const abusesCreatedCount = this.get('abusesCreatedCount')
+    const videoCommentsCount = this.get('videoCommentsCount')
+    const totalVideoFileSize = this.get('totalVideoFileSize')
+
+    const json: User = {
+      id: this.id,
+      username: this.username,
+      email: this.email,
+      theme: getThemeOrDefault(this.theme, DEFAULT_INSTANCE_THEME_NAME),
+
+      pendingEmail: this.pendingEmail,
+      emailVerified: this.emailVerified,
+
+      nsfwPolicy: this.nsfwPolicy,
+
+      nsfwFlagsDisplayed: CONFIG.NSFW_FLAGS_SETTINGS.ENABLED
+        ? this.nsfwFlagsDisplayed
+        : NSFWFlag.NONE,
+
+      nsfwFlagsHidden: CONFIG.NSFW_FLAGS_SETTINGS.ENABLED
+        ? this.nsfwFlagsHidden
+        : NSFWFlag.NONE,
+
+      nsfwFlagsWarned: CONFIG.NSFW_FLAGS_SETTINGS.ENABLED
+        ? this.nsfwFlagsWarned
+        : NSFWFlag.NONE,
+
+      nsfwFlagsBlurred: CONFIG.NSFW_FLAGS_SETTINGS.ENABLED
+        ? this.nsfwFlagsBlurred
+        : NSFWFlag.NONE,
+
+      aiUsagesHidden: this.aiUsagesHidden,
+
+      p2pEnabled: this.p2pEnabled,
+
+      videosHistoryEnabled: this.videosHistoryEnabled,
+      autoPlayVideo: this.autoPlayVideo,
+      autoPlayNextVideo: this.autoPlayNextVideo,
+      autoPlayNextVideoPlaylist: this.autoPlayNextVideoPlaylist,
+      videoLanguages: this.videoLanguages,
+      videoCategories: this.videoCategories,
+      videoLive: this.videoLive,
+
+      language: this.language,
+
+      role: {
+        id: this.role,
+        label: USER_ROLE_LABELS[this.role]
+      },
+
+      videoQuota: this.videoQuota,
+      videoQuotaDaily: this.videoQuotaDaily,
+
+      totalVideoFileSize: totalVideoFileSize !== undefined
+        ? forceNumber(totalVideoFileSize)
+        : undefined,
+
+      videoQuotaUsed: videoQuotaUsed !== undefined
+        ? forceNumber(videoQuotaUsed) + LiveQuotaStore.Instance.getLiveQuotaOfUser(this.id)
+        : undefined,
+
+      videoQuotaUsedDaily: videoQuotaUsedDaily !== undefined
+        ? forceNumber(videoQuotaUsedDaily) + LiveQuotaStore.Instance.getLiveQuotaOfUser(this.id)
+        : undefined,
+
+      videosCount: videosCount !== undefined
+        ? forceNumber(videosCount)
+        : undefined,
+      abusesCount: abusesCount
+        ? forceNumber(abusesCount)
+        : undefined,
+      abusesAcceptedCount: abusesAcceptedCount
+        ? forceNumber(abusesAcceptedCount)
+        : undefined,
+      abusesCreatedCount: abusesCreatedCount !== undefined
+        ? forceNumber(abusesCreatedCount)
+        : undefined,
+      videoCommentsCount: videoCommentsCount !== undefined
+        ? forceNumber(videoCommentsCount)
+        : undefined,
+
+      noInstanceConfigWarningModal: this.noInstanceConfigWarningModal,
+      noWelcomeModal: this.noWelcomeModal,
+      noAccountSetupWarningModal: this.noAccountSetupWarningModal,
+
+      blocked: this.blocked,
+      blockedReason: this.blockedReason,
+
+      account: this.Account.toFormattedJSON(),
+
+      notificationSettings: this.NotificationSetting
+        ? this.NotificationSetting.toFormattedJSON()
+        : undefined,
+
+      videoChannels: Array.isArray(this.Account.VideoChannels)
+        ? sortBy(this.Account.VideoChannels.map(c => this.formatChannel(c)), 'createdAt')
+        : [],
+
+      createdAt: this.createdAt,
+
+      pluginAuth: this.pluginAuth,
+
+      lastLoginDate: this.lastLoginDate,
+
+      twoFactorEnabled: !!this.otpSecret,
+
+      newFeaturesInfoRead: this.newFeaturesInfoRead
+    }
+
+    if (parameters.withAdminFlags) {
+      Object.assign(json, { adminFlags: this.adminFlags })
+    }
+
+    return json
+  }
+
+  toMeFormattedJSON (this: MMyUserFormattable): MyUser {
+    const formatted = this.toFormattedJSON({ withAdminFlags: true })
+
+    const specialPlaylists = this.Account.VideoPlaylists
+      .map(p => ({ id: p.id, name: p.name, type: p.type }))
+
+    const videoChannelCollaborations = Array.isArray(this.Account.VideoChannelCollaborators)
+      ? sortBy(
+        this.Account.VideoChannelCollaborators.map(c => this.formatChannel(c.Channel)),
+        'createdAt'
+      )
+      : []
+
+    return Object.assign(formatted, { videoChannelCollaborations, specialPlaylists })
+  }
+
+  formatChannel (channel: MChannelFormattable) {
+    return {
+      ...channel.toFormattedJSON(),
+
+      ownerAccountId: channel.Account?.id ?? null,
+      ownerAccountName: channel.Account?.Actor.preferredUsername ?? null
+    }
+  }
+}

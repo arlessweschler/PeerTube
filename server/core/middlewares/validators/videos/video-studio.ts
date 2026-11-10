@@ -1,0 +1,135 @@
+import express from 'express'
+import { body, param } from 'express-validator'
+import { isBooleanValid, isIdOrUUIDValid, toBooleanOrNull } from '@server/helpers/custom-validators/misc.js'
+import {
+  isStudioCutTaskValid,
+  isStudioTaskAddIntroOutroValid,
+  isStudioTaskAddWatermarkValid,
+  isStudioRemoveSegmentsTaskValid,
+  isValidStudioTasksArray
+} from '@server/helpers/custom-validators/video-studio.js'
+import { cleanUpReqFiles } from '@server/helpers/express-utils.js'
+import { CONFIG } from '@server/initializers/config.js'
+import { approximateIntroOutroAdditionalSize, getTaskFileFromReq } from '@server/lib/video-studio.js'
+import { isAudioFile } from '@peertube/peertube-ffmpeg'
+import { HttpStatusCode, UserRight, VideoStudioCreateEdition, VideoStudioTask } from '@peertube/peertube-models'
+import { areValidationErrors, checkCanManageVideo, checkUserQuota, doesVideoExist } from '../shared/index.js'
+import { checkVideoCanBeDuplicated, checkVideoFileCanBeEdited } from './shared/index.js'
+
+const videoStudioAddEditionValidator = [
+  param('videoId')
+    .custom(isIdOrUUIDValid).withMessage('Should have a valid video id/uuid/short uuid'),
+
+  body('tasks')
+    .custom(isValidStudioTasksArray).withMessage('Should have a valid array of tasks'),
+
+  body('saveAsNewVideo')
+    .optional()
+    // Validate before sanitizing: `toBoolean` turns any non empty string into `true`
+    .custom(isBooleanValid).withMessage('Should have a valid saveAsNewVideo boolean')
+    .customSanitizer(toBooleanOrNull),
+
+  async (req: express.Request, res: express.Response, next: express.NextFunction) => {
+    if (CONFIG.VIDEO_STUDIO.ENABLED !== true) {
+      res.fail({
+        status: HttpStatusCode.BAD_REQUEST_400,
+        message: req.t('Video studio is disabled on this instance')
+      })
+
+      return cleanUpReqFiles(req)
+    }
+
+    if (areValidationErrors(req, res)) return cleanUpReqFiles(req)
+    if (!await doesVideoExist(req.params.videoId, res)) return cleanUpReqFiles(req)
+
+    const body: VideoStudioCreateEdition = req.body
+    const files = req.files as Express.Multer.File[]
+
+    const video = res.locals.videoFull
+    const videoIsAudio = video.hasAudio() && !video.hasVideo()
+
+    for (let i = 0; i < body.tasks.length; i++) {
+      const task = body.tasks[i]
+
+      if (!checkTask(req, task, i)) {
+        res.fail({
+          status: HttpStatusCode.BAD_REQUEST_400,
+          message: req.t('Task {taskName} is invalid', { taskName: task.name })
+        })
+
+        return cleanUpReqFiles(req)
+      }
+
+      if (videoIsAudio) {
+        if (task.name === 'add-intro' || task.name === 'add-outro' || task.name === 'add-watermark') {
+          res.fail({
+            status: HttpStatusCode.BAD_REQUEST_400,
+            message: req.t('Task {taskName} is invalid: video does not contain a video stream', { taskName: task.name })
+          })
+
+          return cleanUpReqFiles(req)
+        }
+      }
+
+      if (task.name === 'add-intro' || task.name === 'add-outro') {
+        const filePath = getTaskFileFromReq(files, i).path
+
+        // Our concat filter needs a video stream
+        if (await isAudioFile(filePath)) {
+          res.fail({
+            status: HttpStatusCode.BAD_REQUEST_400,
+            message: req.t('Task {taskName} is invalid: input file does not contain a video stream', { taskName: task.name })
+          })
+
+          return cleanUpReqFiles(req)
+        }
+      }
+    }
+
+    if (!checkVideoFileCanBeEdited(video, req, res)) return cleanUpReqFiles(req)
+
+    const user = res.locals.oauth.token.User
+    if (!await checkCanManageVideo({ user, video, right: UserRight.UPDATE_ANY_VIDEO, req, res, checkIsLocal: true, checkIsOwner: false })) {
+      return cleanUpReqFiles(req)
+    }
+
+    if (body.saveAsNewVideo === true && !checkVideoCanBeDuplicated({ video, user, req, res })) return cleanUpReqFiles(req)
+
+    // Try to make an approximation of bytes added by the intro/outro
+    let additionalBytes = await approximateIntroOutroAdditionalSize(video, body.tasks, i => getTaskFileFromReq(files, i).path)
+
+    // The source files are kept, so the result is extra usage: use the source size as an upper bound (cuts make it smaller)
+    if (body.saveAsNewVideo === true) additionalBytes += video.getMaxQualityBytes()
+
+    const channelUser = { id: res.locals.videoFull.VideoChannel.Account.userId }
+    if (await checkUserQuota({ channelUser, uploadSize: additionalBytes, req, res }) === false) return cleanUpReqFiles(req)
+
+    return next()
+  }
+]
+
+// ---------------------------------------------------------------------------
+
+export {
+  videoStudioAddEditionValidator
+}
+
+// ---------------------------------------------------------------------------
+
+const taskCheckers: {
+  [id in VideoStudioTask['name']]: (options: { task: VideoStudioTask, indice?: number, files?: Express.Multer.File[] }) => boolean
+} = {
+  'cut': isStudioCutTaskValid,
+  'add-intro': isStudioTaskAddIntroOutroValid,
+  'add-outro': isStudioTaskAddIntroOutroValid,
+  'add-watermark': isStudioTaskAddWatermarkValid,
+  'remove-segments': isStudioRemoveSegmentsTaskValid
+}
+
+function checkTask (req: express.Request, task: VideoStudioTask, indice?: number) {
+  if (Object.hasOwn(taskCheckers, task.name) !== true) return false
+
+  const checker = taskCheckers[task.name]
+
+  return checker({ task, indice, files: req.files as Express.Multer.File[] })
+}

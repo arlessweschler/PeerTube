@@ -1,0 +1,415 @@
+import { MutexInterface } from 'async-mutex'
+import { FilterSpecification } from 'fluent-ffmpeg'
+import { FFmpegCommandWrapper, FFmpegCommandWrapperOptions } from './ffmpeg-command-wrapper.js'
+import { ffprobePromise, getVideoStreamDimensionsInfo, getVideoStreamDuration, getVideoStreamFPS, hasAudioStream } from './ffprobe.js'
+import { presetVOD } from './shared/presets.js'
+
+type BaseStudioOptions = {
+  videoInputPath: string
+  separatedAudioInputPath?: string
+
+  outputPath: string
+
+  // Will be released after the ffmpeg started
+  // To prevent a bug where the input file does not exist anymore when running ffmpeg
+  inputFileMutexReleaser?: MutexInterface.Releaser
+}
+
+export class FFmpegEdition {
+  private readonly commandWrapper: FFmpegCommandWrapper
+
+  constructor (options: FFmpegCommandWrapperOptions) {
+    this.commandWrapper = new FFmpegCommandWrapper(options)
+  }
+
+  async cutVideo (
+    options: BaseStudioOptions & {
+      start?: number
+      end?: number
+    }
+  ) {
+    const { videoInputPath, separatedAudioInputPath, outputPath, inputFileMutexReleaser } = options
+
+    const mainProbe = await ffprobePromise(videoInputPath)
+    const fps = await getVideoStreamFPS(videoInputPath, mainProbe)
+    const { resolution } = await getVideoStreamDimensionsInfo(videoInputPath, mainProbe)
+
+    const command = this.commandWrapper.buildCommand(this.buildInputs(options), inputFileMutexReleaser)
+      .output(outputPath)
+
+    await presetVOD({
+      commandWrapper: this.commandWrapper,
+
+      videoInputPath,
+      separatedAudioInputPath,
+
+      resolution,
+      videoStreamOnly: false,
+      fps,
+      canCopyAudio: false,
+      canCopyVideo: false,
+
+      chainComplexFilters: null
+    })
+
+    if (options.start) {
+      command.outputOption('-ss ' + options.start)
+    }
+
+    if (options.end) {
+      command.outputOption('-to ' + options.end)
+    }
+
+    await this.commandWrapper.runCommand()
+  }
+
+  async addWatermark (
+    options: BaseStudioOptions & {
+      watermarkPath: string
+
+      videoFilters: {
+        watermarkSizeRatio: number
+        horizontalMarginRatio: number
+        verticalMarginRatio: number
+      }
+    }
+  ) {
+    const { watermarkPath, videoInputPath, separatedAudioInputPath, outputPath, videoFilters, inputFileMutexReleaser } = options
+
+    const videoProbe = await ffprobePromise(videoInputPath)
+    const fps = await getVideoStreamFPS(videoInputPath, videoProbe)
+    const { resolution, height } = await getVideoStreamDimensionsInfo(videoInputPath, videoProbe)
+
+    this.commandWrapper.buildCommand([ ...this.buildInputs(options), watermarkPath ], inputFileMutexReleaser)
+      .output(outputPath)
+
+    const videoInput = 0
+    const imageInput = separatedAudioInputPath
+      ? 2
+      : 1
+
+    const complexFilters: FilterSpecification[] = [
+      // Scale watermark
+      {
+        inputs: [ `${imageInput}` ],
+        filter: 'scale',
+        options: {
+          w: '-1',
+          h: `${height * videoFilters.watermarkSizeRatio}`
+        },
+        outputs: [ 'v_watermark' ]
+      },
+
+      {
+        inputs: [ `${videoInput}`, 'v_watermark' ],
+        filter: 'overlay',
+        options: {
+          x: `main_w - overlay_w - (main_h * ${videoFilters.horizontalMarginRatio})`,
+          y: `main_h * ${videoFilters.verticalMarginRatio}`
+        },
+        outputs: [ 'v_overlay' ]
+      }
+    ]
+
+    await presetVOD({
+      commandWrapper: this.commandWrapper,
+
+      videoInputPath,
+      separatedAudioInputPath,
+
+      resolution,
+      videoStreamOnly: false,
+      fps,
+      canCopyAudio: true,
+      canCopyVideo: false,
+
+      chainComplexFilters: {
+        complexFilters,
+        lastVideoInput: 'v_overlay'
+      },
+
+      // The watermark is not 3D
+      ignoreInputStereo3D: true
+    })
+
+    await this.commandWrapper.runCommand()
+  }
+
+  async addIntroOutro (
+    options: BaseStudioOptions & {
+      introOutroPath: string
+
+      type: 'intro' | 'outro'
+    }
+  ) {
+    const { introOutroPath, videoInputPath, separatedAudioInputPath, outputPath, type, inputFileMutexReleaser } = options
+
+    const mainProbe = await ffprobePromise(videoInputPath)
+    const fps = await getVideoStreamFPS(videoInputPath, mainProbe)
+    const { resolution } = await getVideoStreamDimensionsInfo(videoInputPath, mainProbe)
+
+    const mainHasAudio = await hasAudioStream(separatedAudioInputPath || videoInputPath)
+
+    const introOutroProbe = await ffprobePromise(introOutroPath)
+    const introOutroHasAudio = await hasAudioStream(introOutroPath, introOutroProbe)
+
+    const command = this.commandWrapper.buildCommand([ ...this.buildInputs(options), introOutroPath ], inputFileMutexReleaser)
+      .output(outputPath)
+
+    const videoInput = 0
+
+    const audioInput = separatedAudioInputPath
+      ? videoInput + 1
+      : videoInput
+
+    const introInput = audioInput + 1
+    let introOutroAudio = `${introInput}:a`
+
+    // Add black background to correctly scale intro/outro with padding
+    const complexFilters: FilterSpecification[] = [
+      {
+        inputs: [ `${introInput}`, `${videoInput}` ],
+        filter: 'scale2ref',
+        options: {
+          w: 'iw',
+          h: `ih`
+        },
+        outputs: [ 'intro-outro', 'main' ]
+      },
+      {
+        inputs: [ 'intro-outro', 'main' ],
+        filter: 'scale2ref',
+        options: {
+          w: 'iw',
+          h: `ih`
+        },
+        outputs: [ 'to-scale', 'main' ]
+      },
+      {
+        inputs: 'to-scale',
+        filter: 'drawbox',
+        options: {
+          t: 'fill'
+        },
+        outputs: [ 'to-scale-bg' ]
+      },
+      {
+        inputs: [ `${introInput}`, 'to-scale-bg' ],
+        filter: 'scale2ref',
+        options: {
+          w: 'iw',
+          h: 'ih',
+          force_original_aspect_ratio: 'decrease',
+          flags: 'spline'
+        },
+        outputs: [ 'to-scale', 'to-scale-bg' ]
+      },
+      {
+        inputs: [ 'to-scale-bg', 'to-scale' ],
+        filter: 'overlay',
+        options: {
+          x: '(main_w - overlay_w)/2',
+          y: '(main_h - overlay_h)/2'
+        },
+        outputs: 'intro-outro-resized'
+      }
+    ]
+
+    if (!introOutroHasAudio && mainHasAudio) {
+      const duration = await getVideoStreamDuration(introOutroPath, introOutroProbe)
+
+      // Generate silence in the filter graph rather than using `withInputFormat` that causes issues with recent ffmpeg versions
+      complexFilters.push({
+        filter: 'anullsrc',
+        options: { d: duration },
+        outputs: 'intro-outro-silence'
+      })
+
+      introOutroAudio = 'intro-outro-silence'
+    }
+
+    const concatFilter = {
+      inputs: [], // Defined later as it depends on the presence of audio and the type (intro or outro)
+      filter: 'concat',
+      options: {
+        n: 2,
+        v: 1,
+        unsafe: 1
+      },
+      outputs: [ 'concat' ]
+    }
+
+    const introOutroFilterInputs = [ 'intro-outro-resized' ]
+    const mainFilterInputs = [ 'main' ]
+
+    if (mainHasAudio) {
+      mainFilterInputs.push(`${audioInput}:a`)
+
+      introOutroFilterInputs.push(introOutroAudio)
+    }
+
+    if (type === 'intro') {
+      concatFilter.inputs = [ ...introOutroFilterInputs, ...mainFilterInputs ]
+    } else {
+      concatFilter.inputs = [ ...mainFilterInputs, ...introOutroFilterInputs ]
+    }
+
+    if (mainHasAudio) {
+      concatFilter.options['a'] = 1
+      concatFilter.outputs.push('a_out')
+
+      command.outputOption('-map [a_out]')
+    }
+
+    command.outputOption('-map [v_out]')
+
+    complexFilters.push(concatFilter)
+
+    await presetVOD({
+      commandWrapper: this.commandWrapper,
+
+      videoInputPath,
+      separatedAudioInputPath,
+
+      resolution,
+      videoStreamOnly: false,
+      fps,
+      canCopyAudio: false,
+      canCopyVideo: false,
+
+      chainComplexFilters: {
+        complexFilters,
+        lastVideoInput: 'concat',
+        videoOutput: 'v_out'
+      },
+
+      // The intro/outro is not 3D
+      ignoreInputStereo3D: true
+    })
+
+    await this.commandWrapper.runCommand()
+  }
+
+  async removeSegments (
+    options: BaseStudioOptions & {
+      segments: { start: number, end: number }[]
+    }
+  ) {
+    const { videoInputPath, separatedAudioInputPath, outputPath, inputFileMutexReleaser, segments } = options
+
+    const mainProbe = await ffprobePromise(videoInputPath)
+    const fps = await getVideoStreamFPS(videoInputPath, mainProbe)
+    const { resolution } = await getVideoStreamDimensionsInfo(videoInputPath, mainProbe)
+    const duration = await getVideoStreamDuration(videoInputPath, mainProbe)
+
+    const mainHasAudio = await hasAudioStream(separatedAudioInputPath || videoInputPath)
+
+    const videoInput = 0
+    const audioInput = separatedAudioInputPath ? 1 : 0
+
+    // Compute keep intervals as the inverse of the delete segments
+    const sortedSegments = [ ...segments ].sort((a, b) => a.start - b.start)
+    const keepIntervals: { start: number, end: number }[] = []
+
+    let pos = 0
+    for (const seg of sortedSegments) {
+      if (seg.start > pos) keepIntervals.push({ start: pos, end: seg.start })
+      pos = seg.end
+    }
+    if (pos < duration) keepIntervals.push({ start: pos, end: duration })
+
+    if (keepIntervals.length === 0) throw new Error('No video content remains after applying remove segments')
+
+    const command = this.commandWrapper.buildCommand(this.buildInputs(options), inputFileMutexReleaser)
+      .output(outputPath)
+
+    const complexFilters: FilterSpecification[] = []
+
+    // Split input streams so each keep interval gets its own copy
+    complexFilters.push({
+      inputs: [ `${videoInput}:v` ],
+      filter: 'split',
+      options: keepIntervals.length,
+      outputs: keepIntervals.map((_, i) => `vsrc${i}`)
+    })
+
+    if (mainHasAudio) {
+      complexFilters.push({
+        inputs: [ `${audioInput}:a` ],
+        filter: 'asplit',
+        options: keepIntervals.length,
+        outputs: keepIntervals.map((_, i) => `asrc${i}`)
+      })
+    }
+
+    // Trim each keep interval and reset timestamps
+    for (let i = 0; i < keepIntervals.length; i++) {
+      const { start, end } = keepIntervals[i]
+
+      complexFilters.push(
+        { inputs: [ `vsrc${i}` ], filter: 'trim', options: { start, end }, outputs: [ `vtrimmed${i}` ] },
+        { inputs: [ `vtrimmed${i}` ], filter: 'setpts', options: 'PTS-STARTPTS', outputs: [ `v${i}` ] }
+      )
+
+      if (mainHasAudio) {
+        complexFilters.push(
+          { inputs: [ `asrc${i}` ], filter: 'atrim', options: { start, end }, outputs: [ `atrimmed${i}` ] },
+          { inputs: [ `atrimmed${i}` ], filter: 'asetpts', options: 'PTS-STARTPTS', outputs: [ `a${i}` ] }
+        )
+      }
+    }
+
+    // Concatenate all keep intervals
+    const concatInputs: string[] = []
+    for (let i = 0; i < keepIntervals.length; i++) {
+      concatInputs.push(`v${i}`)
+      if (mainHasAudio) concatInputs.push(`a${i}`)
+    }
+
+    const concatOptions: Record<string, number> = { n: keepIntervals.length, v: 1 }
+    const concatOutputs = [ 'v_concat' ]
+
+    if (mainHasAudio) {
+      concatOptions.a = 1
+      concatOutputs.push('a_out')
+    }
+
+    complexFilters.push({
+      inputs: concatInputs,
+      filter: 'concat',
+      options: concatOptions,
+      outputs: concatOutputs
+    })
+
+    await presetVOD({
+      commandWrapper: this.commandWrapper,
+
+      videoInputPath,
+      separatedAudioInputPath,
+
+      resolution,
+      videoStreamOnly: false,
+      fps,
+      canCopyAudio: false,
+      canCopyVideo: false,
+
+      chainComplexFilters: {
+        complexFilters,
+        lastVideoInput: 'v_concat',
+        videoOutput: 'v_out'
+      }
+    })
+
+    command.outputOption('-map [v_out]')
+    if (mainHasAudio) command.outputOption('-map [a_out]')
+
+    await this.commandWrapper.runCommand()
+  }
+
+  private buildInputs (options: {
+    videoInputPath: string
+    separatedAudioInputPath?: string
+  }) {
+    return [ options.videoInputPath, options.separatedAudioInputPath ].filter(i => !!i)
+  }
+}

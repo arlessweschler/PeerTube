@@ -1,58 +1,62 @@
-@import '_variables';
-@import '_mixins';
+@use "_variables" as *;
+@use "_mixins" as *;
+@use "_button-mixins" as *;
 
 .dropdown-divider:last-child {
   display: none;
 }
 
 .action-button {
-  @include peertube-button;
-
   display: inline-block;
-  padding: 0 10px;
 
-  &.button-styled {
+  &::after {
+    display: none;
+  }
 
-    &.grey {
-      @include grey-button;
-    }
+  &.icon-only {
+    @include button-with-icon(21px, 0, 0);
+  }
+}
 
-    &.orange {
-      @include orange-button;
-    }
+// So we can style the chevron color
+button {
+  color: inherit;
+}
+
+.chevron-down {
+  color: inherit;
+}
+
+.primary-button {
+  --co-fg: #{pvar(--on-primary-300)};
+  --co-active-fg: #{pvar(--on-primary)};
+}
+
+.secondary-button {
+  --co-fg: #{pvar(--fg-300)};
+  --co-active-fg: #{pvar(--fg)};
+}
+
+.dropdown-toggle {
+  .chevron-down {
+    color: var(--co-fg);
 
     &:hover,
     &:active,
-    &:focus {
-      background-color: $grey-background-color;
+    &:focus,
+    &:focus-visible {
+      color: var(--co-active-fg);
     }
   }
 
   &::after {
     display: none;
   }
-
-  .more-icon {
-    width: 21px;
-
-    ::ng-deep {
-      @include apply-svg-color(pvar(--actionButtonColor));
-    }
-  }
-
-  &.small {
-    font-size: 14px;
-    height: 20px;
-    line-height: 20px;
-  }
-}
-
-.dropdown-toggle::after {
-  position: relative;
-  top: 1px;
 }
 
 .dropdown-menu {
+  max-width: 75vw;
+
   .dropdown-header {
     padding: 0.2rem 1rem;
   }
@@ -60,10 +64,13 @@
   .dropdown-item {
     display: flex;
     cursor: pointer;
-    color: #000 !important;
 
     &.with-icon {
       @include dropdown-with-icon-item;
+
+      .icon-video-lang {
+        top: 0;
+      }
     }
 
     a,
@@ -72,4 +79,30 @@
       width: 100%;
     }
   }
+}
+
+.item-label {
+  display: flex;
+  flex-direction: column;
+  min-width: 1px;
+}
+
+.action-description {
+  max-width: 300px;
+  white-space: normal;
+}
+
+.owner-moderator-privilege {
+  margin: 0 !important;
+  width: 13px !important;
+  top: -1px !important;
+
+  @include margin-left(0.5rem !important);
+}
+
+.icon-placeholder {
+  min-width: 22px;
+  max-width: 22px;
+
+  @include margin-right(0.5rem);
 }

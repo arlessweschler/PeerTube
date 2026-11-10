@@ -1,18 +1,26 @@
-@import 'variables';
+@use "_variables" as *;
+@use "_mixins" as *;
+@use "_form-mixins" as *;
 
 p-inputmask {
+  &.with-border {
+    --input-border-color: #{pvar(--bg-secondary-500)};
+    --p-inputtext-hover-border-color: #{pvar(--bg-secondary-500)};
+  }
+
   ::ng-deep input {
-    width: 80px;
-    font-size: 15px;
-    border: 0;
+    width: 100%;
+    text-align: center;
+
+    @include peertube-input-text(100%);
 
     &:focus-within,
     &:focus {
-      box-shadow: #{$focus-box-shadow-form} pvar(--mainColorLightest);
+      box-shadow: $focus-box-shadow-form;
     }
 
     &:disabled {
-      background: pvar(--mainBackgroundColor);
+      background: pvar(--bg);
       opacity: 0.5;
     }
   }

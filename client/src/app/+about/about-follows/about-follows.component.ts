@@ -1,20 +1,43 @@
+import { DecimalPipe } from '@angular/common'
+import { Component, OnInit, inject, ChangeDetectionStrategy } from '@angular/core'
+import { RouterLink } from '@angular/router'
+import { ComponentPagination, hasMoreItems, Notifier, RestService, ServerService } from '@app/core'
+import { ActorAvatarComponent } from '@app/shared/shared-actor-image/actor-avatar.component'
+import { GlobalIconComponent } from '@app/shared/shared-icons/global-icon.component'
+import { InstanceFollowService } from '@app/shared/shared-instance/instance-follow.service'
+import { ButtonComponent } from '@app/shared/shared-main/buttons/button.component'
+import { PluginSelectorDirective } from '@app/shared/shared-main/plugins/plugin-selector.directive'
+import { Actor, ServerStats } from '@peertube/peertube-models'
 import { SortMeta } from 'primeng/api'
-import { Component, OnInit } from '@angular/core'
-import { ComponentPagination, hasMoreItems, Notifier, RestService } from '@app/core'
-import { InstanceFollowService } from '@app/shared/shared-instance'
+import { FollowerImageComponent } from './follower-image.component'
+import { SubscriptionImageComponent } from './subscription-image.component'
 
 @Component({
   selector: 'my-about-follows',
   templateUrl: './about-follows.component.html',
-  styleUrls: [ './about-follows.component.scss' ]
+  styleUrls: [ './about-follows.component.scss' ],
+  changeDetection: ChangeDetectionStrategy.Eager,
+  imports: [
+    ActorAvatarComponent,
+    ButtonComponent,
+    PluginSelectorDirective,
+    GlobalIconComponent,
+    DecimalPipe,
+    RouterLink,
+    SubscriptionImageComponent,
+    FollowerImageComponent
+  ]
 })
-
 export class AboutFollowsComponent implements OnInit {
-  followers: string[] = []
-  followings: string[] = []
+  private server = inject(ServerService)
+  private restService = inject(RestService)
+  private notifier = inject(Notifier)
+  private followService = inject(InstanceFollowService)
 
-  loadedAllFollowers = false
-  loadedAllFollowings = false
+  instanceName: string
+
+  followers: Actor[] = []
+  subscriptions: Actor[] = []
 
   followersPagination: ComponentPagination = {
     currentPage: 1,
@@ -22,57 +45,29 @@ export class AboutFollowsComponent implements OnInit {
     totalItems: 0
   }
 
-  followingsPagination: ComponentPagination = {
+  subscriptionsPagination: ComponentPagination = {
     currentPage: 1,
     itemsPerPage: 20,
     totalItems: 0
   }
 
-  sort: SortMeta = {
+  serverStats: ServerStats
+
+  private loadingFollowers = false
+  private loadingSubscriptions = false
+
+  private sort: SortMeta = {
     field: 'createdAt',
     order: -1
   }
 
-  constructor (
-    private restService: RestService,
-    private notifier: Notifier,
-    private followService: InstanceFollowService
-  ) { }
-
   ngOnInit () {
-    this.loadMoreFollowers()
-
-    this.loadMoreFollowings()
-  }
-
-  loadAllFollowings () {
-    if (this.loadedAllFollowings) return
-
-    this.loadedAllFollowings = true
-    this.followingsPagination.itemsPerPage = 100
-
-    this.loadMoreFollowings(true)
-
-    while (hasMoreItems(this.followingsPagination)) {
-      this.followingsPagination.currentPage += 1
-
-      this.loadMoreFollowings()
-    }
-  }
-
-  loadAllFollowers () {
-    if (this.loadedAllFollowers) return
-
-    this.loadedAllFollowers = true
-    this.followersPagination.itemsPerPage = 100
-
     this.loadMoreFollowers(true)
+    this.loadMoreSubscriptions(true)
 
-    while (hasMoreItems(this.followersPagination)) {
-      this.followersPagination.currentPage += 1
+    this.instanceName = this.server.getHTMLConfig().instance.name
 
-      this.loadMoreFollowers()
-    }
+    this.server.getServerStats().subscribe(stats => this.serverStats = stats)
   }
 
   buildLink (host: string) {
@@ -80,47 +75,73 @@ export class AboutFollowsComponent implements OnInit {
   }
 
   canLoadMoreFollowers () {
-    return this.loadedAllFollowers || this.followersPagination.totalItems > this.followersPagination.itemsPerPage
+    return hasMoreItems(this.followersPagination)
   }
 
-  canLoadMoreFollowings () {
-    return this.loadedAllFollowings || this.followingsPagination.totalItems > this.followingsPagination.itemsPerPage
+  canLoadMoreSubscriptions () {
+    return hasMoreItems(this.subscriptionsPagination)
   }
 
-  private loadMoreFollowers (reset = false) {
-    const pagination = this.restService.componentPaginationToRestPagination(this.followersPagination)
+  loadMoreFollowers (reset = false) {
+    if (this.loadingFollowers) return
+    this.loadingFollowers = true
 
-    this.followService.getFollowers({ pagination: pagination, sort: this.sort, state: 'accepted' })
-        .subscribe(
-          resultList => {
-            if (reset) this.followers = []
+    if (reset) this.followersPagination.currentPage = 1
+    else this.followersPagination.currentPage++
 
-            const newFollowers = resultList.data.map(r => r.follower.host)
-            this.followers = this.followers.concat(newFollowers)
+    const pagination = this.restService.componentToRestPagination(this.followersPagination)
 
-            this.followersPagination.totalItems = resultList.total
-          },
+    this.followService.listFollowers({ pagination, sort: this.sort, state: 'accepted' })
+      .subscribe({
+        next: resultList => {
+          if (reset) this.followers = []
 
-          err => this.notifier.error(err.message)
-        )
+          const newFollowers = resultList.data.map(r => this.formatFollow(r.follower))
+          this.followers = this.followers.concat(newFollowers)
+
+          this.followersPagination.totalItems = resultList.total
+        },
+
+        error: err => this.notifier.handleError(err),
+
+        complete: () => this.loadingFollowers = false
+      })
   }
 
-  private loadMoreFollowings (reset = false) {
-    const pagination = this.restService.componentPaginationToRestPagination(this.followingsPagination)
+  loadMoreSubscriptions (reset = false) {
+    if (this.loadingSubscriptions) return
+    this.loadingSubscriptions = true
 
-    this.followService.getFollowing({ pagination, sort: this.sort, state: 'accepted' })
-        .subscribe(
-          resultList => {
-            if (reset) this.followings = []
+    if (reset) this.subscriptionsPagination.currentPage = 1
+    else this.subscriptionsPagination.currentPage++
 
-            const newFollowings = resultList.data.map(r => r.following.host)
-            this.followings = this.followings.concat(newFollowings)
+    const pagination = this.restService.componentToRestPagination(this.subscriptionsPagination)
 
-            this.followingsPagination.totalItems = resultList.total
-          },
+    this.followService.listSubscriptions({ pagination, sort: this.sort, state: 'accepted' })
+      .subscribe({
+        next: resultList => {
+          if (reset) this.subscriptions = []
 
-          err => this.notifier.error(err.message)
-        )
+          const newFollowings = resultList.data.map(r => this.formatFollow(r.following))
+          this.subscriptions = this.subscriptions.concat(newFollowings)
+
+          this.subscriptionsPagination.totalItems = resultList.total
+        },
+
+        error: err => this.notifier.handleError(err),
+
+        complete: () => this.loadingSubscriptions = false
+      })
   }
 
+  private formatFollow (actor: Actor) {
+    return {
+      ...actor,
+
+      // Instance follow, only display host
+      name: actor.name === 'peertube'
+        ? actor.host
+        : actor.name + '@' + actor.host
+    }
+  }
 }

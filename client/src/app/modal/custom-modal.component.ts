@@ -1,35 +1,37 @@
-import { Component, ElementRef, ViewChild, Input } from '@angular/core'
+import { Component, ElementRef, inject, viewChild, ChangeDetectionStrategy } from '@angular/core'
 import { NgbModal, NgbModalRef } from '@ng-bootstrap/ng-bootstrap'
+import { logger } from '@root-helpers/logger'
+import { GlobalIconComponent } from '../shared/shared-icons/global-icon.component'
 
 @Component({
   selector: 'my-custom-modal',
   templateUrl: './custom-modal.component.html',
-  styleUrls: [ './custom-modal.component.scss' ]
+  styleUrls: [ './custom-modal.component.scss' ],
+  changeDetection: ChangeDetectionStrategy.Eager,
+  imports: [ GlobalIconComponent ]
 })
 export class CustomModalComponent {
-  @ViewChild('modal', { static: true }) modal: ElementRef
+  private modalService = inject(NgbModal)
 
-  @Input() title: string
-  @Input() content: string
-  @Input() close?: boolean
-  @Input() cancel?: { value: string, action?: () => void }
-  @Input() confirm?: { value: string, action?: () => void }
+  readonly modal = viewChild<ElementRef>('modal')
+
+  title: string
+  content: string
+  close: boolean
+  cancel: { value: string, action?: () => void }
+  confirm: { value: string, action?: () => void }
 
   private modalRef: NgbModalRef
 
-  constructor (
-    private modalService: NgbModal
-  ) { }
-
   show (input: {
-    title: string,
-    content: string,
-    close?: boolean,
-    cancel?: { value: string, action?: () => void },
+    title: string
+    content: string
+    close?: boolean
+    cancel?: { value: string, action?: () => void }
     confirm?: { value: string, action?: () => void }
   }) {
     if (this.modalRef instanceof NgbModalRef && this.modalService.hasOpenModals()) {
-      console.error('Cannot open another custom modal, one is already opened.')
+      logger.error('Cannot open another custom modal, one is already opened.')
       return
     }
 
@@ -41,7 +43,7 @@ export class CustomModalComponent {
     this.cancel = cancel
     this.confirm = confirm
 
-    this.modalRef = this.modalService.open(this.modal, {
+    this.modalRef = this.modalService.open(this.modal(), {
       centered: true,
       backdrop: 'static',
       keyboard: false,
@@ -52,8 +54,9 @@ export class CustomModalComponent {
   onCancelClick () {
     this.modalRef.close()
 
-    if (typeof this.cancel.action === 'function') {
-      this.cancel.action()
+    const cancel = this.cancel
+    if (typeof cancel.action === 'function') {
+      cancel.action()
     }
 
     this.destroy()
@@ -67,8 +70,9 @@ export class CustomModalComponent {
   onConfirmClick () {
     this.modalRef.close()
 
-    if (typeof this.confirm.action === 'function') {
-      this.confirm.action()
+    const confirm = this.confirm
+    if (typeof confirm.action === 'function') {
+      confirm.action()
     }
 
     this.destroy()

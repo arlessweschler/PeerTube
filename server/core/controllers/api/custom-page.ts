@@ -1,0 +1,60 @@
+import { HttpStatusCode, UserRight } from '@peertube/peertube-models'
+import { auditLog, buildInstanceHomepageAuditEntity, getAuditActorFromRes } from '@server/lib/audit-log/index.js'
+import { ServerConfigManager } from '@server/lib/server-config-manager.js'
+import { ActorCustomPageModel } from '@server/models/account/actor-custom-page.js'
+import express from 'express'
+import { apiRateLimiter, asyncMiddleware, authenticate, ensureUserHasRight } from '../../middlewares/index.js'
+
+const customPageRouter = express.Router()
+
+customPageRouter.use(apiRateLimiter)
+
+customPageRouter.get(
+  '/homepage/instance',
+  asyncMiddleware(getInstanceHomepage)
+)
+
+customPageRouter.put(
+  '/homepage/instance',
+  authenticate,
+  ensureUserHasRight(UserRight.MANAGE_INSTANCE_CUSTOM_PAGE),
+  asyncMiddleware(updateInstanceHomepage)
+)
+
+// ---------------------------------------------------------------------------
+
+export {
+  customPageRouter
+}
+
+// ---------------------------------------------------------------------------
+
+async function getInstanceHomepage (req: express.Request, res: express.Response) {
+  const page = await ActorCustomPageModel.loadInstanceHomepage()
+  if (!page) {
+    return res.fail({
+      status: HttpStatusCode.NOT_FOUND_404,
+      message: 'Instance homepage could not be found'
+    })
+  }
+
+  return res.json(page.toFormattedJSON())
+}
+
+async function updateInstanceHomepage (req: express.Request, res: express.Response) {
+  const content = req.body.content
+
+  const oldHomepageAuditEntity = await auditLog.snapshot(async () => {
+    const oldHomepage = await ActorCustomPageModel.loadInstanceHomepage()
+
+    return buildInstanceHomepageAuditEntity(oldHomepage?.content)
+  })
+
+  await ActorCustomPageModel.updateInstanceHomepage(content)
+
+  auditLog.update(getAuditActorFromRes(res), () => buildInstanceHomepageAuditEntity(content), oldHomepageAuditEntity)
+
+  ServerConfigManager.Instance.updateHomepageState(content)
+
+  return res.status(HttpStatusCode.NO_CONTENT_204).end()
+}

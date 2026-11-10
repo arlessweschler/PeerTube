@@ -1,0 +1,106 @@
+@use "sass:math";
+@use "_variables" as *;
+@use "_mixins" as *;
+@use "_icons" as *;
+@use "./_player-variables" as *;
+
+.video-js.vjs-peertube-skin {
+  --nsfw-font-size: 13px;
+
+  button:not(.vjs-disabled) {
+    cursor: pointer;
+  }
+
+  .nsfw-info,
+  .nsfw-details {
+    background-color: pvar(--pt-player-overlay-secondary-bg);
+    color: pvar(--pt-player-overlay-secondary-fg);
+    padding: 1rem;
+  }
+
+  // ---------------------------------------------------------------------------
+  // NSFW info
+  // ---------------------------------------------------------------------------
+
+  // Item of the top bar
+  .nsfw-info {
+    order: 2;
+    flex: 0 1 auto;
+    max-width: min(100%, 20rem);
+
+    font-size: var(--nsfw-font-size);
+    border-radius: 4px;
+    overflow: auto;
+
+    strong {
+      display: block;
+    }
+
+    button {
+      margin-top: 0.75rem;
+      padding: 0;
+      text-decoration: underline;
+
+      &:hover {
+        opacity: 0.8;
+      }
+
+      &::after {
+        @include chevron-down(8px, 2px);
+        @include margin-left(5px);
+      }
+    }
+  }
+
+  // ---------------------------------------------------------------------------
+  // NSFW details
+  // ---------------------------------------------------------------------------
+
+  .nsfw-details-container {
+    background-color: rgba(0, 0, 0, 0.6);
+    position: absolute;
+    top: 0;
+    right: 0;
+    z-index: 1000;
+    width: 100%;
+    height: 100%;
+  }
+
+  .nsfw-details {
+    width: fit-content;
+    max-width: 40%;
+    margin-left: auto;
+    height: 100%;
+
+    .nsfw-details-content {
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      text-align: center;
+      line-height: 1.5;
+      height: 100%;
+    }
+
+    .nsfw-details-flags + .nsfw-details-summary {
+      margin-top: 1rem;
+    }
+
+    .nsfw-details-close {
+      mask-image: url("../svg/x.svg");
+      -webkit-mask-image: url("../svg/x.svg");
+      mask-size: cover;
+      -webkit-mask-size: cover;
+      width: 20px;
+      height: 20px;
+      background-color: pvar(--pt-player-overlay-secondary-fg);
+      display: block;
+
+      @include margin-left(auto);
+
+      &:hover {
+        opacity: 0.8;
+      }
+    }
+  }
+}

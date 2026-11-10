@@ -1,0 +1,279 @@
+/* oxlint-disable @typescript-eslint/no-unused-expressions,@typescript-eslint/require-await */
+
+import { VideoPlaylistPrivacy } from '@peertube/peertube-models'
+import {
+  cleanupTests,
+  createMultipleServers,
+  doubleFollow,
+  PeerTubeServer,
+  setAccessTokensToServers,
+  setDefaultVideoChannel,
+  waitJobs
+} from '@peertube/peertube-server-commands'
+import { checkThumbnails } from '@tests/shared/videos.js'
+import { expect } from 'chai'
+
+describe('Playlist thumbnail', function () {
+  let servers: PeerTubeServer[] = []
+
+  let playlistWithoutThumbnailId: number
+  let playlistWithThumbnailId: number
+
+  let withThumbnailE1: number
+  let withThumbnailE2: number
+  let withoutThumbnailE1: number
+  let withoutThumbnailE2: number
+
+  let video1Server2: number
+  let video2Server2: number
+
+  async function getPlaylistWithoutThumbnail (server: PeerTubeServer) {
+    const body = await server.playlists.list({ start: 0, count: 10 })
+
+    return body.data.find(p => p.displayName === 'playlist without thumbnail')
+  }
+
+  async function getPlaylistWithThumbnail (server: PeerTubeServer) {
+    const body = await server.playlists.list({ start: 0, count: 10 })
+
+    return body.data.find(p => p.displayName === 'playlist with thumbnail')
+  }
+
+  before(async function () {
+    this.timeout(120000)
+
+    servers = await createMultipleServers(2)
+
+    // Get the access tokens
+    await setAccessTokensToServers(servers)
+    await setDefaultVideoChannel(servers)
+
+    for (const server of servers) {
+      await server.config.disableTranscoding()
+    }
+
+    // Server 1 and server 2 follow each other
+    await doubleFollow(servers[0], servers[1])
+
+    const { uuid: uuid1 } = await servers[0].videos.quickUpload({ name: 'video 1' })
+    const { uuid: uuid2 } = await servers[0].videos.quickUpload({ name: 'video 2' })
+
+    await waitJobs(servers)
+
+    video1Server2 = (await servers[1].videos.get({ id: uuid1 })).id
+    video2Server2 = (await servers[1].videos.get({ id: uuid2 })).id
+  })
+
+  it('Should automatically update the thumbnail when adding an element', async function () {
+    const created = await servers[1].playlists.create({
+      attributes: {
+        displayName: 'playlist without thumbnail',
+        privacy: VideoPlaylistPrivacy.PUBLIC,
+        videoChannelId: servers[1].store.channel.id
+      }
+    })
+    playlistWithoutThumbnailId = created.id
+
+    const added = await servers[1].playlists.addElement({
+      playlistId: playlistWithoutThumbnailId,
+      attributes: { videoId: video1Server2 }
+    })
+    withoutThumbnailE1 = added.id
+
+    await waitJobs(servers)
+
+    for (const server of servers) {
+      const p = await getPlaylistWithoutThumbnail(server)
+
+      await checkThumbnails({
+        server,
+        playlist: p,
+        thumbnails: [ 'thumbnail-playlist-280x157.jpg' ],
+        remotePlaylist: server !== servers[1]
+      })
+    }
+  })
+
+  it('Should not update the thumbnail if we explicitly uploaded a thumbnail', async function () {
+    this.timeout(30000)
+
+    const created = await servers[1].playlists.create({
+      attributes: {
+        displayName: 'playlist with thumbnail',
+        privacy: VideoPlaylistPrivacy.PUBLIC,
+        videoChannelId: servers[1].store.channel.id,
+        thumbnailfile: 'custom-thumbnail-input.jpg'
+      }
+    })
+    playlistWithThumbnailId = created.id
+
+    const added = await servers[1].playlists.addElement({
+      playlistId: playlistWithThumbnailId,
+      attributes: { videoId: video1Server2 }
+    })
+    withThumbnailE1 = added.id
+
+    await waitJobs(servers)
+
+    for (const server of servers) {
+      const p = await getPlaylistWithThumbnail(server)
+
+      await checkThumbnails({
+        server,
+        playlist: p,
+        thumbnails: [ 'custom-thumbnail-280x157.jpg' ],
+        remotePlaylist: server !== servers[1]
+      })
+    }
+  })
+
+  it('Should automatically update the thumbnail when moving the first element', async function () {
+    this.timeout(30000)
+
+    const added = await servers[1].playlists.addElement({
+      playlistId: playlistWithoutThumbnailId,
+      attributes: { videoId: video2Server2 }
+    })
+    withoutThumbnailE2 = added.id
+
+    await servers[1].playlists.reorderElements({
+      playlistId: playlistWithoutThumbnailId,
+      attributes: {
+        startPosition: 1,
+        insertAfterPosition: 2
+      }
+    })
+
+    await waitJobs(servers)
+
+    for (const server of servers) {
+      const p = await getPlaylistWithoutThumbnail(server)
+
+      await checkThumbnails({
+        server,
+        playlist: p,
+        thumbnails: [ 'thumbnail-playlist-280x157.jpg' ],
+        remotePlaylist: server !== servers[1]
+      })
+    }
+  })
+
+  it('Should not update the thumbnail when moving the first element if we explicitly uploaded a thumbnail', async function () {
+    this.timeout(30000)
+
+    const added = await servers[1].playlists.addElement({
+      playlistId: playlistWithThumbnailId,
+      attributes: { videoId: video2Server2 }
+    })
+    withThumbnailE2 = added.id
+
+    await servers[1].playlists.reorderElements({
+      playlistId: playlistWithThumbnailId,
+      attributes: {
+        startPosition: 1,
+        insertAfterPosition: 2
+      }
+    })
+
+    await waitJobs(servers)
+
+    for (const server of servers) {
+      const p = await getPlaylistWithThumbnail(server)
+
+      await checkThumbnails({
+        server,
+        playlist: p,
+        thumbnails: [ 'custom-thumbnail-280x157.jpg' ],
+        remotePlaylist: server !== servers[1]
+      })
+    }
+  })
+
+  it('Should automatically update the thumbnail when deleting the first element', async function () {
+    this.timeout(30000)
+
+    await servers[1].playlists.removeElement({
+      playlistId: playlistWithoutThumbnailId,
+      elementId: withoutThumbnailE1
+    })
+
+    await waitJobs(servers)
+
+    for (const server of servers) {
+      const p = await getPlaylistWithoutThumbnail(server)
+
+      await checkThumbnails({
+        server,
+        playlist: p,
+        thumbnails: [ 'thumbnail-playlist-280x157.jpg' ],
+        remotePlaylist: server !== servers[1]
+      })
+    }
+  })
+
+  it('Should not update the thumbnail when deleting the first element if we explicitly uploaded a thumbnail', async function () {
+    this.timeout(30000)
+
+    await servers[1].playlists.removeElement({
+      playlistId: playlistWithThumbnailId,
+      elementId: withThumbnailE1
+    })
+
+    await waitJobs(servers)
+
+    for (const server of servers) {
+      const p = await getPlaylistWithThumbnail(server)
+
+      await checkThumbnails({
+        server,
+        playlist: p,
+        thumbnails: [ 'custom-thumbnail-280x157.jpg' ],
+        remotePlaylist: server !== servers[1]
+      })
+    }
+  })
+
+  it('Should delete the thumbnail when we delete the last element', async function () {
+    this.timeout(30000)
+
+    await servers[1].playlists.removeElement({
+      playlistId: playlistWithoutThumbnailId,
+      elementId: withoutThumbnailE2
+    })
+
+    await waitJobs(servers)
+
+    for (const server of servers) {
+      const p = await getPlaylistWithoutThumbnail(server)
+      // oxlint-disable-next-line @typescript-eslint/no-deprecated
+      expect(p.thumbnailPath).to.be.null
+      expect(p.thumbnails).to.have.lengthOf(0)
+    }
+  })
+
+  it('Should not update the thumbnail when we delete the last element if we explicitly uploaded a thumbnail', async function () {
+    this.timeout(30000)
+
+    await servers[1].playlists.removeElement({
+      playlistId: playlistWithThumbnailId,
+      elementId: withThumbnailE2
+    })
+
+    await waitJobs(servers)
+
+    for (const server of servers) {
+      const p = await getPlaylistWithThumbnail(server)
+
+      await checkThumbnails({
+        server,
+        playlist: p,
+        thumbnails: [ 'custom-thumbnail-280x157.jpg' ],
+        remotePlaylist: server !== servers[1]
+      })
+    }
+  })
+
+  after(async function () {
+    await cleanupTests(servers)
+  })
+})

@@ -1,0 +1,28 @@
+{
+  "extends": "../tsconfig.json",
+  "compilerOptions": {
+    "outDir": "../out-tsc/app",
+    "noImplicitAny": false,
+    "esModuleInterop": true,
+    "module": "commonjs",
+    "target": "ES2018",
+    "typeRoots": [
+      "../node_modules/@wdio",
+      "../node_modules/@types",
+      "../node_modules"
+    ],
+    "types": [
+      "node",
+      "@wdio/globals/types",
+      "@wdio/mocha-framework",
+      "expect-webdriverio"
+    ]
+  },
+  "ts-node": {
+    "files": true
+  },
+  "include": [
+    "src/**/*.ts",
+    "./*.ts"
+  ]
+}

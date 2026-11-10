@@ -1,0 +1,63 @@
+<div class="mb-5">
+  <p i18n>
+    If you want to <strong>publish videos</strong> on {{ instanceName() }}, you must create your first <strong>channel</strong>.
+  </p>
+
+  <p i18n>
+    You might want to <strong>create a channel by theme:</strong> for example, you can create a channel named "SweetMelodies"
+    to publish your piano concerts and another one "Ecology" in which you publish your videos talking about ecology.
+  </p>
+
+  @if (videoQuota() !== -1) {
+    <p i18n>
+      {{ instanceName() }} administrators allow you to publish up to <strong>{{ videoQuota() | bytes: 0 }} of videos</strong> on their website.
+    </p>
+  }
+</div>
+
+<form [formGroup]="form">
+
+  <div class="row">
+
+    <div class="col-md-12 col-xl-6 form-group">
+      <label for="displayName" i18n>Channel display name</label>
+
+      <div i18n class="form-group-description">This is the name that will be publicly visible to other users.</div>
+
+      <div class="input-group">
+        <input
+          type="text" id="displayName" i18n-placeholder placeholder="Example: Sweet Melodies"
+          formControlName="displayName" [ngClass]="{ 'input-error': formErrors['displayName'] }"
+        >
+      </div>
+
+      @if (formErrors.displayName) {
+        <div class="form-error" role="alert">{{ formErrors.displayName }}</div>
+      }
+    </div>
+
+    <div class="col-md-12 col-xl-6 form-group">
+      <label for="name" i18n>Channel identifier</label>
+
+      <div i18n class="form-group-description">This is the name that will be displayed in your profile URL.</div>
+
+      <div class="input-group">
+        <input
+          type="text" id="name" i18n-placeholder placeholder="Example: sweetmelodies24"
+          formControlName="name" [ngClass]="{ 'input-error': formErrors['name'] }"
+          >
+        <div class="input-group-text">&#64;{{ instanceHost }}</div>
+      </div>
+
+      @if (formErrors.name) {
+        <div class="form-error" role="alert">{{ formErrors.name }}</div>
+      }
+
+      @if (isSameThanUsername()) {
+        <div class="form-error" role="alert" i18n>
+          Channel identifier cannot be the same as your account name. You can click on the first step to update your account name.
+        </div>
+      }
+    </div>
+  </div>
+</form>

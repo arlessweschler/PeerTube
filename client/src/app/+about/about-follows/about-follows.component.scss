@@ -1,25 +1,85 @@
-@import '_variables';
-@import '_mixins';
+@use '_variables' as *;
+@use '_mixins' as *;
+@use '_bootstrap-variables' as *;
+@use '_components' as *;
 
-.subtitle {
-  font-size: 18px;
-  font-weight: $font-semibold;
-  margin-bottom: 20px;
+.margin-content {
+  display: flex;
 }
 
-a {
-  display: block;
-  width: fit-content;
-  margin-top: 3px;
+.text-content {
+  color: pvar(--fg-300);
 }
 
-.no-results {
-  justify-content: flex-start;
+.stat {
+  @include stats-card;
 }
 
-.show-more {
-  @include peertube-button-link;
-  @include grey-button;
+.stats > div {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 1rem;
+}
 
-  margin-top: 1%;
+.followers,
+.subscriptions {
+  flex-basis: 50%;
+  background-color: pvar(--bg-secondary-400);
+  padding: 1.5rem;
+  border-radius: 14px;
+
+  h3 {
+    font-weight: $font-bold;
+    color: pvar(--fg-400);
+
+    @include font-size(2rem);
+  }
+
+  h4 {
+    color: pvar(--fg-300);
+    font-weight: $font-bold;
+
+    @include font-size(1.25rem);
+  }
+}
+
+.follows {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 1rem;
+}
+
+.follow-block {
+  width: calc(50% - 1rem);
+  padding: 1rem;
+  border-radius: 8px;
+  background-color: pvar(--bg-secondary-450);
+  display: flex;
+  align-items: center;
+
+  my-actor-avatar {
+    @include margin-right(1rem);
+  }
+}
+
+.follow-name {
+  font-weight: $font-bold;
+  color: pvar(--fg-400);
+}
+
+@media screen and (max-width: #{breakpoint(xl)}) {
+  .margin-content {
+    flex-wrap: wrap;
+  }
+
+  .followers,
+  .subscriptions {
+    flex-basis: 100%;
+  }
+}
+
+@include on-small-main-col {
+  .follow-block {
+    width: 100%;
+  }
 }

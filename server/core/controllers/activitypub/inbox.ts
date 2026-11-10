@@ -1,0 +1,102 @@
+import { Activity, ActivityPubCollection, ActivityPubOrderedCollection, HttpStatusCode, RootActivity } from '@peertube/peertube-models'
+import { InboxManager } from '@server/lib/activitypub/inbox-manager.js'
+import { ACTIVITY_PUB } from '../../initializers/constants.js'
+import express from 'express'
+import { isActivityValid } from '../../helpers/custom-validators/activitypub/activity.js'
+import { createLogger } from '../../helpers/logger.js'
+import {
+  accountHandleGetValidatorFactory,
+  activityPubRateLimiter,
+  asyncMiddleware,
+  checkSignature,
+  signatureValidator,
+  videoChannelsHandleValidatorFactory
+} from '../../middlewares/index.js'
+import { activityPubValidator } from '../../middlewares/validators/activitypub/activity.js'
+
+const logger = createLogger()
+
+const inboxRouter = express.Router()
+
+inboxRouter.post(
+  '/inbox',
+  activityPubRateLimiter,
+  signatureValidator,
+  asyncMiddleware(checkSignature),
+  asyncMiddleware(activityPubValidator),
+  inboxController
+)
+
+inboxRouter.post(
+  '/accounts/:handle/inbox',
+  activityPubRateLimiter,
+  signatureValidator,
+  asyncMiddleware(checkSignature),
+  asyncMiddleware(accountHandleGetValidatorFactory({ checkIsLocal: true, checkCanManage: false })),
+  asyncMiddleware(activityPubValidator),
+  inboxController
+)
+
+inboxRouter.post(
+  '/video-channels/:handle/inbox',
+  activityPubRateLimiter,
+  signatureValidator,
+  asyncMiddleware(checkSignature),
+  asyncMiddleware(videoChannelsHandleValidatorFactory({ checkIsLocal: true, checkCanManage: false, checkIsOwner: false })),
+  asyncMiddleware(activityPubValidator),
+  inboxController
+)
+
+// ---------------------------------------------------------------------------
+
+export {
+  inboxRouter
+}
+
+// ---------------------------------------------------------------------------
+
+function inboxController (req: express.Request, res: express.Response) {
+  const rootActivity: RootActivity = req.body
+  let activities: Activity[]
+
+  if ([ 'Collection', 'CollectionPage' ].includes(rootActivity.type)) {
+    activities = (rootActivity as ActivityPubCollection).items
+  } else if ([ 'OrderedCollection', 'OrderedCollectionPage' ].includes(rootActivity.type)) {
+    activities = (rootActivity as ActivityPubOrderedCollection<Activity>).orderedItems
+  } else {
+    activities = [ rootActivity as Activity ]
+  }
+
+  if (activities.length > ACTIVITY_PUB.MAX_ACTIVITIES_PER_REQUEST) {
+    logger.warn(
+      'Rejecting inbox request with %d activities by %s (max: %d). No compliant server sends that many activities in one request.',
+      activities.length,
+      res.locals.signature.actor.url,
+      ACTIVITY_PUB.MAX_ACTIVITIES_PER_REQUEST
+    )
+
+    return res.fail({
+      status: HttpStatusCode.BAD_REQUEST_400,
+      message: `Too many activities in a single inbox request (max: ${ACTIVITY_PUB.MAX_ACTIVITIES_PER_REQUEST})`
+    })
+  }
+
+  // Only keep activities we are able to process
+  logger.debug('Filtering %d activities...', activities.length, { activities })
+  activities = activities.filter(a => isActivityValid(a))
+  logger.debug('We keep %d activities.', activities.length, { activities })
+
+  const accountOrChannel = res.locals.account || res.locals.videoChannel
+
+  logger.info('Receiving inbox requests for %d activities by %s.', activities.length, res.locals.signature.actor.url)
+
+  InboxManager.Instance.addInboxMessage({
+    activities,
+    signatureActor: res.locals.signature.actor,
+    inboxActor: accountOrChannel
+      ? accountOrChannel.Actor
+      : undefined
+  })
+
+  return res.status(HttpStatusCode.NO_CONTENT_204).end()
+}

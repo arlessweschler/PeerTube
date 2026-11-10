@@ -1,0 +1,10 @@
+{
+  "extends": "./tsconfig.json",
+  "compilerOptions": {
+    "outDir": "../types-generator/dist-tmp/peertube-models",
+    "tsBuildInfoFile": "../types-generator/dist-tmp/peertube-models/.tsbuildinfo",
+    "stripInternal": true,
+    "removeComments": false,
+    "emitDeclarationOnly": true
+  }
+}

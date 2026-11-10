@@ -1,3 +1,5 @@
+@use "_variables" as *;
+@use "_mixins" as *;
 
 * {
   font-family: sans-serif;
@@ -25,7 +27,7 @@ iframe {
 
 aside {
   width: 33vw;
-  margin: 0 .5em .5em 0;
+  margin: 0 0.5em 0.5em 0;
   height: calc(33vw * 0.5625);
 }
 
@@ -36,7 +38,8 @@ aside {
   display: flex;
   flex-direction: row;
   align-items: center;
-  margin-right: 0.5em;
+
+  @include margin-right(0.5em);
 
   .icon {
     height: 100%;
@@ -44,7 +47,8 @@ aside {
     background: #fff;
     display: flex;
     align-items: center;
-    margin-right: 0.5em;
+
+    @include margin-right(0.5em);
   }
 }
 
@@ -63,7 +67,6 @@ header {
   height: 3.2em;
   background-color: #F1680D;
   color: #fff;
-  //background-image: url(../../assets/images/backdrop/network-o.png);
   display: flex;
   flex-direction: row;
   align-items: center;
@@ -71,7 +74,8 @@ header {
   box-shadow: 1px 0 10px rgba(0, 0, 0, 0.6);
   background-size: 50%;
   background-position: top left;
-  padding-right: 1em;
+
+  @include padding-right(1em);
 
   h1 {
     margin: 0;

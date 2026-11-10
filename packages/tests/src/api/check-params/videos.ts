@@ -1,0 +1,1152 @@
+/* oxlint-disable @typescript-eslint/no-unused-expressions,@typescript-eslint/require-await */
+
+import { omit, randomInt } from '@peertube/peertube-core-utils'
+import {
+  HttpStatusCode,
+  NSFWFlag,
+  PeerTubeProblemDocument,
+  VideoCommentPolicy,
+  VideoCreateResult,
+  VideoPrivacy,
+  VideoUpdate
+} from '@peertube/peertube-models'
+import { buildAbsoluteFixturePath } from '@peertube/peertube-node-utils'
+import {
+  PeerTubeServer,
+  cleanupTests,
+  createSingleServer,
+  doubleFollow,
+  makeDeleteRequest,
+  makeGetRequest,
+  makePutBodyRequest,
+  makeRawRequest,
+  makeUploadRequest,
+  setAccessTokensToServers,
+  setDefaultVideoChannel,
+  waitJobs
+} from '@peertube/peertube-server-commands'
+import { checkBadCountPagination, checkBadSort, checkBadStartPagination } from '@tests/shared/checks.js'
+import { checkUploadVideoParam } from '@tests/shared/videos.js'
+import { expect } from 'chai'
+
+describe('Test videos API validator', function () {
+  const path = '/api/v1/videos/'
+  let server: PeerTubeServer
+  let remoteServer: PeerTubeServer
+
+  let userAccessToken: string
+  let editorToken: string
+
+  let accountName: string
+  let channelId: number
+  let channelName: string
+
+  let channelId2: number
+  let channelIdEditor: number
+  let channelIdEditor2: number
+
+  let video: VideoCreateResult
+  let privateVideo: VideoCreateResult
+  let remoteVideo: VideoCreateResult
+
+  // ---------------------------------------------------------------
+
+  before(async function () {
+    this.timeout(120000)
+
+    server = await createSingleServer(1)
+    remoteServer = await createSingleServer(2)
+
+    await setAccessTokensToServers([ server, remoteServer ])
+    await setDefaultVideoChannel([ server, remoteServer ])
+
+    await doubleFollow(server, remoteServer)
+
+    userAccessToken = await server.users.generateUserAndToken('user1')
+    editorToken = await server.channelCollaborators.createEditor('editor', 'root_channel')
+
+    {
+      const body = await server.users.getMyInfo()
+      channelId = body.videoChannels[0].id
+      channelName = body.videoChannels[0].name
+      accountName = body.account.name + '@' + body.account.host
+
+      const anotherChannel = await server.channels.create({
+        attributes: {
+          name: 'another_channel'
+        }
+      })
+
+      channelId2 = anotherChannel.id
+    }
+
+    {
+      channelIdEditor = await server.channels.getDefaultId({ token: editorToken })
+      const anotherEditorChannel = await server.channels.create({ attributes: { name: 'another_editor_channel' }, token: editorToken })
+
+      channelIdEditor2 = anotherEditorChannel.id
+    }
+
+    {
+      privateVideo = await server.videos.quickUpload({ name: 'private video', privacy: VideoPrivacy.PRIVATE })
+    }
+
+    {
+      remoteVideo = await remoteServer.videos.quickUpload({ name: 'remote video' })
+
+      await waitJobs([ server, remoteServer ])
+    }
+  })
+
+  describe('When listing videos', function () {
+    it('Should fail with a bad start pagination', async function () {
+      await checkBadStartPagination(server.url, path)
+    })
+
+    it('Should fail with a bad count pagination', async function () {
+      await checkBadCountPagination(server.url, path)
+    })
+
+    it('Should fail with an incorrect sort', async function () {
+      await checkBadSort(server.url, path)
+    })
+
+    it('Should fail with a bad skipVideos query', async function () {
+      await makeGetRequest({ url: server.url, path, expectedStatus: HttpStatusCode.OK_200, query: { skipCount: 'toto' } })
+    })
+
+    it('Should succeed with the correct parameters', async function () {
+      await makeGetRequest({ url: server.url, path, expectedStatus: HttpStatusCode.OK_200, query: { skipCount: false } })
+    })
+  })
+
+  describe('When searching a video', function () {
+    const path = '/api/v1/search/videos'
+
+    it('Should fail with a bad start pagination', async function () {
+      await checkBadStartPagination(server.url, path, undefined, { search: 'test' })
+    })
+
+    it('Should fail with a bad count pagination', async function () {
+      await checkBadCountPagination(server.url, path, undefined, { search: 'test' })
+    })
+
+    it('Should fail with an incorrect sort', async function () {
+      await checkBadSort(server.url, path, undefined, { search: 'test' })
+    })
+
+    it('Should succeed with the correct parameters', async function () {
+      await makeGetRequest({ url: server.url, path, query: { search: 'test' }, expectedStatus: HttpStatusCode.OK_200 })
+    })
+  })
+
+  describe('When listing my videos', function () {
+    const path = '/api/v1/users/me/videos'
+
+    it('Should fail with a bad start pagination', async function () {
+      await checkBadStartPagination(server.url, path, server.accessToken)
+    })
+
+    it('Should fail with a bad count pagination', async function () {
+      await checkBadCountPagination(server.url, path, server.accessToken)
+    })
+
+    it('Should fail with an incorrect sort', async function () {
+      await checkBadSort(server.url, path, server.accessToken)
+    })
+
+    it('Should fail with an invalid channel', async function () {
+      await makeGetRequest({ url: server.url, token: server.accessToken, path, query: { channelId: 'toto' } })
+    })
+
+    it('Should fail with an unknown channel', async function () {
+      await makeGetRequest({
+        url: server.url,
+        token: server.accessToken,
+        path,
+        query: { channelId: 89898 },
+        expectedStatus: HttpStatusCode.NOT_FOUND_404
+      })
+    })
+
+    it('Should not list videos of a channel of another user', async function () {
+      {
+        {
+          const { total, data } = await server.videos.listMyVideos({ token: userAccessToken, channelNameOneOf: [ 'root_channel' ] })
+
+          expect(total).to.equal(0)
+          expect(data).to.have.lengthOf(0)
+        }
+
+        {
+          await server.videos.listMyVideos({
+            token: userAccessToken,
+            channelId: server.store.channel.id,
+            expectedStatus: HttpStatusCode.FORBIDDEN_403
+          })
+        }
+      }
+
+      {
+        {
+          const { total, data } = await server.videos.listMyVideos({ channelNameOneOf: [ 'root_channel' ] })
+
+          expect(total).to.not.equal(0)
+          expect(data).to.not.have.lengthOf(0)
+        }
+
+        {
+          const { total, data } = await server.videos.listMyVideos({ channelId: server.store.channel.id })
+
+          expect(total).to.not.equal(0)
+          expect(data).to.not.have.lengthOf(0)
+        }
+      }
+    })
+
+    it('Should succeed with the correct parameters', async function () {
+      await makeGetRequest({ url: server.url, token: server.accessToken, path, expectedStatus: HttpStatusCode.OK_200 })
+    })
+  })
+
+  describe('When listing account videos', function () {
+    let path: string
+
+    before(async function () {
+      path = '/api/v1/accounts/' + accountName + '/videos'
+    })
+
+    it('Should fail with a bad start pagination', async function () {
+      await checkBadStartPagination(server.url, path, server.accessToken)
+    })
+
+    it('Should fail with a bad count pagination', async function () {
+      await checkBadCountPagination(server.url, path, server.accessToken)
+    })
+
+    it('Should fail with an incorrect sort', async function () {
+      await checkBadSort(server.url, path, server.accessToken)
+    })
+
+    it('Should succeed with the correct parameters', async function () {
+      await makeGetRequest({ url: server.url, path, expectedStatus: HttpStatusCode.OK_200 })
+    })
+  })
+
+  describe('When listing video channel videos', function () {
+    let path: string
+
+    before(async function () {
+      path = '/api/v1/video-channels/' + channelName + '/videos'
+    })
+
+    it('Should fail with a bad start pagination', async function () {
+      await checkBadStartPagination(server.url, path, server.accessToken)
+    })
+
+    it('Should fail with a bad count pagination', async function () {
+      await checkBadCountPagination(server.url, path, server.accessToken)
+    })
+
+    it('Should fail with an incorrect sort', async function () {
+      await checkBadSort(server.url, path, server.accessToken)
+    })
+
+    it('Should succeed with the correct parameters', async function () {
+      await makeGetRequest({ url: server.url, path, expectedStatus: HttpStatusCode.OK_200 })
+    })
+  })
+
+  describe('When adding a video', function () {
+    const baseCorrectParams = {
+      name: 'my super name',
+      category: 5,
+      licence: 1,
+      language: 'pt',
+      nsfw: false,
+      commentsPolicy: VideoCommentPolicy.ENABLED,
+      downloadEnabled: true,
+      waitTranscoding: true,
+      description: 'my super description',
+      support: 'my super support text',
+      tags: [ 'tag1', 'tag2' ],
+      privacy: VideoPrivacy.PUBLIC,
+      channelId: -1,
+      originallyPublishedAt: new Date().toISOString()
+    }
+
+    const baseCorrectAttaches = {
+      fixture: buildAbsoluteFixturePath('video_short.webm')
+    }
+
+    before(function () {
+      // Put in before to have channelId
+      baseCorrectParams.channelId = channelId
+    })
+
+    function runSuite (mode: 'legacy' | 'resumable') {
+      const baseOptions = () => {
+        return {
+          server,
+          token: server.accessToken,
+          expectedStatus: HttpStatusCode.BAD_REQUEST_400,
+          mode
+        }
+      }
+
+      it('Should fail with nothing', async function () {
+        const fields = {}
+        const attaches = {}
+        await checkUploadVideoParam({ ...baseOptions(), attributes: { ...fields, ...attaches } })
+      })
+
+      it('Should fail without name', async function () {
+        const fields = omit(baseCorrectParams, [ 'name' ])
+        const attaches = baseCorrectAttaches
+
+        await checkUploadVideoParam({ ...baseOptions(), attributes: { ...fields, ...attaches } })
+      })
+
+      it('Should fail with a long name', async function () {
+        const fields = { ...baseCorrectParams, name: 'super'.repeat(65) }
+        const attaches = baseCorrectAttaches
+
+        await checkUploadVideoParam({ ...baseOptions(), attributes: { ...fields, ...attaches } })
+      })
+
+      it('Should fail with a bad NSFW', async function () {
+        {
+          const fields = { ...baseCorrectParams, nsfw: false, nsfwFlags: NSFWFlag.EXPLICIT_SEX }
+          const attaches = baseCorrectAttaches
+
+          await checkUploadVideoParam({ ...baseOptions(), attributes: { ...fields, ...attaches } })
+        }
+
+        {
+          const fields = { ...baseCorrectParams, nsfw: false, nsfwSummary: 'toto' }
+          const attaches = baseCorrectAttaches
+
+          await checkUploadVideoParam({ ...baseOptions(), attributes: { ...fields, ...attaches } })
+        }
+
+        {
+          const fields = { ...baseCorrectParams, nsfw: true, nsfwFlags: 'toto' as any }
+          const attaches = baseCorrectAttaches
+
+          await checkUploadVideoParam({ ...baseOptions(), attributes: { ...fields, ...attaches } })
+        }
+
+        {
+          const fields = { ...baseCorrectParams, nsfw: true, nsfwSummary: 't' }
+          const attaches = baseCorrectAttaches
+
+          await checkUploadVideoParam({ ...baseOptions(), attributes: { ...fields, ...attaches } })
+        }
+      })
+
+      it('Should fail with a bad category', async function () {
+        const fields = { ...baseCorrectParams, category: 125 }
+        const attaches = baseCorrectAttaches
+
+        await checkUploadVideoParam({ ...baseOptions(), attributes: { ...fields, ...attaches } })
+      })
+
+      it('Should fail with a bad licence', async function () {
+        const fields = { ...baseCorrectParams, licence: 125 }
+        const attaches = baseCorrectAttaches
+
+        await checkUploadVideoParam({ ...baseOptions(), attributes: { ...fields, ...attaches } })
+      })
+
+      it('Should fail with a bad language', async function () {
+        const fields = { ...baseCorrectParams, language: 'a'.repeat(15) }
+        const attaches = baseCorrectAttaches
+
+        await checkUploadVideoParam({ ...baseOptions(), attributes: { ...fields, ...attaches } })
+      })
+
+      it('Should fail with bad commentsPolicy', async function () {
+        const fields = { ...baseCorrectParams, commentsPolicy: 42 as any }
+        const attaches = baseCorrectAttaches
+
+        await checkUploadVideoParam({ ...baseOptions(), attributes: { ...fields, ...attaches } })
+      })
+
+      it('Should fail with bad aiUsage', async function () {
+        for (const aiUsage of [ 42, 'hello', 0 ]) {
+          const fields = { ...baseCorrectParams, aiUsage: aiUsage as any }
+          const attaches = baseCorrectAttaches
+
+          await checkUploadVideoParam({ ...baseOptions(), attributes: { ...fields, ...attaches } })
+        }
+      })
+
+      it('Should fail with bad commercialContent', async function () {
+        for (const commercialContent of [ 42, 'hello', 0 ]) {
+          const fields = { ...baseCorrectParams, commercialContent: commercialContent as any }
+          const attaches = baseCorrectAttaches
+
+          await checkUploadVideoParam({ ...baseOptions(), attributes: { ...fields, ...attaches } })
+        }
+      })
+
+      it('Should fail with a long description', async function () {
+        const fields = { ...baseCorrectParams, description: 'super'.repeat(2500) }
+        const attaches = baseCorrectAttaches
+
+        await checkUploadVideoParam({ ...baseOptions(), attributes: { ...fields, ...attaches } })
+      })
+
+      it('Should fail with a long support text', async function () {
+        const fields = { ...baseCorrectParams, support: 'super'.repeat(201) }
+        const attaches = baseCorrectAttaches
+
+        await checkUploadVideoParam({ ...baseOptions(), attributes: { ...fields, ...attaches } })
+      })
+
+      it('Should fail without a channel', async function () {
+        const fields = omit(baseCorrectParams, [ 'channelId' ])
+        const attaches = baseCorrectAttaches
+
+        await checkUploadVideoParam({ ...baseOptions(), attributes: { ...fields, ...attaches } })
+      })
+
+      it('Should fail with a bad channel', async function () {
+        const fields = { ...baseCorrectParams, channelId: 545454 }
+        const attaches = baseCorrectAttaches
+
+        await checkUploadVideoParam({
+          ...baseOptions(),
+          attributes: { ...fields, ...attaches },
+          expectedStatus: HttpStatusCode.NOT_FOUND_404
+        })
+      })
+
+      it('Should fail with another user channel', async function () {
+        const user = {
+          username: 'fake' + randomInt(0, 1500),
+          password: 'fake_password'
+        }
+        await server.users.create({ username: user.username, password: user.password })
+
+        const accessTokenUser = await server.login.getAccessToken(user)
+        const { videoChannels } = await server.users.getMyInfo({ token: accessTokenUser })
+        const customChannelId = videoChannels[0].id
+
+        const fields = { ...baseCorrectParams, channelId: customChannelId }
+        const attaches = baseCorrectAttaches
+
+        await checkUploadVideoParam({
+          ...baseOptions(),
+          token: userAccessToken,
+          attributes: { ...fields, ...attaches },
+          expectedStatus: HttpStatusCode.FORBIDDEN_403
+        })
+      })
+
+      it('Should fail with too many tags', async function () {
+        const fields = { ...baseCorrectParams, tags: [ 'tag1', 'tag2', 'tag3', 'tag4', 'tag5', 'tag6' ] }
+        const attaches = baseCorrectAttaches
+
+        await checkUploadVideoParam({ ...baseOptions(), attributes: { ...fields, ...attaches } })
+      })
+
+      it('Should fail with a tag length too low', async function () {
+        const fields = { ...baseCorrectParams, tags: [ 'tag1', 't' ] }
+        const attaches = baseCorrectAttaches
+
+        await checkUploadVideoParam({ ...baseOptions(), attributes: { ...fields, ...attaches } })
+      })
+
+      it('Should fail with a tag length too big', async function () {
+        const fields = { ...baseCorrectParams, tags: [ 'tag1', 'my_super_tag_too_long_long_long_long_long_long' ] }
+        const attaches = baseCorrectAttaches
+
+        await checkUploadVideoParam({ ...baseOptions(), attributes: { ...fields, ...attaches } })
+      })
+
+      it('Should fail with a bad schedule update (miss updateAt)', async function () {
+        const fields = { ...baseCorrectParams, scheduleUpdate: { privacy: VideoPrivacy.PUBLIC } as any }
+        const attaches = baseCorrectAttaches
+
+        await checkUploadVideoParam({ ...baseOptions(), attributes: { ...fields, ...attaches } })
+      })
+
+      it('Should fail with a bad schedule update (wrong updateAt)', async function () {
+        const fields = {
+          ...baseCorrectParams,
+
+          scheduleUpdate: {
+            privacy: VideoPrivacy.PUBLIC,
+            updateAt: 'toto'
+          }
+        }
+        const attaches = baseCorrectAttaches
+
+        await checkUploadVideoParam({ ...baseOptions(), attributes: { ...fields, ...attaches } })
+      })
+
+      it('Should fail with a bad originally published at attribute', async function () {
+        const fields = { ...baseCorrectParams, originallyPublishedAt: 'toto' }
+        const attaches = baseCorrectAttaches
+
+        await checkUploadVideoParam({ ...baseOptions(), attributes: { ...fields, ...attaches } })
+      })
+
+      it('Should fail without an input file', async function () {
+        const fields = baseCorrectParams
+        const attaches = {}
+        await checkUploadVideoParam({ ...baseOptions(), attributes: { ...fields, ...attaches } })
+      })
+
+      it('Should fail with an incorrect input file', async function () {
+        const fields = baseCorrectParams
+        let attaches = { fixture: buildAbsoluteFixturePath('video_short_fake.webm') }
+
+        await checkUploadVideoParam({
+          ...baseOptions(),
+          attributes: { ...fields, ...attaches },
+          // 200 for the init request, 422 when the file has finished being uploaded
+          expectedStatus: undefined,
+          completedExpectedStatus: HttpStatusCode.UNPROCESSABLE_ENTITY_422
+        })
+
+        attaches = { fixture: buildAbsoluteFixturePath('video_short.mkv') }
+        await checkUploadVideoParam({
+          ...baseOptions(),
+          attributes: { ...fields, ...attaches },
+          expectedStatus: HttpStatusCode.UNSUPPORTED_MEDIA_TYPE_415
+        })
+      })
+
+      it('Should fail with an incorrect thumbnail file', async function () {
+        const fields = baseCorrectParams
+        const attaches = {
+          thumbnailfile: buildAbsoluteFixturePath('video-720p.torrent'),
+          fixture: buildAbsoluteFixturePath('video_short.mp4')
+        }
+
+        await checkUploadVideoParam({ ...baseOptions(), attributes: { ...fields, ...attaches } })
+      })
+
+      it('Should fail with a big thumbnail file', async function () {
+        const fields = baseCorrectParams
+        const attaches = {
+          thumbnailfile: buildAbsoluteFixturePath('custom-preview-big.png'),
+          fixture: buildAbsoluteFixturePath('video_short.mp4')
+        }
+
+        await checkUploadVideoParam({ ...baseOptions(), attributes: { ...fields, ...attaches } })
+      })
+
+      it('Should fail with an incorrect preview file', async function () {
+        const fields = baseCorrectParams
+        const attaches = {
+          previewfile: buildAbsoluteFixturePath('video-720p.torrent'),
+          fixture: buildAbsoluteFixturePath('video_short.mp4')
+        }
+
+        await checkUploadVideoParam({ ...baseOptions(), attributes: { ...fields, ...attaches } })
+      })
+
+      it('Should fail with a big preview file', async function () {
+        const fields = baseCorrectParams
+        const attaches = {
+          previewfile: buildAbsoluteFixturePath('custom-preview-big.png'),
+          fixture: buildAbsoluteFixturePath('video_short.mp4')
+        }
+
+        await checkUploadVideoParam({ ...baseOptions(), attributes: { ...fields, ...attaches } })
+      })
+
+      it('Should report the appropriate error', async function () {
+        const fields = { ...baseCorrectParams, language: 'a'.repeat(15) }
+        const attaches = baseCorrectAttaches
+
+        const attributes = { ...fields, ...attaches }
+        const body = await checkUploadVideoParam({ ...baseOptions(), attributes })
+
+        const error = body as unknown as PeerTubeProblemDocument
+
+        if (mode === 'legacy') {
+          expect(error.docs).to.equal('https://docs.joinpeertube.org/api-rest-reference.html#operation/uploadLegacy')
+        } else {
+          expect(error.docs).to.equal('https://docs.joinpeertube.org/api-rest-reference.html#operation/uploadResumableInit')
+        }
+
+        expect(error.type).to.equal('about:blank')
+        expect(error.title).to.equal('Bad Request')
+
+        expect(error.detail).to.equal('Incorrect request parameters: language')
+
+        expect(error.status).to.equal(HttpStatusCode.BAD_REQUEST_400)
+        expect(error['invalid-params'].language).to.exist
+      })
+
+      it('Should succeed with the correct parameters', async function () {
+        this.timeout(30000)
+
+        const fields = baseCorrectParams
+
+        {
+          const attaches = baseCorrectAttaches
+          await checkUploadVideoParam({
+            ...baseOptions(),
+            attributes: { ...fields, ...attaches },
+            expectedStatus: HttpStatusCode.OK_200
+          })
+        }
+
+        {
+          const attaches = {
+            ...baseCorrectAttaches,
+
+            videofile: buildAbsoluteFixturePath('video_short.mp4')
+          }
+
+          await checkUploadVideoParam({
+            ...baseOptions(),
+            attributes: { ...fields, ...attaches },
+            expectedStatus: HttpStatusCode.OK_200
+          })
+        }
+
+        {
+          const attaches = {
+            ...baseCorrectAttaches,
+
+            videofile: buildAbsoluteFixturePath('video_short.ogv')
+          }
+
+          await checkUploadVideoParam({
+            ...baseOptions(),
+            token: editorToken,
+            attributes: { ...fields, ...attaches, nsfw: true, nsfwFlags: NSFWFlag.EXPLICIT_SEX, nsfwSummary: 'toto' },
+            expectedStatus: HttpStatusCode.OK_200
+          })
+        }
+
+        {
+          const attaches = baseCorrectAttaches
+
+          const { uuid } = await checkUploadVideoParam({
+            ...baseOptions(),
+
+            attributes: { ...fields, ...attaches, filename: '../'.repeat(20) + 'toto.mp4' },
+            expectedStatus: HttpStatusCode.OK_200
+          })
+
+          await waitJobs([ server ])
+
+          const video = await server.videos.get({ id: uuid })
+          await makeRawRequest({ url: video.files[0].fileUrl, expectedStatus: HttpStatusCode.OK_200 })
+        }
+      })
+    }
+
+    describe('Resumable upload', function () {
+      runSuite('resumable')
+    })
+
+    describe('Legacy upload', function () {
+      runSuite('legacy')
+    })
+  })
+
+  describe('When updating a video', function () {
+    const baseCorrectParams: VideoUpdate = {
+      name: 'my super name',
+      category: 5,
+      licence: 2,
+      language: 'pt',
+      nsfw: false,
+      commentsPolicy: VideoCommentPolicy.DISABLED,
+      downloadEnabled: false,
+      description: 'my super description',
+      privacy: VideoPrivacy.PUBLIC,
+      tags: [ 'tag1', 'tag2' ]
+    }
+
+    before(async function () {
+      const { data } = await server.videos.list()
+      video = data[0]
+    })
+
+    it('Should fail with nothing', async function () {
+      const fields = {}
+      await makePutBodyRequest({ url: server.url, path, token: server.accessToken, fields })
+    })
+
+    it('Should fail without a valid uuid', async function () {
+      const fields = baseCorrectParams
+      await makePutBodyRequest({ url: server.url, path: path + 'blabla', token: server.accessToken, fields })
+    })
+
+    it('Should fail with an unknown id', async function () {
+      const fields = baseCorrectParams
+
+      await makePutBodyRequest({
+        url: server.url,
+        path: path + '4da6fde3-88f7-4d16-b119-108df5630b06',
+        token: server.accessToken,
+        fields,
+        expectedStatus: HttpStatusCode.NOT_FOUND_404
+      })
+    })
+
+    it('Should fail with a long name', async function () {
+      const fields = { ...baseCorrectParams, name: 'super'.repeat(65) }
+
+      await makePutBodyRequest({ url: server.url, path: path + video.shortUUID, token: server.accessToken, fields })
+    })
+
+    it('Should fail with a bad NSFW', async function () {
+      {
+        const fields = { ...baseCorrectParams, nsfw: false, nsfwFlags: NSFWFlag.EXPLICIT_SEX }
+
+        await makePutBodyRequest({ url: server.url, path: path + video.shortUUID, token: server.accessToken, fields })
+      }
+
+      {
+        const fields = { ...baseCorrectParams, nsfw: false, nsfwSummary: 'toto' }
+
+        await makePutBodyRequest({ url: server.url, path: path + video.shortUUID, token: server.accessToken, fields })
+      }
+
+      {
+        const fields = { ...baseCorrectParams, nsfw: true, nsfwFlags: 'toto' as any }
+
+        await makePutBodyRequest({ url: server.url, path: path + video.shortUUID, token: server.accessToken, fields })
+      }
+
+      {
+        const fields = { ...baseCorrectParams, nsfw: true, nsfwSummary: 't' }
+
+        await makePutBodyRequest({ url: server.url, path: path + video.shortUUID, token: server.accessToken, fields })
+      }
+    })
+
+    it('Should fail with a bad category', async function () {
+      const fields = { ...baseCorrectParams, category: 125 }
+
+      await makePutBodyRequest({ url: server.url, path: path + video.shortUUID, token: server.accessToken, fields })
+    })
+
+    it('Should fail with a bad licence', async function () {
+      const fields = { ...baseCorrectParams, licence: 125 }
+
+      await makePutBodyRequest({ url: server.url, path: path + video.shortUUID, token: server.accessToken, fields })
+    })
+
+    it('Should fail with a bad language', async function () {
+      const fields = { ...baseCorrectParams, language: 'a'.repeat(15) }
+
+      await makePutBodyRequest({ url: server.url, path: path + video.shortUUID, token: server.accessToken, fields })
+    })
+
+    it('Should fail with a long description', async function () {
+      const fields = { ...baseCorrectParams, description: 'super'.repeat(2500) }
+
+      await makePutBodyRequest({ url: server.url, path: path + video.shortUUID, token: server.accessToken, fields })
+    })
+
+    it('Should fail with a long support text', async function () {
+      const fields = { ...baseCorrectParams, support: 'super'.repeat(201) }
+
+      await makePutBodyRequest({ url: server.url, path: path + video.shortUUID, token: server.accessToken, fields })
+    })
+
+    it('Should fail with a bad channel', async function () {
+      const fields = { ...baseCorrectParams, channelId: 545454 }
+
+      await makePutBodyRequest({
+        url: server.url,
+        path: path + video.shortUUID,
+        token: server.accessToken,
+        fields,
+        expectedStatus: HttpStatusCode.NOT_FOUND_404
+      })
+    })
+
+    it('Should fail to update channel if the editor does not have the right on the target channel', async function () {
+      const fields = { ...baseCorrectParams, channelId: channelId2 }
+
+      await makePutBodyRequest({
+        url: server.url,
+        path: path + video.shortUUID,
+        token: editorToken,
+        fields,
+        expectedStatus: HttpStatusCode.FORBIDDEN_403
+      })
+    })
+
+    it('Should fail to update channel if the editor does not have the right on the video', async function () {
+      await server.videos.update({ id: video.id, attributes: { channelId: channelId2 } })
+
+      const fields = { ...baseCorrectParams, channelId }
+
+      await makePutBodyRequest({
+        url: server.url,
+        path: path + video.shortUUID,
+        token: editorToken,
+        fields,
+        expectedStatus: HttpStatusCode.FORBIDDEN_403
+      })
+
+      await server.videos.update({ id: video.id, attributes: { channelId } })
+    })
+
+    it('Should fail with too many tags', async function () {
+      const fields = { ...baseCorrectParams, tags: [ 'tag1', 'tag2', 'tag3', 'tag4', 'tag5', 'tag6' ] }
+
+      await makePutBodyRequest({ url: server.url, path: path + video.shortUUID, token: server.accessToken, fields })
+    })
+
+    it('Should fail with a tag length too low', async function () {
+      const fields = { ...baseCorrectParams, tags: [ 'tag1', 't' ] }
+
+      await makePutBodyRequest({ url: server.url, path: path + video.shortUUID, token: server.accessToken, fields })
+    })
+
+    it('Should fail with a tag length too big', async function () {
+      const fields = { ...baseCorrectParams, tags: [ 'tag1', 'my_super_tag_too_long_long_long_long_long_long' ] }
+
+      await makePutBodyRequest({ url: server.url, path: path + video.shortUUID, token: server.accessToken, fields })
+    })
+
+    it('Should fail with a bad schedule update (miss updateAt)', async function () {
+      const fields = { ...baseCorrectParams, scheduleUpdate: { privacy: VideoPrivacy.PUBLIC } }
+
+      await makePutBodyRequest({ url: server.url, path: path + video.shortUUID, token: server.accessToken, fields })
+    })
+
+    it('Should fail with a bad schedule update (wrong updateAt)', async function () {
+      const fields = { ...baseCorrectParams, scheduleUpdate: { updateAt: 'toto', privacy: VideoPrivacy.PUBLIC } }
+
+      await makePutBodyRequest({ url: server.url, path: path + video.shortUUID, token: server.accessToken, fields })
+    })
+
+    it('Should fail with a bad originally published at param', async function () {
+      const fields = { ...baseCorrectParams, originallyPublishedAt: 'toto' }
+
+      await makePutBodyRequest({ url: server.url, path: path + video.shortUUID, token: server.accessToken, fields })
+    })
+
+    it('Should fail with an incorrect thumbnail file', async function () {
+      const fields = baseCorrectParams
+      const attaches = {
+        thumbnailfile: buildAbsoluteFixturePath('video_short.mp4')
+      }
+
+      await makeUploadRequest({
+        url: server.url,
+        method: 'PUT',
+        path: path + video.shortUUID,
+        token: server.accessToken,
+        fields,
+        attaches
+      })
+    })
+
+    it('Should fail with a big thumbnail file', async function () {
+      const fields = baseCorrectParams
+      const attaches = {
+        thumbnailfile: buildAbsoluteFixturePath('custom-preview-big.png')
+      }
+
+      await makeUploadRequest({
+        url: server.url,
+        method: 'PUT',
+        path: path + video.shortUUID,
+        token: server.accessToken,
+        fields,
+        attaches
+      })
+    })
+
+    it('Should fail with an incorrect preview file', async function () {
+      const fields = baseCorrectParams
+      const attaches = {
+        previewfile: buildAbsoluteFixturePath('video_short.mp4')
+      }
+
+      await makeUploadRequest({
+        url: server.url,
+        method: 'PUT',
+        path: path + video.shortUUID,
+        token: server.accessToken,
+        fields,
+        attaches
+      })
+    })
+
+    it('Should fail with a big preview file', async function () {
+      const fields = baseCorrectParams
+      const attaches = {
+        previewfile: buildAbsoluteFixturePath('custom-preview-big.png')
+      }
+
+      await makeUploadRequest({
+        url: server.url,
+        method: 'PUT',
+        path: path + video.shortUUID,
+        token: server.accessToken,
+        fields,
+        attaches
+      })
+    })
+
+    it('Should fail with a video of another user without the appropriate right', async function () {
+      const fields = baseCorrectParams
+
+      await makePutBodyRequest({
+        url: server.url,
+        path: path + video.shortUUID,
+        token: userAccessToken,
+        fields,
+        expectedStatus: HttpStatusCode.FORBIDDEN_403
+      })
+    })
+
+    it('Should fail with a video of another server', async function () {
+      const fields = baseCorrectParams
+
+      await makePutBodyRequest({
+        url: server.url,
+        path: path + remoteVideo.uuid,
+        token: server.accessToken,
+        fields,
+        expectedStatus: HttpStatusCode.FORBIDDEN_403
+      })
+    })
+
+    it('Should report the appropriate error', async function () {
+      const fields = { ...baseCorrectParams, licence: 125 }
+
+      const res = await makePutBodyRequest({ url: server.url, path: path + video.shortUUID, token: server.accessToken, fields })
+      const error = res.body as PeerTubeProblemDocument
+
+      expect(error.docs).to.equal('https://docs.joinpeertube.org/api-rest-reference.html#operation/putVideo')
+
+      expect(error.type).to.equal('about:blank')
+      expect(error.title).to.equal('Bad Request')
+
+      expect(error.detail).to.equal('Incorrect request parameters: licence')
+
+      expect(error.status).to.equal(HttpStatusCode.BAD_REQUEST_400)
+      expect(error['invalid-params'].licence).to.exist
+    })
+
+    it('Should succeed with the correct parameters', async function () {
+      const fields = baseCorrectParams
+
+      await makePutBodyRequest({
+        url: server.url,
+        path: path + video.shortUUID,
+        token: server.accessToken,
+        fields,
+        expectedStatus: HttpStatusCode.NO_CONTENT_204
+      })
+
+      await makePutBodyRequest({
+        url: server.url,
+        path: path + video.shortUUID,
+        token: editorToken,
+        fields: {
+          ...fields,
+
+          nsfw: true,
+          nsfwFlags: NSFWFlag.EXPLICIT_SEX,
+          nsfwSummary: 'toto'
+        },
+        expectedStatus: HttpStatusCode.NO_CONTENT_204
+      })
+    })
+
+    it('Should fail with the channel of another user if the video has pending ownership change', async function () {
+      const video = await server.videos.quickUpload({ name: 'video to transfer', channelId: channelIdEditor, token: editorToken })
+
+      await server.changeOwnership.createVideo({ videoId: video.id, username: 'root', token: editorToken })
+
+      // Can update video metadata
+      await server.videos.update({ id: video.id, attributes: { name: 'video to transfer 2' }, token: editorToken })
+      // Can update video channel to a channel of the same user
+      await server.videos.update({ id: video.id, attributes: { channelId: channelIdEditor2 }, token: editorToken })
+
+      // Cannot update video channel to a channel of another user
+      await server.videos.update({
+        id: video.id,
+        attributes: { channelId },
+        expectedStatus: HttpStatusCode.BAD_REQUEST_400,
+        token: editorToken
+      })
+
+      const { data } = await server.changeOwnership.listVideos()
+      await server.changeOwnership.refuseVideo({ ownershipId: data[0].id })
+
+      // Can update video channel to a channel of another user now there's no pending ownership change
+      await server.videos.update({ id: video.id, attributes: { channelId }, token: editorToken })
+    })
+  })
+
+  describe('When getting a video', function () {
+    it('Should return the list of the videos with nothing', async function () {
+      const res = await makeGetRequest({
+        url: server.url,
+        path,
+        expectedStatus: HttpStatusCode.OK_200
+      })
+
+      expect(res.body.data).to.be.an('array')
+      expect(res.body.data.length).to.equal(10)
+    })
+
+    it('Should fail without a correct uuid', async function () {
+      await server.videos.get({ id: 'coucou', expectedStatus: HttpStatusCode.BAD_REQUEST_400 })
+    })
+
+    it('Should return 404 with an incorrect video', async function () {
+      await server.videos.get({ id: '4da6fde3-88f7-4d16-b119-108df5630b06', expectedStatus: HttpStatusCode.NOT_FOUND_404 })
+    })
+
+    it('SHould return 403 with a private video of another user', async function () {
+      await server.videos.get({ id: privateVideo.uuid, token: userAccessToken, expectedStatus: HttpStatusCode.FORBIDDEN_403 })
+    })
+
+    it('Should report the appropriate error', async function () {
+      const body = await server.videos.get({ id: 'hi', expectedStatus: HttpStatusCode.BAD_REQUEST_400 })
+      const error = body as unknown as PeerTubeProblemDocument
+
+      expect(error.docs).to.equal('https://docs.joinpeertube.org/api-rest-reference.html#operation/getVideo')
+
+      expect(error.type).to.equal('about:blank')
+      expect(error.title).to.equal('Bad Request')
+
+      expect(error.detail).to.equal('Incorrect request parameters: id')
+
+      expect(error.status).to.equal(HttpStatusCode.BAD_REQUEST_400)
+      expect(error['invalid-params'].id).to.exist
+    })
+
+    it('Should succeed with the correct parameters', async function () {
+      await server.videos.get({ id: video.shortUUID })
+      await server.videos.get({ id: privateVideo.uuid, token: editorToken })
+    })
+  })
+
+  describe('When rating a video', function () {
+    let videoId: number
+
+    before(async function () {
+      const { data } = await server.videos.list()
+      videoId = data[0].id
+    })
+
+    it('Should fail without a valid uuid', async function () {
+      const fields = {
+        rating: 'like'
+      }
+      await makePutBodyRequest({ url: server.url, path: path + 'blabla/rate', token: server.accessToken, fields })
+    })
+
+    it('Should fail with an unknown id', async function () {
+      const fields = {
+        rating: 'like'
+      }
+      await makePutBodyRequest({
+        url: server.url,
+        path: path + '4da6fde3-88f7-4d16-b119-108df5630b06/rate',
+        token: server.accessToken,
+        fields,
+        expectedStatus: HttpStatusCode.NOT_FOUND_404
+      })
+    })
+
+    it('Should fail with a wrong rating', async function () {
+      const fields = {
+        rating: 'likes'
+      }
+      await makePutBodyRequest({ url: server.url, path: path + videoId + '/rate', token: server.accessToken, fields })
+    })
+
+    it('Should fail with a private video of another user', async function () {
+      const fields = {
+        rating: 'like'
+      }
+      await makePutBodyRequest({
+        url: server.url,
+        path: path + privateVideo.uuid + '/rate',
+        token: userAccessToken,
+        fields,
+        expectedStatus: HttpStatusCode.FORBIDDEN_403
+      })
+    })
+
+    it('Should succeed with the correct parameters', async function () {
+      const fields = { rating: 'like' }
+
+      for (const id of [ videoId, privateVideo.shortUUID ]) {
+        for (const token of [ server.accessToken, editorToken ]) {
+          await makePutBodyRequest({
+            url: server.url,
+            path: path + id + '/rate',
+            token,
+            fields,
+            expectedStatus: HttpStatusCode.NO_CONTENT_204
+          })
+        }
+      }
+    })
+  })
+
+  describe('When removing a video', function () {
+    it('Should have 404 with nothing', async function () {
+      await makeDeleteRequest({
+        url: server.url,
+        path,
+        expectedStatus: HttpStatusCode.BAD_REQUEST_400
+      })
+    })
+
+    it('Should fail without a correct uuid', async function () {
+      await server.videos.remove({ id: 'hello', expectedStatus: HttpStatusCode.BAD_REQUEST_400 })
+    })
+
+    it('Should fail with a video which does not exist', async function () {
+      await server.videos.remove({ id: '4da6fde3-88f7-4d16-b119-108df5630b06', expectedStatus: HttpStatusCode.NOT_FOUND_404 })
+    })
+
+    it('Should fail with a video of another user without the appropriate right', async function () {
+      await server.videos.remove({ token: userAccessToken, id: video.uuid, expectedStatus: HttpStatusCode.FORBIDDEN_403 })
+    })
+
+    it('Should fail with a video of another server')
+
+    it('Should report the appropriate error', async function () {
+      const body = await server.videos.remove({ id: 'hello', expectedStatus: HttpStatusCode.BAD_REQUEST_400 })
+      const error = body as PeerTubeProblemDocument
+
+      expect(error.docs).to.equal('https://docs.joinpeertube.org/api-rest-reference.html#operation/delVideo')
+
+      expect(error.type).to.equal('about:blank')
+      expect(error.title).to.equal('Bad Request')
+
+      expect(error.detail).to.equal('Incorrect request parameters: id')
+
+      expect(error.status).to.equal(HttpStatusCode.BAD_REQUEST_400)
+      expect(error['invalid-params'].id).to.exist
+    })
+
+    it('Should succeed with the correct parameters', async function () {
+      for (const token of [ server.accessToken, editorToken ]) {
+        await server.videos.remove({ id: video.uuid, token })
+
+        video = await server.videos.quickUpload({ name: 'to delete' })
+      }
+    })
+  })
+
+  after(async function () {
+    await cleanupTests([ server, remoteServer ])
+  })
+})

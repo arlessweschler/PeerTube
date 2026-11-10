@@ -1,0 +1,189 @@
+import { HttpStatusCode, VideoCaptionGenerate, VideoChannelActivityAction } from '@peertube/peertube-models'
+import {
+  auditLog,
+  buildVideoCaptionAuditEntity,
+  buildVideoTranscriptionAuditEntity,
+  getAuditActorFromRes
+} from '@server/lib/audit-log/index.js'
+import { retryTransactionWrapper, runTransaction } from '@server/helpers/database-utils.js'
+import { Hooks } from '@server/lib/plugins/hooks.js'
+import { createTranscriptionTaskIfNeeded } from '@server/lib/transcription/video-transcription.js'
+import { createLocalCaption, updateHLSMasterOnCaptionChangeIfNeeded } from '@server/lib/video-captions.js'
+import { VideoPathManager } from '@server/lib/video-path-manager.js'
+import { VideoChannelActivityModel } from '@server/models/video/video-channel-activity.js'
+import { VideoJobInfoModel } from '@server/models/video/video-job-info.js'
+import { MVideoCaption } from '@server/types/models/index.js'
+import express from 'express'
+import { createReqFiles } from '../../../helpers/express-utils.js'
+import { createLogger } from '../../../helpers/logger.js'
+import { getFormattedObjects } from '../../../helpers/utils.js'
+import { MIMETYPES } from '../../../initializers/constants.js'
+import { scheduleVideoFederation } from '../../../lib/activitypub/videos/index.js'
+import { asyncMiddleware, asyncRetryTransactionMiddleware, authenticate } from '../../../middlewares/index.js'
+import {
+  addVideoCaptionValidator,
+  deleteVideoCaptionValidator,
+  generateVideoCaptionValidator,
+  listVideoCaptionsValidator
+} from '../../../middlewares/validators/index.js'
+import { VideoCaptionModel } from '../../../models/video/video-caption.js'
+
+const logger = createLogger('api', 'caption')
+
+const reqVideoCaptionAdd = createReqFiles([ 'captionfile' ], MIMETYPES.VIDEO_CAPTIONS.MIMETYPE_EXT)
+
+const videoCaptionsRouter = express.Router()
+
+videoCaptionsRouter.post(
+  '/:videoId/captions/generate',
+  authenticate,
+  asyncMiddleware(generateVideoCaptionValidator),
+  asyncMiddleware(createGenerateVideoCaption)
+)
+
+videoCaptionsRouter.get('/:videoId/captions', asyncMiddleware(listVideoCaptionsValidator), asyncMiddleware(listVideoCaptions))
+
+videoCaptionsRouter.put(
+  '/:videoId/captions/:captionLanguage',
+  authenticate,
+  reqVideoCaptionAdd,
+  asyncMiddleware(addVideoCaptionValidator),
+  asyncMiddleware(createVideoCaption)
+)
+
+videoCaptionsRouter.delete(
+  '/:videoId/captions/:captionLanguage',
+  authenticate,
+  asyncMiddleware(deleteVideoCaptionValidator),
+  asyncRetryTransactionMiddleware(deleteVideoCaption)
+)
+
+// ---------------------------------------------------------------------------
+
+export {
+  videoCaptionsRouter
+}
+
+function createGenerateVideoCaption (req: express.Request, res: express.Response) {
+  const video = res.locals.videoWithRights
+
+  return logger.withContext([ video.uuid ], async () => {
+    const body = req.body as VideoCaptionGenerate
+    if (body.forceTranscription === true) {
+      await VideoJobInfoModel.abortAllTasks(video.uuid, 'pendingTranscription')
+    }
+
+    await createTranscriptionTaskIfNeeded(video)
+
+    auditLog.create(
+      getAuditActorFromRes(res),
+      () => buildVideoTranscriptionAuditEntity({ video, forceTranscription: body.forceTranscription === true })
+    )
+
+    return res.sendStatus(HttpStatusCode.NO_CONTENT_204)
+  })
+}
+
+async function listVideoCaptions (req: express.Request, res: express.Response) {
+  const data = await VideoCaptionModel.listVideoCaptions(res.locals.videoWithBlacklist.id)
+
+  return res.json(getFormattedObjects(data, data.length))
+}
+
+function createVideoCaption (req: express.Request, res: express.Response) {
+  const videoCaptionPhysicalFile: Express.Multer.File = req.files['captionfile'][0]
+  const captionPath = videoCaptionPhysicalFile.path
+  const video = res.locals.videoFull
+
+  return logger.withContext([ video.uuid ], async () => {
+    const captionLanguage = req.params.captionLanguage
+
+    // The HLS playlist files of the video are updated
+    const videoFileMutexReleaser = await VideoPathManager.Instance.lockFiles(video.uuid)
+
+    let videoCaption: MVideoCaption
+
+    try {
+      videoCaption = await createLocalCaption({
+        video,
+        language: captionLanguage,
+        path: captionPath,
+        automaticallyGenerated: false
+      })
+
+      if (videoCaption.m3u8Filename) {
+        await updateHLSMasterOnCaptionChangeIfNeeded(video)
+      }
+    } finally {
+      videoFileMutexReleaser()
+    }
+
+    await retryTransactionWrapper(() => {
+      return runTransaction(async t => {
+        await VideoChannelActivityModel.addVideoActivity({
+          action: VideoChannelActivityAction.UPDATE_CAPTIONS,
+          user: res.locals.oauth.token.User,
+          channel: video.VideoChannel,
+          video,
+          transaction: t
+        })
+
+        scheduleVideoFederation({ video, transaction: t })
+      })
+    })
+
+    auditLog.create(getAuditActorFromRes(res), () => buildVideoCaptionAuditEntity({ video, language: captionLanguage }))
+
+    Hooks.runAction('action:api.video-caption.created', { caption: videoCaption, req, res })
+
+    return res.status(HttpStatusCode.NO_CONTENT_204).end()
+  })
+}
+
+async function deleteVideoCaption (req: express.Request, res: express.Response) {
+  const video = res.locals.videoFull
+  const videoCaption = res.locals.videoCaption
+
+  return logger.withContext([ video.uuid ], async () => {
+    const hasM3U8 = !!videoCaption.m3u8Filename
+
+    // The HLS playlist files of the video are updated
+    const videoFileMutexReleaser = await VideoPathManager.Instance.lockFiles(video.uuid)
+
+    try {
+      await runTransaction(async t => {
+        await videoCaption.destroy({ transaction: t })
+
+        auditLog.delete(getAuditActorFromRes(res), () => buildVideoCaptionAuditEntity({ video, language: videoCaption.language }), {
+          transaction: t
+        })
+      })
+
+      if (hasM3U8) {
+        await updateHLSMasterOnCaptionChangeIfNeeded(video)
+      }
+    } finally {
+      videoFileMutexReleaser()
+    }
+
+    await retryTransactionWrapper(() => {
+      return runTransaction(async t => {
+        await VideoChannelActivityModel.addVideoActivity({
+          action: VideoChannelActivityAction.UPDATE_CAPTIONS,
+          user: res.locals.oauth.token.User,
+          channel: video.VideoChannel,
+          video,
+          transaction: t
+        })
+
+        scheduleVideoFederation({ video, transaction: t })
+      })
+    })
+
+    logger.info('Video caption %s of video %s deleted.', videoCaption.language, video.uuid)
+
+    Hooks.runAction('action:api.video-caption.deleted', { caption: videoCaption, req, res })
+
+    return res.type('json').status(HttpStatusCode.NO_CONTENT_204).end()
+  })
+}

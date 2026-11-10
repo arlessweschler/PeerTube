@@ -1,88 +1,67 @@
-import { throwError as observableThrowError } from 'rxjs'
-import { Injectable } from '@angular/core'
+import { HttpHeaderResponse } from '@angular/common/http'
+import { Injectable, LOCALE_ID, inject } from '@angular/core'
 import { Router } from '@angular/router'
-import { dateToHuman } from '@app/helpers'
-import { ResultList } from '@shared/models'
-import { HttpStatusCode } from '@shared/core-utils/miscs/http-error-codes'
+import { DateFormat, dateToHuman } from '@app/helpers'
+import { HttpStatusCode, HttpStatusCodeType, ResultList } from '@peertube/peertube-models'
+import { PeerTubeHTTPError, PeerTubeReconnectError } from '@root-helpers/errors'
+import { throwError as observableThrowError } from 'rxjs'
 
 @Injectable()
 export class RestExtractor {
+  private localeId = inject(LOCALE_ID)
+  private router = inject(Router)
 
-  constructor (private router: Router) { }
-
-  extractDataBool () {
-    return true
-  }
-
-  applyToResultListData <T> (result: ResultList<T>, fun: Function, additionalArgs?: any[]): ResultList<T> {
+  applyToResultListData<T, U> (
+    result: ResultList<T>,
+    fun: (data: T) => U
+  ): ResultList<U> {
     const data: T[] = result.data
-    const newData: T[] = []
-
-    data.forEach(d => newData.push(fun.apply(this, [ d ].concat(additionalArgs))))
 
     return {
       total: result.total,
-      data: newData
+      data: data.map(d => fun(d))
     }
   }
 
-  convertResultListDateToHuman <T> (result: ResultList<T>, fieldsToConvert: string[] = [ 'createdAt' ]): ResultList<T> {
-    return this.applyToResultListData(result, this.convertDateToHuman, [ fieldsToConvert ])
+  convertResultListDateToHuman<T> (
+    result: ResultList<T>,
+    fieldsToConvert: string[] = [ 'createdAt' ],
+    format?: DateFormat
+  ): ResultList<T> {
+    return this.applyToResultListData(result, data => this.convertDateToHuman(data, fieldsToConvert, format))
   }
 
-  convertDateToHuman (target: { [ id: string ]: string }, fieldsToConvert: string[]) {
-    fieldsToConvert.forEach(field => target[field] = dateToHuman(target[field]))
+  convertDateToHuman (target: any, fieldsToConvert: string[], format?: DateFormat) {
+    fieldsToConvert.forEach(field => {
+      if (!target[field]) return
+
+      target[field] = dateToHuman(this.localeId, new Date(target[field]), format)
+    })
 
     return target
   }
 
-  handleError (err: any) {
-    let errorMessage
-
-    if (err.error instanceof Error) {
-      // A client-side or network error occurred. Handle it accordingly.
-      errorMessage = err.error.message
-      console.error('An error occurred:', errorMessage)
-    } else if (typeof err.error === 'string') {
-      errorMessage = err.error
-    } else if (err.status !== undefined) {
-      // A server-side error occurred.
-      if (err.error && err.error.errors) {
-        const errors = err.error.errors
-        const errorsArray: string[] = []
-
-        Object.keys(errors).forEach(key => {
-          errorsArray.push(errors[key].msg)
-        })
-
-        errorMessage = errorsArray.join('. ')
-      } else if (err.error && err.error.error) {
-        errorMessage = err.error.error
-      } else if (err.status === HttpStatusCode.PAYLOAD_TOO_LARGE_413) {
-        errorMessage = $localize`Media is too large for the server. Please contact you administrator if you want to increase the limit size.`
-      } else if (err.status === HttpStatusCode.TOO_MANY_REQUESTS_429) {
-        const secondsLeft = err.headers.get('retry-after')
-        if (secondsLeft) {
-          const minutesLeft = Math.floor(parseInt(secondsLeft, 10) / 60)
-          errorMessage = $localize`Too many attempts, please try again after ${minutesLeft} minutes.`
-        } else {
-          errorMessage = $localize`Too many attempts, please try again later.`
-        }
-      } else if (err.status === HttpStatusCode.INTERNAL_SERVER_ERROR_500) {
-        errorMessage = $localize`Server error. Please retry later.`
-      }
-
-      errorMessage = errorMessage ? errorMessage : 'Unknown error.'
-      console.error(`Backend returned code ${err.status}, errorMessage is: ${errorMessage}`)
-    } else {
-      console.error(err)
-      errorMessage = err
+  redirectTo404IfNotFound (
+    obj: { status: HttpStatusCodeType },
+    type: 'video' | 'other',
+    status: HttpStatusCodeType[] = [ HttpStatusCode.NOT_FOUND_404 ]
+  ) {
+    if (obj?.status && status.includes(obj.status)) {
+      // Do not use redirectService to avoid circular dependencies
+      this.router.navigate([ '/404' ], { state: { type, obj }, skipLocationChange: true })
     }
 
-    const errorObj: { message: string, status: string, body: string } = {
+    return observableThrowError(() => obj)
+  }
+
+  handleError (err: any) {
+    const errorMessage = this.buildErrorMessage(err)
+
+    const errorObj: { message: string, status: string, body: string, headers: HttpHeaderResponse } = {
       message: errorMessage,
       status: undefined,
-      body: undefined
+      body: undefined,
+      headers: err.headers
     }
 
     if (err.status) {
@@ -90,15 +69,66 @@ export class RestExtractor {
       errorObj.body = err.error
     }
 
-    return observableThrowError(errorObj)
+    return observableThrowError(() => {
+      if (err instanceof PeerTubeReconnectError) {
+        return err
+      }
+
+      if (err.status) {
+        return new PeerTubeHTTPError(errorMessage, {
+          status: err.status,
+          body: errorObj.body,
+          headers: errorObj.headers,
+          url: err.url
+        })
+      }
+
+      return err
+    })
   }
 
-  redirectTo404IfNotFound (obj: { status: number }, type: 'video' | 'other', status = [ HttpStatusCode.NOT_FOUND_404 ]) {
-    if (obj && obj.status && status.indexOf(obj.status) !== -1) {
-      // Do not use redirectService to avoid circular dependencies
-      this.router.navigate([ '/404' ], { state: { type, obj }, skipLocationChange: true })
+  private buildErrorMessage (err: any) {
+    if (err.status !== undefined) return this.buildServerErrorMessage(err)
+    if (err.error instanceof Error) return err.error.detail || err.error.title
+    if (typeof err.error === 'string') return err.error
+    if (typeof err === 'string') return err
+
+    return err.message || err.detail || $localize`Unknown error`
+  }
+
+  private buildServerErrorMessage (err: any) {
+    // A server-side error occurred.
+    if (err.error?.errors) {
+      const errors = err.error.errors
+
+      return Object.keys(errors)
+        .map(key => errors[key].msg)
+        .join('. ')
     }
 
-    return observableThrowError(obj)
+    if (err.status === HttpStatusCode.PAYLOAD_TOO_LARGE_413) {
+      return $localize`Media is too large for the server. Please contact you administrator if you want to increase the limit size.`
+    }
+
+    if (err.status === HttpStatusCode.TOO_MANY_REQUESTS_429) {
+      const secondsLeft = err.headers.get('retry-after')
+
+      if (secondsLeft) {
+        const minutesLeft = Math.floor(parseInt(secondsLeft, 10) / 60)
+        return $localize`Too many attempts, please try again after ${minutesLeft} minutes.`
+      }
+
+      return $localize`Too many attempts, please try again later.`
+    }
+
+    if (err.status === HttpStatusCode.INTERNAL_SERVER_ERROR_500) {
+      return $localize`Server error. Please retry later.`
+    }
+
+    if (err.status === HttpStatusCode.BAD_GATEWAY_502) {
+      return $localize`Server is unavailable. Please retry later.`
+    }
+
+    return err.error?.error || err.error?.detail || err.error?.title || $localize`Unknown server error`
   }
 }

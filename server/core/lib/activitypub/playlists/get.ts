@@ -1,0 +1,39 @@
+import { createLogger } from '@server/helpers/logger.js'
+import { VideoPlaylistModel } from '@server/models/video/video-playlist.js'
+import { MVideoPlaylistFullSummary } from '@server/types/models/index.js'
+import { getAPId } from '../activity.js'
+import { createOrUpdateVideoPlaylist } from './create-update.js'
+import { schedulePlaylistRefreshIfNeeded } from './refresh.js'
+import { fetchRemoteVideoPlaylist } from './shared/index.js'
+
+const logger = createLogger('ap', 'playlist')
+
+export function getOrCreateAPVideoPlaylist (playlistUrl: string): Promise<MVideoPlaylistFullSummary> {
+  return getOrCreateAPVideoPlaylistInternal(playlistUrl, false)
+}
+
+function getOrCreateAPVideoPlaylistInternal (playlistUrl: string, idRedirected: boolean): Promise<MVideoPlaylistFullSummary> {
+  return logger.withContext([ playlistUrl ], async () => {
+    const playlistFromDatabase = await VideoPlaylistModel.loadByUrlWithAccountAndChannelSummary(playlistUrl)
+
+    if (playlistFromDatabase) {
+      schedulePlaylistRefreshIfNeeded(playlistFromDatabase)
+
+      return playlistFromDatabase
+    }
+
+    const { playlistObject } = await fetchRemoteVideoPlaylist(playlistUrl)
+    if (!playlistObject) throw new Error('Cannot fetch remote playlist with url: ' + playlistUrl)
+
+    // playlistUrl is just an alias/redirection, so process object id instead
+    if (playlistObject.id !== playlistUrl) {
+      if (idRedirected) throw new Error('Too many id redirections when fetching remote playlist with url: ' + playlistUrl)
+
+      return getOrCreateAPVideoPlaylistInternal(getAPId(playlistObject), true)
+    }
+
+    const playlistCreated = await createOrUpdateVideoPlaylist({ playlistObject, contextUrl: playlistUrl })
+
+    return playlistCreated
+  })
+}

@@ -1,48 +1,37 @@
-import { omit } from 'lodash-es'
-import { SortMeta } from 'primeng/api'
-import { Observable } from 'rxjs'
-import { catchError, map } from 'rxjs/operators'
 import { HttpClient, HttpParams } from '@angular/common/http'
-import { Injectable } from '@angular/core'
+import { Injectable, inject } from '@angular/core'
 import { RestExtractor, RestPagination, RestService } from '@app/core'
 import {
   AbuseCreate,
   AbuseFilter,
   AbuseMessage,
   AbusePredefinedReasonsString,
-  AbuseState,
+  AbuseStateType,
   AbuseUpdate,
   AdminAbuse,
   ResultList,
   UserAbuse
-} from '@shared/models'
+} from '@peertube/peertube-models'
+import { arrayify } from '@peertube/peertube-core-utils'
+import { omit } from 'lodash-es'
+import { SortMeta } from 'primeng/api'
+import { VideoPasswordService } from '../shared-main/video/video-password.service'
+import { Observable, from } from 'rxjs'
+import { catchError, concatMap, toArray } from 'rxjs/operators'
 import { environment } from '../../../environments/environment'
 
 @Injectable()
 export class AbuseService {
+  private authHttp = inject(HttpClient)
+  private restService = inject(RestService)
+  private restExtractor = inject(RestExtractor)
+
   private static BASE_ABUSE_URL = environment.apiUrl + '/api/v1/abuses'
   private static BASE_MY_ABUSE_URL = environment.apiUrl + '/api/v1/users/me/abuses'
 
-  constructor (
-    private authHttp: HttpClient,
-    private restService: RestService,
-    private restExtractor: RestExtractor
-  ) { }
-
-  getAdminAbuses (options: {
-    pagination: RestPagination,
-    sort: SortMeta,
-    search?: string
-  }): Observable<ResultList<AdminAbuse>> {
-    const { pagination, sort, search } = options
+  listAdminAbuses (options: Parameters<AbuseService['buildCommonAbuseParams']>[0]): Observable<ResultList<AdminAbuse>> {
     const url = AbuseService.BASE_ABUSE_URL
-
-    let params = new HttpParams()
-    params = this.restService.addRestGetParams(params, pagination, sort)
-
-    if (search) {
-      params = this.buildParamsFromSearch(search, params)
-    }
+    const params = this.buildCommonAbuseParams(options)
 
     return this.authHttp.get<ResultList<AdminAbuse>>(url, { params })
       .pipe(
@@ -50,20 +39,9 @@ export class AbuseService {
       )
   }
 
-  getUserAbuses (options: {
-    pagination: RestPagination,
-    sort: SortMeta,
-    search?: string
-  }): Observable<ResultList<UserAbuse>> {
-    const { pagination, sort, search } = options
+  listUserAbuses (options: Parameters<AbuseService['buildCommonAbuseParams']>[0]): Observable<ResultList<UserAbuse>> {
     const url = AbuseService.BASE_MY_ABUSE_URL
-
-    let params = new HttpParams()
-    params = this.restService.addRestGetParams(params, pagination, sort)
-
-    if (search) {
-      params = this.buildParamsFromSearch(search, params)
-    }
+    const params = this.buildCommonAbuseParams(options)
 
     return this.authHttp.get<ResultList<UserAbuse>>(url, { params })
       .pipe(
@@ -71,34 +49,63 @@ export class AbuseService {
       )
   }
 
-  reportVideo (parameters: AbuseCreate) {
+  private buildCommonAbuseParams (options: {
+    pagination: RestPagination
+    sort: SortMeta
+    videoIs?: 'deleted' | 'blacklisted'
+    state?: AbuseStateType
+    search?: string
+    id?: number
+    searchReporter?: string
+    searchReportee?: string
+    predefinedReason?: AbusePredefinedReasonsString
+  }) {
+    const { pagination, sort, search, videoIs, state, id, searchReporter, searchReportee, predefinedReason } = options
+
+    let params = new HttpParams()
+    params = this.restService.addRestGetParams(params, pagination, sort)
+
+    if (search) params = params.append('search', search)
+    if (videoIs) params = params.append('videoIs', videoIs)
+    if (state) params = params.append('state', state.toString())
+    if (options.id) params = params.append('id', id.toString())
+    if (searchReporter) params = params.append('searchReporter', searchReporter)
+    if (searchReportee) params = params.append('searchReportee', searchReportee)
+    if (predefinedReason) params = params.append('predefinedReason', predefinedReason)
+
+    return params
+  }
+
+  // ---------------------------------------------------------------------------
+
+  reportVideo (parameters: AbuseCreate, options: { videoPassword?: string } = {}) {
     const url = AbuseService.BASE_ABUSE_URL
 
-    const body = omit(parameters, ['id'])
+    const body = omit(parameters, [ 'id' ])
+    const headers = VideoPasswordService.buildVideoPasswordHeader(options.videoPassword)
 
-    return this.authHttp.post(url, body)
+    return this.authHttp.post(url, body, { headers })
+      .pipe(catchError(res => this.restExtractor.handleError(res)))
+  }
+
+  updateAbuse (abuseArg: AdminAbuse | AdminAbuse[], abuseUpdate: AbuseUpdate) {
+    const abuses = arrayify(abuseArg)
+
+    return from(abuses)
       .pipe(
-        map(this.restExtractor.extractDataBool),
+        concatMap(abuse => this.authHttp.put(AbuseService.BASE_ABUSE_URL + '/' + abuse.id, abuseUpdate)),
+        toArray(),
         catchError(res => this.restExtractor.handleError(res))
       )
   }
 
-  updateAbuse (abuse: AdminAbuse, abuseUpdate: AbuseUpdate) {
-    const url = AbuseService.BASE_ABUSE_URL + '/' + abuse.id
+  removeAbuse (abuseArg: AdminAbuse | AdminAbuse[]) {
+    const abuses = arrayify(abuseArg)
 
-    return this.authHttp.put(url, abuseUpdate)
+    return from(abuses)
       .pipe(
-        map(this.restExtractor.extractDataBool),
-        catchError(res => this.restExtractor.handleError(res))
-      )
-  }
-
-  removeAbuse (abuse: AdminAbuse) {
-    const url = AbuseService.BASE_ABUSE_URL + '/' + abuse.id
-
-    return this.authHttp.delete(url)
-      .pipe(
-        map(this.restExtractor.extractDataBool),
+        concatMap(abuse => this.authHttp.delete(AbuseService.BASE_ABUSE_URL + '/' + abuse.id)),
+        toArray(),
         catchError(res => this.restExtractor.handleError(res))
       )
   }
@@ -107,32 +114,26 @@ export class AbuseService {
     const url = AbuseService.BASE_ABUSE_URL + '/' + abuse.id + '/messages'
 
     return this.authHttp.post(url, { message })
-    .pipe(
-      map(this.restExtractor.extractDataBool),
-      catchError(res => this.restExtractor.handleError(res))
-    )
+      .pipe(catchError(res => this.restExtractor.handleError(res)))
   }
 
   listAbuseMessages (abuse: UserAbuse) {
     const url = AbuseService.BASE_ABUSE_URL + '/' + abuse.id + '/messages'
 
     return this.authHttp.get<ResultList<AbuseMessage>>(url)
-    .pipe(
-      catchError(res => this.restExtractor.handleError(res))
-    )
+      .pipe(
+        catchError(res => this.restExtractor.handleError(res))
+      )
   }
 
   deleteAbuseMessage (abuse: UserAbuse, abuseMessage: AbuseMessage) {
     const url = AbuseService.BASE_ABUSE_URL + '/' + abuse.id + '/messages/' + abuseMessage.id
 
     return this.authHttp.delete(url)
-    .pipe(
-      map(this.restExtractor.extractDataBool),
-      catchError(res => this.restExtractor.handleError(res))
-    )
+      .pipe(catchError(res => this.restExtractor.handleError(res)))
   }
 
-  getPrefefinedReasons (type: AbuseFilter) {
+  getPredefinedReasons (type: AbuseFilter | 'all') {
     let reasons: { id: AbusePredefinedReasonsString, label: string, description?: string, help?: string }[] = [
       {
         id: 'violentOrRepulsive',
@@ -147,12 +148,16 @@ export class AbuseService {
       {
         id: 'spamOrMisleading',
         label: $localize`Spam, ad or false news`,
-        help: $localize`Contains marketing, spam, purposefully deceitful news, or otherwise misleading thumbnail/text/tags. Please provide reputable sources to report hoaxes.`
+        help:
+          // eslint-disable-next-line max-len
+          $localize`Contains marketing, spam, purposefully deceitful news, or otherwise misleading thumbnail/text/tags. Please provide reputable sources to report hoaxes.`
       },
       {
         id: 'privacy',
         label: $localize`Privacy breach or doxxing`,
-        help: $localize`Contains personal information that could be used to track, identify, contact or impersonate someone (e.g. name, address, phone number, email, or credit card details).`
+        help:
+          // eslint-disable-next-line max-len
+          $localize`Contains personal information that could be used to track, identify, contact or impersonate someone (e.g. name, address, phone number, email, or credit card details).`
       },
       {
         id: 'rights',
@@ -162,11 +167,13 @@ export class AbuseService {
       {
         id: 'serverRules',
         label: $localize`Breaks server rules`,
-        description: $localize`Anything not included in the above that breaks the terms of service, code of conduct, or general rules in place on the server.`
+        help:
+          // eslint-disable-next-line max-len
+          $localize`Anything not included in the above that breaks the terms of service, code of conduct, or general rules in place on the server.`
       }
     ]
 
-    if (type === 'video') {
+    if (type === 'video' || type === 'all') {
       reasons = reasons.concat([
         {
           id: 'thumbnails',
@@ -182,35 +189,5 @@ export class AbuseService {
     }
 
     return reasons
-  }
-
-  private buildParamsFromSearch (search: string, params: HttpParams) {
-    const filters = this.restService.parseQueryStringFilter(search, {
-      id: { prefix: '#' },
-      state: {
-        prefix: 'state:',
-        handler: v => {
-          if (v === 'accepted') return AbuseState.ACCEPTED
-          if (v === 'pending') return AbuseState.PENDING
-          if (v === 'rejected') return AbuseState.REJECTED
-
-          return undefined
-        }
-      },
-      videoIs: {
-        prefix: 'videoIs:',
-        handler: v => {
-          if (v === 'deleted') return v
-          if (v === 'blacklisted') return v
-
-          return undefined
-        }
-      },
-      searchReporter: { prefix: 'reporter:' },
-      searchReportee: { prefix: 'reportee:' },
-      predefinedReason: { prefix: 'tag:' }
-    })
-
-    return this.restService.addObjectParams(params, filters)
   }
 }

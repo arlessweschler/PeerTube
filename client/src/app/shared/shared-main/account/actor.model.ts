@@ -1,5 +1,5 @@
-import { getAbsoluteAPIUrl } from '@app/helpers'
-import { Actor as ServerActor, ActorImage } from '@shared/models'
+import { getBackendHost } from '@app/helpers'
+import { ActorImage, Actor as ServerActor } from '@peertube/peertube-models'
 
 export abstract class Actor implements ServerActor {
   id: number
@@ -13,25 +13,12 @@ export abstract class Actor implements ServerActor {
 
   createdAt: Date | string
 
-  avatar: ActorImage
+  avatars: ActorImage[]
 
   isLocal: boolean
 
-  static GET_ACTOR_AVATAR_URL (actor: { avatar?: { url?: string, path: string } }) {
-    if (actor?.avatar?.url) return actor.avatar.url
-
-    if (actor && actor.avatar) {
-      const absoluteAPIUrl = getAbsoluteAPIUrl()
-
-      return absoluteAPIUrl + actor.avatar.path
-    }
-
-    return ''
-  }
-
   static CREATE_BY_STRING (accountName: string, host: string, forceHostname = false) {
-    const absoluteAPIUrl = getAbsoluteAPIUrl()
-    const thisHost = new URL(absoluteAPIUrl).host
+    const thisHost = getBackendHost()
 
     if (host.trim() === thisHost && !forceHostname) return accountName
 
@@ -39,8 +26,7 @@ export abstract class Actor implements ServerActor {
   }
 
   static IS_LOCAL (host: string) {
-    const absoluteAPIUrl = getAbsoluteAPIUrl()
-    const thisHost = new URL(absoluteAPIUrl).host
+    const thisHost = getBackendHost()
 
     return host.trim() === thisHost
   }
@@ -55,7 +41,7 @@ export abstract class Actor implements ServerActor {
 
     if (hash.createdAt) this.createdAt = new Date(hash.createdAt.toString())
 
-    this.avatar = hash.avatar
+    this.avatars = hash.avatars || []
     this.isLocal = Actor.IS_LOCAL(this.host)
   }
 }

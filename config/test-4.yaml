@@ -2,7 +2,6 @@ listen:
   port: 9004
 
 webserver:
-  hostname: 'localhost'
   port: 9004
 
 database:
@@ -11,21 +10,30 @@ database:
 # From the project root directory
 storage:
   tmp: 'test4/tmp/'
+  tmp_persistent: 'test4/tmp-persistent/'
+  bin: 'test4/bin/'
   avatars: 'test4/avatars/'
-  videos: 'test4/videos/'
+  web_videos: 'test4/web-videos/'
   streaming_playlists: 'test4/streaming-playlists/'
+  original_video_files: 'test4/original-video-files/'
   redundancy: 'test4/redundancy/'
   logs: 'test4/logs/'
   previews: 'test4/previews/'
   thumbnails: 'test4/thumbnails/'
+  storyboards: 'test4/storyboards/'
   torrents: 'test4/torrents/'
   captions: 'test4/captions/'
   cache: 'test4/cache/'
   plugins: 'test4/plugins/'
+  well_known: 'test4/well-known/'
+  uploads: 'test4/uploads/'
   client_overrides: 'test4/client-overrides/'
 
 admin:
   email: 'admin4@example.com'
 
 transcoding:
+  enabled: false
+
+video_studio:
   enabled: false

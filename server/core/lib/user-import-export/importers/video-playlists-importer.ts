@@ -1,0 +1,191 @@
+import { pick } from '@peertube/peertube-core-utils'
+import { VideoPlaylistPrivacy, VideoPlaylistType, VideoPlaylistsExportJSON } from '@peertube/peertube-models'
+import { buildUUID } from '@peertube/peertube-node-utils'
+import { isActorPreferredUsernameValid } from '@server/helpers/custom-validators/activitypub/actor.js'
+import { isArray } from '@server/helpers/custom-validators/misc.js'
+import { isUrlValid } from '@server/helpers/custom-validators/urls.js'
+import {
+  isVideoPlaylistDescriptionValid,
+  isVideoPlaylistNameValid,
+  isVideoPlaylistPrivacyValid,
+  isVideoPlaylistTimestampValid,
+  isVideoPlaylistTypeValid
+} from '@server/helpers/custom-validators/video-playlists.js'
+import { runTransaction, saveInTransactionWithRetries } from '@server/helpers/database-utils.js'
+import { createLogger } from '@server/helpers/logger.js'
+import { CONSTRAINTS_FIELDS, USER_IMPORT } from '@server/initializers/constants.js'
+import { sendCreateVideoPlaylist } from '@server/lib/activitypub/send/send-create.js'
+import { getLocalVideoPlaylistActivityPubUrl, getLocalVideoPlaylistElementActivityPubUrl } from '@server/lib/activitypub/url.js'
+import { loadOrCreateVideoIfAllowedForUser } from '@server/lib/model-loaders/video.js'
+import { createLocalPlaylistThumbnailsFromImage } from '@server/lib/thumbnail.js'
+import { generateThumbnailForPlaylistIfNeeded } from '@server/lib/video-playlist.js'
+import { VideoChannelModel } from '@server/models/video/video-channel.js'
+import { VideoPlaylistElementModel } from '@server/models/video/video-playlist-element.js'
+import { VideoPlaylistModel } from '@server/models/video/video-playlist.js'
+import { VideoModel } from '@server/models/video/video.js'
+import { MChannelBannerAccountDefault, MVideoPlaylistFull, MVideoPlaylistThumbnail } from '@server/types/models/index.js'
+import { AbstractUserImporter } from './abstract-user-importer.js'
+
+const logger = createLogger()
+
+type ImportObject = VideoPlaylistsExportJSON['videoPlaylists'][0]
+type SanitizedObject = Pick<ImportObject, 'type' | 'displayName' | 'privacy' | 'elements' | 'description' | 'channel' | 'archiveFiles'>
+
+export class VideoPlaylistsImporter extends AbstractUserImporter<VideoPlaylistsExportJSON, ImportObject, SanitizedObject> {
+  protected getImportObjects (json: VideoPlaylistsExportJSON) {
+    return json.videoPlaylists
+  }
+
+  protected sanitize (o: ImportObject) {
+    if (!isVideoPlaylistTypeValid(o.type)) return undefined
+    if (!isVideoPlaylistNameValid(o.displayName)) return undefined
+    if (!isVideoPlaylistPrivacyValid(o.privacy)) return undefined
+    if (!isArray(o.elements)) return undefined
+
+    if (o.channel?.name && !isActorPreferredUsernameValid(o.channel.name)) o.channel = undefined
+    if (!isVideoPlaylistDescriptionValid(o.description)) o.description = undefined
+
+    o.elements = o.elements.filter(e => {
+      if (!isUrlValid(e.videoUrl)) return false
+      if (e.startTimestamp && !isVideoPlaylistTimestampValid(e.startTimestamp)) return false
+      if (e.stopTimestamp && !isVideoPlaylistTimestampValid(e.stopTimestamp)) return false
+
+      return true
+    })
+
+    return pick(o, [ 'type', 'displayName', 'privacy', 'elements', 'channel', 'description', 'archiveFiles' ])
+  }
+
+  protected async importObject (playlistImportData: SanitizedObject) {
+    const existingPlaylist = await VideoPlaylistModel.loadRegularByAccountAndName(this.user.Account, playlistImportData.displayName)
+
+    if (existingPlaylist) {
+      logger.info(`Do not import playlist ${playlistImportData.displayName} that already exists in the account`)
+      return { duplicate: true }
+    }
+
+    const videoPlaylist = playlistImportData.type === VideoPlaylistType.WATCH_LATER
+      ? await this.getWatchLaterPlaylist()
+      : await this.createPlaylist(playlistImportData)
+
+    await this.createElements(videoPlaylist, playlistImportData)
+
+    await sendCreateVideoPlaylist(videoPlaylist, undefined)
+
+    logger.info('Video playlist %s imported.', videoPlaylist.name, { tags: videoPlaylist.uuid })
+
+    return { duplicate: false }
+  }
+
+  private async createPlaylist (playlistImportData: SanitizedObject) {
+    let videoChannel: MChannelBannerAccountDefault
+
+    if (playlistImportData.channel.name) {
+      videoChannel = await VideoChannelModel.loadLocalByNameAndPopulateAccount(playlistImportData.channel.name)
+
+      if (!videoChannel) throw new Error(`Channel ${playlistImportData} not found`)
+      if (videoChannel.accountId !== this.user.Account.id) {
+        throw new Error(`Channel ${videoChannel.name} is not owned by user ${this.user.username}`)
+      }
+    } else if (playlistImportData.privacy !== VideoPlaylistPrivacy.PRIVATE) {
+      throw new Error('Cannot create a non private playlist without channel')
+    }
+
+    const playlist: MVideoPlaylistFull = new VideoPlaylistModel({
+      name: playlistImportData.displayName,
+      description: playlistImportData.description,
+      privacy: playlistImportData.privacy,
+
+      uuid: buildUUID(),
+      videoChannelId: videoChannel?.id,
+      ownerAccountId: this.user.Account.id
+    })
+    playlist.url = getLocalVideoPlaylistActivityPubUrl(playlist)
+    playlist.VideoChannel = videoChannel
+    playlist.OwnerAccount = this.user.Account
+
+    await saveInTransactionWithRetries(playlist)
+
+    await this.createThumbnail(playlist, playlistImportData)
+
+    return playlist
+  }
+
+  private async getWatchLaterPlaylist () {
+    return VideoPlaylistModel.loadWatchLaterOf(this.user.Account)
+  }
+
+  private async createThumbnail (playlist: MVideoPlaylistThumbnail, playlistImportData: SanitizedObject) {
+    const thumbnailPath = this.getSafeArchivePathOrThrow(playlistImportData.archiveFiles.thumbnail)
+    if (!thumbnailPath) return undefined
+
+    if (!await this.isFileValidOrLog(thumbnailPath, CONSTRAINTS_FIELDS.VIDEO_PLAYLISTS.IMAGE.FILE_SIZE.max)) return undefined
+
+    const thumbnails = await createLocalPlaylistThumbnailsFromImage({
+      inputPath: thumbnailPath,
+      playlist,
+      automaticallyGenerated: false
+    })
+
+    await playlist.replaceAndSaveThumbnails(thumbnails, undefined)
+  }
+
+  private async createElements (playlist: MVideoPlaylistThumbnail, playlistImportData: SanitizedObject) {
+    const elementsToCreate: { videoId: number, startTimestamp: number, stopTimestamp: number }[] = []
+
+    for (const element of playlistImportData.elements.slice(0, USER_IMPORT.MAX_PLAYLIST_ELEMENTS)) {
+      const video = await loadOrCreateVideoIfAllowedForUser(element.videoUrl)
+
+      if (!video) {
+        logger.debug(`Cannot get or create video ${element.videoUrl} to create playlist element in user import`)
+        continue
+      }
+
+      elementsToCreate.push({
+        videoId: video.id,
+        startTimestamp: element.startTimestamp,
+        stopTimestamp: element.stopTimestamp
+      })
+    }
+
+    const createdElements = await runTransaction(async t => {
+      let position = await VideoPlaylistElementModel.getNextPositionOf(playlist.id, t)
+      const createdElements: VideoPlaylistElementModel[] = []
+
+      for (const elementToCreate of elementsToCreate) {
+        const playlistElement = new VideoPlaylistElementModel({
+          position,
+          startTimestamp: elementToCreate.startTimestamp,
+          stopTimestamp: elementToCreate.stopTimestamp,
+          videoPlaylistId: playlist.id,
+          videoId: elementToCreate.videoId
+        })
+        await playlistElement.save({ transaction: t })
+
+        playlistElement.url = getLocalVideoPlaylistElementActivityPubUrl(playlist, playlistElement)
+        await playlistElement.save({ transaction: t })
+
+        createdElements.push(playlistElement)
+
+        position++
+      }
+
+      return createdElements
+    })
+
+    // Generate the playlist thumbnail outside of the transaction, from the first element that has one
+    await playlist.reloadThumbnails()
+
+    for (const element of createdElements) {
+      if (playlist.hasThumbnail()) break
+
+      const video = await VideoModel.loadFull(element.videoId)
+
+      try {
+        await generateThumbnailForPlaylistIfNeeded({ videoPlaylist: playlist, element, video })
+      } catch (err) {
+        logger.error('Cannot generate thumbnail of playlist', { err })
+      }
+    }
+  }
+}

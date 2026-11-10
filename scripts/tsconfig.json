@@ -1,0 +1,16 @@
+{
+  "extends": "../tsconfig.base.json",
+  "compilerOptions": {
+    "outDir": "../dist/scripts",
+    "paths": {
+      "@server/*": [ "../server/core/*" ]
+    }
+  },
+  "references": [
+    { "path": "../packages/core-utils" },
+    { "path": "../packages/models" },
+    { "path": "../packages/node-utils" },
+    { "path": "../packages/server-commands" },
+    { "path": "../server" }
+  ]
+}

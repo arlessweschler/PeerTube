@@ -1,0 +1,89 @@
+import { getAuditSystemActor } from '@server/lib/audit-log/index.js'
+import { VideoPrivacy, VideoPrivacyType, VideoState } from '@peertube/peertube-models'
+import { VideoModel } from '@server/models/video/video.js'
+import { MScheduleVideoUpdate } from '@server/types/models/index.js'
+import { createLogger } from '../../helpers/logger.js'
+import { SCHEDULER_INTERVALS_MS } from '../../initializers/constants.js'
+import { ScheduleVideoUpdateModel } from '../../models/video/schedule-video-update.js'
+import { LocalVideoUpdater } from '../local-video-updater.js'
+import { Notifier } from '../notifier/index.js'
+import { AbstractScheduler } from './abstract-scheduler.js'
+
+const logger = createLogger('schedulers', 'update-videos')
+
+export class UpdateVideosScheduler extends AbstractScheduler {
+  private static instance: AbstractScheduler
+
+  protected schedulerIntervalMs = SCHEDULER_INTERVALS_MS.UPDATE_VIDEOS
+
+  private constructor () {
+    super({ randomRunOnEnable: false })
+  }
+
+  protected async internalExecute () {
+    return this.updateVideos()
+  }
+
+  private async updateVideos () {
+    logger.debug('Running update videos scheduler')
+
+    if (!await ScheduleVideoUpdateModel.areVideosToUpdate()) return undefined
+
+    const schedules = await ScheduleVideoUpdateModel.listVideosToUpdate()
+
+    for (const schedule of schedules) {
+      const videoOnly = await VideoModel.load(schedule.videoId)
+      if (!videoOnly) continue
+
+      await logger.withContext([ videoOnly.uuid ], async () => {
+        try {
+          const { video, published } = await this.updateAVideo(schedule)
+
+          if (published) Notifier.Instance.notifyOnVideoPublishedAfterScheduledUpdate(video)
+        } catch (err) {
+          logger.error('Cannot update video ' + videoOnly.uuid, { err })
+        }
+      })
+    }
+  }
+
+  private async updateAVideo (schedule: MScheduleVideoUpdate) {
+    let oldPrivacy: VideoPrivacyType
+    let published = false
+
+    let video = await VideoModel.loadFull(schedule.videoId)
+    // Wait for the end of the processing of the video
+    if (video.state === VideoState.TO_TRANSCODE || video.state === VideoState.TO_EDIT || video.state === VideoState.TO_DUPLICATE) {
+      return { video, published: false }
+    }
+
+    if (video.state === VideoState.TO_DUPLICATE_FAILED || video.state === VideoState.TO_EDIT_FAILED) {
+      logger.info('Remove scheduled update of video whose creation failed ' + video.uuid)
+
+      await schedule.destroy()
+      return { video, published: false }
+    }
+
+    logger.info('Executing scheduled video update on ' + video.uuid)
+
+    if (schedule.privacy) {
+      oldPrivacy = video.privacy
+
+      const updater = new LocalVideoUpdater({ user: null, video, auditActor: getAuditSystemActor() })
+
+      video = await updater.update({ privacy: schedule.privacy })
+
+      if (oldPrivacy === VideoPrivacy.PRIVATE) {
+        published = true
+      }
+    }
+
+    await schedule.destroy()
+
+    return { video, published }
+  }
+
+  static get Instance () {
+    return this.instance || (this.instance = new this())
+  }
+}

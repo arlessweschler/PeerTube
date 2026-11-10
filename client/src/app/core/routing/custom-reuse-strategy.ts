@@ -1,8 +1,15 @@
+import { ComponentRef, inject, Injectable } from '@angular/core'
 import { ActivatedRouteSnapshot, DetachedRouteHandle, RouteReuseStrategy } from '@angular/router'
-import { Injectable } from '@angular/core'
+import debug from 'debug'
+import { DisableForReuseHook } from './disable-for-reuse-hook'
+import { RouterStatusService } from './router-status.service'
+
+const debugLogger = debug('peertube:router:CustomReuseStrategy')
 
 @Injectable()
 export class CustomReuseStrategy implements RouteReuseStrategy {
+  private routerStatus = inject(RouterStatusService)
+
   storedRouteHandles = new Map<string, DetachedRouteHandle>()
   recentlyUsed: string
 
@@ -20,9 +27,11 @@ export class CustomReuseStrategy implements RouteReuseStrategy {
     const key = this.generateKey(route)
     this.recentlyUsed = key
 
-    console.log('Storing component %s to reuse later.', key);
+    debugLogger(`Storing component ${key} to reuse later.`)
 
-    (handle as any).componentRef.instance.disableForReuse()
+    const componentRef = (handle as any).componentRef as ComponentRef<DisableForReuseHook>
+    componentRef.instance.disableForReuse()
+    componentRef.changeDetectorRef.detectChanges()
 
     this.storedRouteHandles.set(key, handle)
 
@@ -32,7 +41,13 @@ export class CustomReuseStrategy implements RouteReuseStrategy {
   // Return true if we have a stored route object for the next route
   shouldAttach (route: ActivatedRouteSnapshot): boolean {
     const key = this.generateKey(route)
-    return this.isReuseEnabled(route) && this.storedRouteHandles.has(key)
+    const isNavigatingBack = this.routerStatus.isNavigatingBack
+
+    const should = !!key && isNavigatingBack === true && this.isReuseEnabled(route) && this.storedRouteHandles.has(key)
+
+    if (key) debugLogger(`Should attach ${key}? Answer: ${should}`, { isNavigatingBack })
+
+    return should
   }
 
   // If we returned true in shouldAttach(), now return the actual route data for restoration
@@ -42,19 +57,26 @@ export class CustomReuseStrategy implements RouteReuseStrategy {
     const key = this.generateKey(route)
     this.recentlyUsed = key
 
-    console.log('Reusing component %s.', key)
+    debugLogger(`Reusing component ${key}.`)
 
     const handle = this.storedRouteHandles.get(key)
-    if (!handle) return handle;
-
-    (handle as any).componentRef.instance.enabledForReuse()
+    if (!handle) return handle
+    ;(handle as any).componentRef.instance.enabledForReuse()
 
     return handle
   }
 
   // Reuse the route if we're going to and from the same route
   shouldReuseRoute (future: ActivatedRouteSnapshot, curr: ActivatedRouteSnapshot): boolean {
-    return future.routeConfig === curr.routeConfig
+    if (future.routeConfig !== curr.routeConfig) return false
+
+    const data = future.routeConfig?.data
+    if (data?.reloadOnSameNavigation === true) return false
+
+    // Rebuild the component when it is displayed for another object (e.g. another video to manage)
+    if (data?.reloadOnParamsChange === true && JSON.stringify(future.params) !== JSON.stringify(curr.params)) return false
+
+    return true
   }
 
   private gb () {
@@ -62,9 +84,8 @@ export class CustomReuseStrategy implements RouteReuseStrategy {
       this.storedRouteHandles.forEach((r, key) => {
         if (key === this.recentlyUsed) return
 
-        console.log('Removing stored component %s.', key);
-
-        (r as any).componentRef.destroy()
+        debugLogger(`Removing stored component ${key}`)
+        ;(r as any).componentRef.destroy()
         this.storedRouteHandles.delete(key)
       })
     }
@@ -78,6 +99,7 @@ export class CustomReuseStrategy implements RouteReuseStrategy {
   }
 
   private isReuseEnabled (route: ActivatedRouteSnapshot) {
-    return route.data.reuse && route.data.reuse.enabled && route.queryParams[ 'a-state' ]
+    // Cannot use peertube router here because of cyclic router dependency
+    return route.data.reuse?.enabled
   }
 }

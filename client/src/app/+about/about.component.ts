@@ -1,17 +1,62 @@
-import { Component } from '@angular/core'
-import { ScreenService } from '@app/core'
+import { ChangeDetectionStrategy, Component, OnInit, inject, viewChild } from '@angular/core'
+import { RouterOutlet } from '@angular/router'
+import { ServerService } from '@app/core'
+import { GlobalIconComponent } from '@app/shared/shared-icons/global-icon.component'
+import { ButtonComponent } from '@app/shared/shared-main/buttons/button.component'
+import { HorizontalMenuComponent, HorizontalMenuEntry } from '@app/shared/shared-main/menu/horizontal-menu.component'
+import { SupportModalComponent } from '@app/shared/shared-support-modal/support-modal.component'
+import { maxBy } from '@peertube/peertube-core-utils'
+import { HTMLServerConfig } from '@peertube/peertube-models'
+import { findAppropriateImageFileUrl } from '@root-helpers/images'
 
 @Component({
   selector: 'my-about',
-  templateUrl: './about.component.html'
+  templateUrl: './about.component.html',
+  styleUrls: [ './about.component.scss' ],
+  changeDetection: ChangeDetectionStrategy.Eager,
+  imports: [ RouterOutlet, HorizontalMenuComponent, GlobalIconComponent, ButtonComponent ]
 })
+export class AboutComponent implements OnInit {
+  private server = inject(ServerService)
 
-export class AboutComponent {
-  constructor (
-    private screenService: ScreenService
-  ) { }
+  readonly supportModal = viewChild<SupportModalComponent>('supportModal')
 
-  get isBroadcastMessageDisplayed () {
-    return this.screenService.isBroadcastMessageDisplayed
+  bannerUrl: string
+  avatarUrl: string
+
+  menuEntries: HorizontalMenuEntry[] = []
+
+  config: HTMLServerConfig
+
+  ngOnInit () {
+    this.config = this.server.getHTMLConfig()
+
+    this.bannerUrl = this.config.instance.banners.length !== 0
+      ? maxBy(this.config.instance.banners, 'width').fileUrl
+      : undefined
+
+    this.avatarUrl = findAppropriateImageFileUrl(this.config.instance.avatars, 110)
+
+    this.menuEntries = [
+      {
+        label: $localize`Platform`,
+        routerLink: '/about/instance',
+        pluginSelectorId: 'about-menu-instance'
+      },
+      {
+        label: $localize`PeerTube`,
+        routerLink: '/about/peertube',
+        pluginSelectorId: 'about-menu-peertube'
+      },
+      {
+        label: $localize`Network`,
+        routerLink: '/about/follows',
+        pluginSelectorId: 'about-menu-network'
+      }
+    ]
+  }
+
+  isContactFormEnabled () {
+    return this.config.email.enabled && this.config.contactForm.enabled
   }
 }

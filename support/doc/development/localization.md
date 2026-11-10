@@ -1,6 +1,6 @@
 # Application localization documentation
 
-Source files are in `client/src/locale` and translated files merged from [Weblate](https://weblate.framasoft.org/translate/peertube).
+Source files are in `client/src/locale` and translated files merged from [Weblate](https://weblate.framasoft.org/projects/peertube/).
 
 
 ## Generation
@@ -9,7 +9,7 @@ Will generate XLIFF base files for Angular (`angular.xlf`) and JSON files for th
 Then, it will merge new translation keys into localized Angular files (`angular.fr-FR.xlf` etc).
 
 ```
-$ npm run i18n:update
+npm run i18n:update
 ```
 
 
@@ -26,7 +26,9 @@ Nothing to do here, Github will automatically send a webhook to Weblate that wil
 
 ## Support a new language
 
- * Add it to [/shared/models/i18n/i18n.ts](/shared/models/i18n/i18n.ts)
+ * Add it to [/packages/models/i18n/i18n.ts](/packages/core-utils/src/i18n/i18n.ts)
  * Add it to [/scripts/build/client.sh](/scripts/build/client.sh)
- * Add it to [/client/angular.json](/client/angular.json) (in multiple sections), then **pull** and **generate**
+ * Add it to [/client/angular.json](/client/angular.json)
+ * Lock [weblate project](https://weblate.framasoft.org/projects/peertube)
+ * Run `npm run i18n:update`
  * Build the application and check the new language correctly works

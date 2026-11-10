@@ -1,23 +1,112 @@
-import { Component, Input } from '@angular/core'
+import { NgClass } from '@angular/common'
+import { Component, OnInit, booleanAttribute, inject, input, ChangeDetectionStrategy } from '@angular/core'
+import { MarkdownService } from '@app/core'
+import { LinkType } from '@pt-types'
+import { LinkComponent } from '../shared-main/common/link.component'
+import { FromNowPipe } from '../shared-main/date/from-now.pipe'
 import { VideoPlaylist } from './video-playlist.model'
+import { DisplayHandlePipe } from '@app/shared/shared-main/common/display-handle.pipe'
 
 @Component({
   selector: 'my-video-playlist-miniature',
   styleUrls: [ './video-playlist-miniature.component.scss' ],
-  templateUrl: './video-playlist-miniature.component.html'
+  templateUrl: './video-playlist-miniature.component.html',
+  changeDetection: ChangeDetectionStrategy.Eager,
+  imports: [ NgClass, LinkComponent, FromNowPipe, DisplayHandlePipe ]
 })
-export class VideoPlaylistMiniatureComponent {
-  @Input() playlist: VideoPlaylist
-  @Input() toManage = false
-  @Input() displayChannel = false
-  @Input() displayDescription = false
-  @Input() displayPrivacy = false
-  @Input() displayAsRow = false
+export class VideoPlaylistMiniatureComponent implements OnInit {
+  private markdownService = inject(MarkdownService)
 
-  getPlaylistUrl () {
-    if (this.toManage) return [ '/my-library/video-playlists', this.playlist.uuid ]
-    if (this.playlist.videosLength === 0) return null
+  readonly playlist = input<VideoPlaylist>(undefined)
 
-    return [ '/w/p', this.playlist.uuid ]
+  readonly toManage = input.required({ transform: booleanAttribute })
+
+  readonly thumbnailOnly = input(false, { transform: booleanAttribute })
+
+  readonly displayChannel = input(false, { transform: booleanAttribute })
+  readonly displayDescription = input(false, { transform: booleanAttribute })
+  readonly displayPrivacy = input(false, { transform: booleanAttribute })
+  readonly displayAsRow = input(false, { transform: booleanAttribute })
+
+  readonly linkType = input<LinkType>('internal')
+
+  // Level of the playlist title in the page heading hierarchy (renders role="heading" + aria-level instead of a real h1-h6 tag,
+  // since the miniature can be reused at different nesting depths depending on the page)
+  readonly headingLevel = input<number>(undefined)
+
+  ownerRouterLink: any
+  ownerHref: string
+  ownerTarget: string
+
+  playlistRouterLink: any
+  playlistHref: string
+  playlistTarget: string
+
+  playlistDescription: string
+
+  async ngOnInit () {
+    this.buildPlaylistUrl()
+    this.buildOwnerUrl()
+
+    if (this.displayDescription()) {
+      this.playlistDescription = await this.markdownService.textMarkdownToHTML({ markdown: this.playlist().description })
+    }
+  }
+
+  buildPlaylistUrl () {
+    if (this.toManage()) {
+      this.playlistRouterLink = [ '/my-library/video-playlists', this.playlist().shortUUID ]
+      return
+    }
+
+    const playlist = this.playlist()
+    if (playlist.videosLength === 0) {
+      this.playlistRouterLink = null
+      return
+    }
+
+    const linkType = this.linkType()
+    if (linkType === 'internal' || !playlist.url) {
+      this.playlistRouterLink = VideoPlaylist.buildWatchUrl(playlist)
+      return
+    }
+
+    if (linkType === 'external') {
+      this.playlistRouterLink = null
+      this.playlistHref = playlist.url
+      this.playlistTarget = '_blank'
+      return
+    }
+
+    // Lazy load
+    this.playlistRouterLink = [ '/search/lazy-load-playlist', { url: playlist.url } ]
+  }
+
+  buildOwnerUrl () {
+    const playlist = this.playlist()
+    const linkType = this.linkType()
+
+    if (!playlist.videoChannel) return
+
+    if (linkType === 'internal' || !playlist.videoChannel.url) {
+      this.ownerRouterLink = `/c/${playlist.videoChannelBy}`
+      return
+    }
+
+    if (linkType === 'external') {
+      this.ownerRouterLink = null
+      this.ownerHref = playlist.videoChannel.url
+      this.ownerTarget = '_blank'
+      return
+    }
+
+    // Lazy load
+    this.ownerRouterLink = [ '/search/lazy-load-channel', { url: playlist.videoChannel.url } ]
+    return
+  }
+
+  getPlaylistThumbnailUrl () {
+    // Keep it sync with image size requested by the SASS file
+    return this.playlist().getThumbnailUrl(280)
   }
 }

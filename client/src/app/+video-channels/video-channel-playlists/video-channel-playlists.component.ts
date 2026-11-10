@@ -1,15 +1,26 @@
+import { AfterViewInit, Component, inject, OnDestroy, OnInit, ChangeDetectionStrategy } from '@angular/core'
+import { ComponentPagination, hasMoreItems, HooksService, resetCurrentPage, ScreenService } from '@app/core'
+import { VideoChannel } from '@app/shared/shared-main/channel/video-channel.model'
+import { VideoChannelService } from '@app/shared/shared-main/channel/video-channel.service'
+import { VideoPlaylist } from '@app/shared/shared-video-playlist/video-playlist.model'
+import { VideoPlaylistService } from '@app/shared/shared-video-playlist/video-playlist.service'
 import { Subject, Subscription } from 'rxjs'
-import { Component, OnDestroy, OnInit } from '@angular/core'
-import { ComponentPagination, hasMoreItems, ScreenService } from '@app/core'
-import { VideoChannel, VideoChannelService } from '@app/shared/shared-main'
-import { VideoPlaylist, VideoPlaylistService } from '@app/shared/shared-video-playlist'
+import { InfiniteScrollerDirective } from '../../shared/shared-main/common/infinite-scroller.directive'
+import { VideoPlaylistMiniatureComponent } from '../../shared/shared-video-playlist/video-playlist-miniature.component'
 
 @Component({
   selector: 'my-video-channel-playlists',
   templateUrl: './video-channel-playlists.component.html',
-  styleUrls: [ './video-channel-playlists.component.scss' ]
+  styleUrls: [ './video-channel-playlists.component.scss' ],
+  changeDetection: ChangeDetectionStrategy.Eager,
+  imports: [ InfiniteScrollerDirective, VideoPlaylistMiniatureComponent ]
 })
-export class VideoChannelPlaylistsComponent implements OnInit, OnDestroy {
+export class VideoChannelPlaylistsComponent implements OnInit, AfterViewInit, OnDestroy {
+  private videoPlaylistService = inject(VideoPlaylistService)
+  private videoChannelService = inject(VideoChannelService)
+  private screenService = inject(ScreenService)
+  private hooks = inject(HooksService)
+
   videoPlaylists: VideoPlaylist[] = []
 
   pagination: ComponentPagination = {
@@ -23,19 +34,22 @@ export class VideoChannelPlaylistsComponent implements OnInit, OnDestroy {
   private videoChannelSub: Subscription
   private videoChannel: VideoChannel
 
-  constructor (
-    private videoPlaylistService: VideoPlaylistService,
-    private videoChannelService: VideoChannelService,
-    private screenService: ScreenService
-  ) {}
-
   ngOnInit () {
     // Parent get the video channel for us
     this.videoChannelSub = this.videoChannelService.videoChannelLoaded
-                               .subscribe(videoChannel => {
-                                 this.videoChannel = videoChannel
-                                 this.loadVideoPlaylists()
-                               })
+      .subscribe(videoChannel => {
+        this.videoChannel = videoChannel
+
+        this.hooks.runAction('action:video-channel-playlists.video-channel.loaded', 'video-channel', { videoChannel })
+
+        this.videoPlaylists = []
+        resetCurrentPage(this.pagination)
+        this.loadVideoPlaylists()
+      })
+  }
+
+  ngAfterViewInit () {
+    this.hooks.runAction('action:video-channel-playlists.init', 'video-channel')
   }
 
   ngOnDestroy () {
@@ -54,12 +68,17 @@ export class VideoChannelPlaylistsComponent implements OnInit, OnDestroy {
   }
 
   private loadVideoPlaylists () {
-    this.videoPlaylistService.listChannelPlaylists(this.videoChannel, this.pagination)
-        .subscribe(res => {
-          this.videoPlaylists = this.videoPlaylists.concat(res.data)
-          this.pagination.totalItems = res.total
+    this.videoPlaylistService.listChannelPlaylists({
+      videoChannel: this.videoChannel,
+      componentPagination: this.pagination,
+      sort: 'videoChannelPosition'
+    }).subscribe(res => {
+      this.videoPlaylists = this.videoPlaylists.concat(res.data)
+      this.pagination.totalItems = res.total
 
-          this.onDataSubject.next(res.data)
-        })
+      this.hooks.runAction('action:video-channel-playlists.playlists.loaded', 'video-channel', { playlists: this.videoPlaylists })
+
+      this.onDataSubject.next(res.data)
+    })
   }
 }

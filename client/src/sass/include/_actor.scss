@@ -1,86 +1,84 @@
-@import '_variables';
+@use "_variables" as *;
+@use "_mixins" as *;
 
-@mixin section-label-responsive {
-  color: pvar(--mainColor);
-  font-size: 12px;
-  margin-bottom: 15px;
-  font-weight: $font-bold;
-  letter-spacing: 2.5px;
+@mixin actor-row($avatar-margin-right: 10px, $min-height: 130px, $separator: true) {
+  @include row-blocks($min-height: $min-height, $separator: $separator);
 
-  @media screen and (max-width: $mobile-view) {
-    font-size: 10px;
-    letter-spacing: 2.1px;
-    margin-bottom: 5px;
-  }
-}
-
-@mixin show-more-description {
-  color: pvar(--mainColor);
-  cursor: pointer;
-  margin: 10px auto 45px;
-}
-
-@mixin avatar-row-responsive ($img-margin, $grey-font-size) {
-  display: flex;
-  grid-column: 1;
-  margin-bottom: 30px;
-
-  .main-avatar {
-    @include actor-avatar-size(120px);
-  }
-
-  > div {
-    margin-left: $img-margin;
-    min-width: 1px;
+  > my-actor-avatar {
+    @include margin-right($avatar-margin-right);
   }
 
   .actor-info {
-    display: flex;
+    flex-grow: 1;
+  }
 
-    > div:first-child {
-      flex-grow: 1;
-      min-width: 1px;
-    }
+  .actor-names {
+    width: fit-content;
+    display: flex;
+    align-items: baseline;
+    color: pvar(--fg);
+
+    @include disable-default-a-behaviour;
   }
 
   .actor-display-name {
-    @include peertube-word-wrap;
+    font-weight: $font-semibold;
+    font-size: 18px;
+  }
 
+  .actor-name {
+    font-size: 14px;
+    color: pvar(--fg-300);
+
+    @include margin-left(5px);
+  }
+
+  .actor-owner {
+    color: pvar(--fg);
     display: flex;
-    flex-wrap: wrap;
-  }
+    align-items: center;
 
-  h1 {
-    font-size: 28px;
-    font-weight: $font-bold;
-    margin: 0;
-  }
+    @include disable-default-a-behaviour;
 
-  .actor-handle {
-    @include ellipsis;
-  }
-
-  .actor-handle,
-  .actor-counters {
-    color: pvar(--greyForegroundColor);
-    font-size: $grey-font-size;
-  }
-
-  .actor-counters > *:not(:last-child)::after {
-    content: '•';
-    margin: 0 10px;
-    color: pvar(--mainColor);
-  }
-
-  @media screen and (max-width: $mobile-view) {
-    margin-bottom: 15px;
-
-    h1 {
-      font-size: 22px;
+    span:hover {
+      opacity: 0.8;
     }
 
-    .main-avatar {
-      @include actor-avatar-size(80px);
+    my-actor-avatar {
+      @include margin-left(5px);
     }
   }
+
+  @media screen and (max-width: $small-view) {
+    .actor-info {
+      padding-bottom: 10px;
+      text-align: center;
+
+      .actor-names {
+        flex-direction: column;
+        align-items: center !important;
+        margin: auto;
+      }
+    }
+  }
+}
+
+@mixin channel-filters {
+  display: flex;
+  align-items: center;
+  padding-bottom: 1rem;
+  border-bottom: 1px solid $separator-border-color;
+  margin-bottom: 1rem;
+  gap: 1rem;
+  overflow: hidden;
+
+  &:hover {
+    overflow: auto;
+  }
+}
+
+@mixin channel-label {
+  color: pvar(--fg-200);
+  font-weight: $font-bold;
+  white-space: nowrap;
 }

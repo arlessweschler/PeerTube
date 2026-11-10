@@ -1,49 +1,66 @@
-import { Component, ElementRef, OnInit, ViewChild } from '@angular/core'
-import { LocalStorageService, Notifier } from '@app/core'
-import { LogLevel } from '@shared/models'
+import { NgClass } from '@angular/common'
+import { Component, ElementRef, OnInit, inject, viewChild, ChangeDetectionStrategy } from '@angular/core'
+import { FormsModule } from '@angular/forms'
+import { AuthService, Notifier } from '@app/core'
+import { SelectOptionsComponent } from '@app/shared/shared-forms/select/select-options.component'
+import { AlertComponent } from '@app/shared/shared-main/common/alert.component'
+import { PTDatePipe } from '@app/shared/shared-main/common/date.pipe'
+import { ServerLogLevel, UserRight } from '@peertube/peertube-models'
+import { SelectTagsComponent } from '../../../shared/shared-forms/select/select-tags.component'
+import { ButtonComponent } from '../../../shared/shared-main/buttons/button.component'
+import { CopyButtonComponent } from '../../../shared/shared-main/buttons/copy-button.component'
+import { DebugService } from '../debug/debug.service'
 import { LogRow } from './log-row.model'
 import { LogsService } from './logs.service'
 
 @Component({
   templateUrl: './logs.component.html',
-  styleUrls: [ './logs.component.scss' ]
+  styleUrls: [ './logs.component.scss' ],
+  changeDetection: ChangeDetectionStrategy.Eager,
+  imports: [
+    FormsModule,
+    NgClass,
+    SelectTagsComponent,
+    ButtonComponent,
+    PTDatePipe,
+    CopyButtonComponent,
+    SelectOptionsComponent,
+    AlertComponent
+  ]
 })
 export class LogsComponent implements OnInit {
-  private static LOCAL_STORAGE_LOG_TYPE_CHOICE_KEY = 'admin-logs-log-type-choice'
+  private logsService = inject(LogsService)
+  private notifier = inject(Notifier)
+  private debugService = inject(DebugService)
+  private auth = inject(AuthService)
 
-  @ViewChild('logsElement', { static: true }) logsElement: ElementRef<HTMLElement>
+  readonly logsElement = viewChild<ElementRef<HTMLElement>>('logsElement')
+  readonly logsContent = viewChild<ElementRef<HTMLElement>>('logsContent')
 
   loading = false
 
+  rawLogs: string
   logs: LogRow[] = []
+
   timeChoices: { id: string, label: string, dateFormat: string }[] = []
-  levelChoices: { id: LogLevel, label: string }[] = []
-  logTypeChoices: { id: 'audit' | 'standard', label: string }[] = []
+  levelChoices: { id: ServerLogLevel, label: string }[] = []
 
   startDate: string
-  level: LogLevel
-  logType: 'audit' | 'standard'
+  level: ServerLogLevel
+  tagsOneOf: string[] = []
 
-  constructor (
-    private logsService: LogsService,
-    private notifier: Notifier,
-    private localStorage: LocalStorageService
-  ) { }
+  secondariesUp = 0
 
   ngOnInit (): void {
     this.buildTimeChoices()
     this.buildLevelChoices()
-    this.buildLogTypeChoices()
-
-    this.loadPreviousChoices()
 
     this.load()
+    this.loadSecondariesUp()
   }
 
   refresh () {
     this.logs = []
-
-    this.localStorage.setItem(LogsComponent.LOCAL_STORAGE_LOG_TYPE_CHOICE_KEY, this.logType)
 
     this.load()
   }
@@ -51,24 +68,40 @@ export class LogsComponent implements OnInit {
   load () {
     this.loading = true
 
-    this.logsService.getLogs({ isAuditLog: this.isAuditLog(), level: this.level, startDate: this.startDate })
-        .subscribe(
-          logs => {
-            this.logs = logs
+    const tagsOneOf = this.tagsOneOf.length !== 0
+      ? this.tagsOneOf
+      : undefined
 
-            setTimeout(() => {
-              this.logsElement.nativeElement.scrollIntoView({ block: 'end', inline: 'nearest' })
-            })
-          },
+    this.logsService.getLogs({
+      level: this.level,
+      startDate: this.startDate,
+      tagsOneOf
+    }).subscribe({
+      next: logs => {
+        this.logs = logs
 
-          err => this.notifier.error(err.message),
+        this.rawLogs = this.logs.map(l => `${l.level} ${l.localeDate} ${l.message} ${l.meta}`).join('\n')
 
-          () => this.loading = false
-        )
+        setTimeout(() => {
+          this.logsElement().nativeElement.scrollIntoView({ block: 'end', inline: 'nearest' })
+        })
+      },
+
+      error: err => this.notifier.handleError(err),
+
+      complete: () => this.loading = false
+    })
   }
 
-  isAuditLog () {
-    return this.logType === 'audit'
+  loadSecondariesUp () {
+    if (!this.auth.getUser().hasRight(UserRight.MANAGE_DEBUG)) return
+
+    this.debugService.getDebug()
+      .subscribe({
+        next: debug => this.secondariesUp = debug.secondariesUp,
+
+        error: err => this.notifier.handleError(err)
+      })
   }
 
   buildTimeChoices () {
@@ -123,24 +156,5 @@ export class LogsComponent implements OnInit {
     ]
 
     this.level = 'warn'
-  }
-
-  buildLogTypeChoices () {
-    this.logTypeChoices = [
-      {
-        id: 'standard',
-        label: $localize`Standard logs`
-      },
-      {
-        id: 'audit',
-        label: $localize`Audit logs`
-      }
-    ]
-  }
-
-  private loadPreviousChoices () {
-    this.logType = this.localStorage.getItem(LogsComponent.LOCAL_STORAGE_LOG_TYPE_CHOICE_KEY)
-
-    if (this.logType !== 'standard' && this.logType !== 'audit') this.logType = 'audit'
   }
 }

@@ -1,0 +1,30 @@
+<div class="input-group">
+  <input
+    [id]="inputId()" [name]="inputId()" [autocomplete]="autocomplete()" [value]="value()" [placeholder]="placeholder()" [tabindex]="tabindex()"
+    [(ngModel)]="value" [ngModelOptions]="{ standalone: true }" (ngModelChange)="update()" [readonly]="readonly()"
+    #input (click)="input.select()" (input)="update()" (change)="update()" [type]="inputType" class="form-control"
+    [ngClass]="{ 'input-error': formError() }"
+    [attr.aria-label]="ariaLabel()"
+    />
+
+  @if (withToggle()) {
+    <button (click)="toggle()" type="button" class="btn" [title]="toggleTitle">
+      @if (show()) {
+        <my-global-icon iconName="eye-open"></my-global-icon>
+      } @else {
+        <my-global-icon iconName="eye-close"></my-global-icon>
+      }
+    </button>
+  }
+
+  @if (withCopy()) {
+    <my-copy-button
+      [value]="input.value" [notification]="copiedNotification()"
+      [isInputGroup]="true" i18n
+    >COPY</my-copy-button>
+  }
+</div>
+
+@if (formError()) {
+  <div class="form-error" role="alert">{{ formError() }}</div>
+}

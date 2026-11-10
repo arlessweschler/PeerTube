@@ -1,44 +1,39 @@
-import { Observable } from 'rxjs'
-import { catchError, map } from 'rxjs/operators'
 import { HttpClient, HttpParams } from '@angular/common/http'
-import { Injectable } from '@angular/core'
-import { RestExtractor } from '@app/core'
-import { LogLevel } from '@shared/models'
+import { Injectable, LOCALE_ID, inject } from '@angular/core'
+import { RestExtractor, RestService } from '@app/core'
+import { ServerLogLevel } from '@peertube/peertube-models'
+import { catchError, map } from 'rxjs/operators'
 import { environment } from '../../../../environments/environment'
 import { LogRow } from './log-row.model'
 
 @Injectable()
 export class LogsService {
-  private static BASE_LOG_URL = environment.apiUrl + '/api/v1/server/logs'
-  private static BASE_AUDIT_LOG_URL = environment.apiUrl + '/api/v1/server/audit-logs'
+  private authHttp = inject(HttpClient)
+  private restService = inject(RestService)
+  private restExtractor = inject(RestExtractor)
+  private localeId = inject(LOCALE_ID)
 
-  constructor (
-    private authHttp: HttpClient,
-    private restExtractor: RestExtractor
-  ) {}
+  private static BASE_LOG_URL = environment.apiUrl + '/api/v1/server/logs'
 
   getLogs (options: {
-    isAuditLog: boolean,
-    startDate: string,
-    level?: LogLevel,
+    startDate: string
+    tagsOneOf?: string[]
+    level?: ServerLogLevel
     endDate?: string
-  }): Observable<any[]> {
-    const { isAuditLog, startDate } = options
+  }) {
+    const { startDate, endDate, tagsOneOf } = options
 
     let params = new HttpParams()
     params = params.append('startDate', startDate)
 
-    if (!isAuditLog) params = params.append('level', options.level)
-    if (options.endDate) params.append('endDate', options.endDate)
+    params = params.append('level', options.level)
+    if (endDate) params = params.append('endDate', options.endDate)
+    if (tagsOneOf) params = this.restService.addArrayParams(params, 'tagsOneOf', tagsOneOf)
 
-    const path = isAuditLog
-      ? LogsService.BASE_AUDIT_LOG_URL
-      : LogsService.BASE_LOG_URL
-
-    return this.authHttp.get<any[]>(path, { params })
-               .pipe(
-                 map(rows => rows.map(r => new LogRow(r))),
-                 catchError(err => this.restExtractor.handleError(err))
-               )
+    return this.authHttp.get<LogRow[]>(LogsService.BASE_LOG_URL, { params })
+      .pipe(
+        map(rows => rows.map(r => new LogRow(r, this.localeId))),
+        catchError(err => this.restExtractor.handleError(err))
+      )
   }
 }

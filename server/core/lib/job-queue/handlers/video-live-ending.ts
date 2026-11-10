@@ -1,0 +1,442 @@
+import { ffprobePromise, getAudioStream, getVideoStreamDimensionsInfo, getVideoStreamFPS } from '@peertube/peertube-ffmpeg'
+import { VideoFileStream, VideoLiveEndingPayload, VideoState } from '@peertube/peertube-models'
+import { peertubeTruncate } from '@peertube/peertube-node-utils'
+import { CONSTRAINTS_FIELDS } from '@server/initializers/constants.js'
+import { getLocalVideoActivityPubUrl } from '@server/lib/activitypub/url.js'
+import { scheduleVideoFederation } from '@server/lib/activitypub/videos/index.js'
+import {
+  cleanupAndDestroyPermanentLive,
+  cleanupTMPLiveFiles,
+  cleanupUnsavedNormalLive,
+  removeLiveDirectoriesOfDeletedVideo
+} from '@server/lib/live/index.js'
+import { withLocalCommonFile } from '@server/lib/object-storage/common-files.js'
+import {
+  generateHLSMasterPlaylistFilename,
+  generateHlsSha256SegmentsFilename,
+  getHLSDirectory,
+  getLiveReplayBaseDirectory
+} from '@server/lib/paths.js'
+import {
+  createLocalVideoThumbnailsFromImage,
+  createLocalVideoThumbnailsFromVideo,
+  regenerateLocalVideoThumbnailsFromVideoIfNeeded
+} from '@server/lib/thumbnail.js'
+import { generateHlsPlaylistResolutionFromTS } from '@server/lib/transcoding/hls-transcoding.js'
+import { createTranscriptionTaskIfNeeded } from '@server/lib/transcription/video-transcription.js'
+import { getNewHLSPlaylistStorage } from '@server/lib/video-file.js'
+import { addLocalOrRemoteStoryboardJobIfNeeded } from '@server/lib/video-jobs.js'
+import { VideoPathManager } from '@server/lib/video-path-manager.js'
+import { isVideoInPublicDirectory } from '@server/lib/video-privacy.js'
+import { moveToNextState } from '@server/lib/video-state.js'
+import { setVideoTags } from '@server/lib/video.js'
+import { PlayerSettingModel } from '@server/models/video/player-setting.js'
+import { VideoBlacklistModel } from '@server/models/video/video-blacklist.js'
+import { VideoEmbedPrivacyDomainModel } from '@server/models/video/video-embed-privacy-domain.js'
+import { VideoFileModel } from '@server/models/video/video-file.js'
+import { VideoLiveReplaySettingModel } from '@server/models/video/video-live-replay-setting.js'
+import { VideoLiveSessionModel } from '@server/models/video/video-live-session.js'
+import { VideoLiveModel } from '@server/models/video/video-live.js'
+import { VideoStreamingPlaylistModel } from '@server/models/video/video-streaming-playlist.js'
+import { VideoModel } from '@server/models/video/video.js'
+import {
+  MThumbnail,
+  MVideo,
+  MVideoLive,
+  MVideoLiveSession,
+  MVideoTag,
+  MVideoThumbnails,
+  MVideoWithAllFiles
+} from '@server/types/models/index.js'
+import { Job } from 'bullmq'
+import { pathExists, remove } from 'fs-extra/esm'
+import { readdir } from 'fs/promises'
+import { isAbsolute, join } from 'path'
+import { createLogger } from '../../../helpers/logger.js'
+
+const logger = createLogger('live', 'job')
+
+export async function processVideoLiveEnding (job: Job) {
+  const payload = job.data as VideoLiveEndingPayload
+  const videoId = payload.videoUUID ?? payload.videoId
+
+  await logger.withContext([ videoId ], async () => {
+    logger.info('Processing video live ending for %s.', videoId, { payload })
+
+    function logError () {
+      logger.warn('Video live %s does not exist anymore. Cannot process live ending.', videoId)
+    }
+
+    const video = await VideoModel.loadWithThumbnails(videoId)
+    if (!video) {
+      logError()
+
+      // Deleted during the live, possibly by a secondary process before the end of the live was processed
+      if (payload.videoUUID) await removeLiveDirectoriesOfDeletedVideo(payload.videoUUID)
+
+      return
+    }
+
+    const live = await VideoLiveModel.loadByVideoId(video.id)
+    const liveSession = await VideoLiveSessionModel.load(payload.liveSessionId)
+
+    if (!live || !liveSession) {
+      logError()
+      return
+    }
+
+    const permanentLive = live.permanentLive
+
+    liveSession.endingProcessed = true
+    await liveSession.save()
+
+    if (liveSession.saveReplay !== true) {
+      return cleanupLiveAndFederate({ permanentLive, video, streamingPlaylistId: payload.streamingPlaylistId })
+    }
+
+    let replayDirectory = payload.replayDirectory
+
+    if (!replayDirectory) {
+      logger.info(`No replay directory found for live ${video.uuid}, skipping video replay creation.`)
+
+      return cleanupLiveAndFederate({ permanentLive, video, streamingPlaylistId: payload.streamingPlaylistId })
+    }
+
+    // Introduced in PeerTube 7.2, allow to use the appropriate base directory even if the live privacy changed
+    if (!isAbsolute(replayDirectory)) {
+      replayDirectory = join(getLiveReplayBaseDirectory(video), replayDirectory)
+    }
+
+    const inputFileMutexReleaser = await VideoPathManager.Instance.lockFiles(video.uuid)
+
+    try {
+      await video.reload()
+
+      if (await hasReplayFiles(replayDirectory) !== true) {
+        logger.info(`No replay files found for live ${video.uuid}, skipping video replay creation.`)
+
+        await cleanupLiveAndFederate({ permanentLive, video, streamingPlaylistId: payload.streamingPlaylistId })
+      } else if (permanentLive) {
+        await saveReplayToExternalVideo({
+          liveVideo: video,
+          liveSession,
+          publishedAt: payload.publishedAt,
+          replayDirectory
+        })
+
+        await cleanupLiveAndFederate({ permanentLive, video, streamingPlaylistId: payload.streamingPlaylistId })
+      } else {
+        await replaceLiveByReplay({
+          video,
+          liveSession,
+          live,
+          permanentLive,
+          replayDirectory
+        })
+      }
+    } finally {
+      inputFileMutexReleaser()
+    }
+  })
+}
+
+// ---------------------------------------------------------------------------
+// Private
+// ---------------------------------------------------------------------------
+
+async function saveReplayToExternalVideo (options: {
+  liveVideo: MVideoThumbnails
+  liveSession: MVideoLiveSession
+  publishedAt: string
+  replayDirectory: string
+}) {
+  const { liveSession, publishedAt, replayDirectory } = options
+
+  const liveVideo = await VideoModel.loadFull(options.liveVideo.id)
+  const replaySettings = await VideoLiveReplaySettingModel.load(liveSession.replaySettingId)
+
+  if (!liveVideo || !replaySettings) {
+    logger.warn(
+      'Live video %d or its replay settings %d do not exist anymore, skipping external replay creation.',
+      options.liveVideo.id,
+      liveSession.replaySettingId
+    )
+    return
+  }
+
+  const videoNameSuffix = ` - ${new Date(publishedAt).toLocaleString()}`
+  const truncatedVideoName = peertubeTruncate(liveVideo.name, {
+    length: CONSTRAINTS_FIELDS.VIDEOS.NAME.max - videoNameSuffix.length
+  })
+
+  const replayVideo = new VideoModel({
+    name: truncatedVideoName + videoNameSuffix,
+    isLive: false,
+    state: VideoState.TO_TRANSCODE,
+    duration: 0,
+
+    remote: liveVideo.remote,
+    category: liveVideo.category,
+    licence: liveVideo.licence,
+    language: liveVideo.language,
+    commentsPolicy: liveVideo.commentsPolicy,
+    recommendationScope: liveVideo.recommendationScope,
+    aiUsage: liveVideo.aiUsage,
+    commercialContent: liveVideo.commercialContent,
+    downloadEnabled: liveVideo.downloadEnabled,
+    embedPrivacyPolicy: liveVideo.embedPrivacyPolicy,
+    waitTranscoding: true,
+    nsfw: liveVideo.nsfw,
+    description: liveVideo.description,
+    aspectRatio: liveVideo.aspectRatio,
+    support: liveVideo.support,
+    privacy: replaySettings.privacy,
+    channelId: liveVideo.channelId
+  }) as MVideoWithAllFiles & MVideoTag
+
+  await logger.withContext([ replayVideo.uuid ], async () => {
+    replayVideo.Thumbnails = []
+    replayVideo.VideoFiles = []
+    replayVideo.VideoStreamingPlaylists = []
+
+    replayVideo.url = getLocalVideoActivityPubUrl(replayVideo)
+
+    await replayVideo.save()
+
+    await setVideoTags({ video: replayVideo, tags: liveVideo.Tags.map(t => t.name) })
+
+    liveSession.replayVideoId = replayVideo.id
+    await liveSession.save()
+
+    // If live is blacklisted, also blacklist the replay
+    const blacklist = await VideoBlacklistModel.loadByVideoId(liveVideo.id)
+    if (blacklist) {
+      await VideoBlacklistModel.create({
+        videoId: replayVideo.id,
+        unfederated: blacklist.unfederated,
+        reason: blacklist.reason,
+        type: blacklist.type
+      })
+    }
+
+    // Inherit player settings
+    const playerSettings = await PlayerSettingModel.loadByVideoId(liveVideo.id)
+    if (playerSettings) {
+      await PlayerSettingModel.create({
+        videoId: replayVideo.id,
+        theme: playerSettings.theme
+      })
+    }
+
+    // Inherit video embed privacy
+    const domains = await VideoEmbedPrivacyDomainModel.list(liveVideo.id)
+    if (domains.length !== 0) {
+      await VideoEmbedPrivacyDomainModel.addDomains(domains.map(d => d.domain), replayVideo.id)
+    }
+
+    await assignReplayFilesToVideo({ video: replayVideo, replayDirectory })
+
+    logger.info(`Removing replay directory ${replayDirectory}`)
+    await remove(replayDirectory)
+
+    try {
+      await copyOrRegenerateThumbnails({ liveVideo, replayVideo })
+    } catch (err) {
+      logger.error(`Cannot copy/regenerate thumbnails of ended live ${liveVideo.uuid} to external video ${replayVideo.uuid}`)
+    }
+
+    await createStoryboardJob(replayVideo)
+    await createTranscriptionTaskIfNeeded(replayVideo)
+
+    await moveToNextState({ video: replayVideo })
+  })
+}
+
+async function copyOrRegenerateThumbnails (options: {
+  liveVideo: MVideoThumbnails
+  replayVideo: MVideoWithAllFiles
+}) {
+  const { liveVideo, replayVideo } = options
+
+  let thumbnails: MThumbnail[] = []
+
+  const bestThumbnail = liveVideo.getBestThumbnail('16:9')
+
+  if (bestThumbnail.automaticallyGenerated === false) {
+    thumbnails = await withLocalCommonFile('thumbnails', bestThumbnail, inputPath =>
+      createLocalVideoThumbnailsFromImage({
+        inputPath,
+        video: replayVideo,
+        automaticallyGenerated: false,
+        keepOriginal: true
+      }))
+  } else {
+    const videoFile = replayVideo.getMaxQualityFile(VideoFileStream.VIDEO) || replayVideo.getMaxQualityFile(VideoFileStream.AUDIO)
+
+    thumbnails = await VideoPathManager.Instance.makeAvailableVideoFile(videoFile.withVideoOrPlaylist(replayVideo), fileInput => {
+      return createLocalVideoThumbnailsFromVideo({ video: replayVideo, videoFile, fileInput, ffprobe: undefined })
+    })
+  }
+
+  await replayVideo.replaceAndSaveThumbnails(thumbnails)
+}
+
+async function replaceLiveByReplay (options: {
+  video: MVideo
+  liveSession: MVideoLiveSession
+  live: MVideoLive
+  permanentLive: boolean
+  replayDirectory: string
+}) {
+  const { video: liveVideo, liveSession, live, permanentLive, replayDirectory } = options
+
+  const replaySettings = await VideoLiveReplaySettingModel.load(liveSession.replaySettingId)
+  const videoWithFiles = await VideoModel.loadFull(liveVideo.id)
+
+  if (!videoWithFiles || !replaySettings) {
+    logger.warn(
+      'Live video %d or its replay settings %d do not exist anymore, skipping live-to-replay replacement.',
+      liveVideo.id,
+      liveSession.replaySettingId
+    )
+    return
+  }
+
+  const hlsPlaylist = videoWithFiles.getHLSPlaylist()
+  const replayInAnotherDirectory = isVideoInPublicDirectory(liveVideo.privacy) !== isVideoInPublicDirectory(replaySettings.privacy)
+
+  logger.info(`Replacing live ${liveVideo.uuid} by replay ${replayDirectory}.`, { replayInAnotherDirectory })
+
+  await cleanupTMPLiveFiles(videoWithFiles, hlsPlaylist)
+
+  await live.destroy()
+
+  videoWithFiles.isLive = false
+  videoWithFiles.privacy = replaySettings.privacy
+  videoWithFiles.waitTranscoding = true
+  videoWithFiles.state = VideoState.TO_TRANSCODE
+
+  await videoWithFiles.save()
+
+  liveSession.replayVideoId = videoWithFiles.id
+  await liveSession.save()
+
+  await VideoFileModel.removeHLSFilesOfStreamingPlaylistId(hlsPlaylist.id)
+
+  // Reset playlist
+  hlsPlaylist.VideoFiles = []
+  hlsPlaylist.playlistFilename = generateHLSMasterPlaylistFilename()
+  hlsPlaylist.segmentsSha256Filename = generateHlsSha256SegmentsFilename()
+  hlsPlaylist.storage = getNewHLSPlaylistStorage()
+  await hlsPlaylist.save()
+
+  await assignReplayFilesToVideo({ video: videoWithFiles, replayDirectory })
+
+  // Should not happen in this function, but we keep the code if in the future we can replace the permanent live by a replay
+  if (permanentLive) { // Remove session replay
+    await remove(replayDirectory)
+  } else {
+    // We won't stream again in this live, we can delete the base replay directory
+    await remove(getLiveReplayBaseDirectory(liveVideo))
+
+    // If the live was in another base directory, also delete it
+    if (replayInAnotherDirectory) {
+      await remove(getHLSDirectory(liveVideo))
+    }
+  }
+
+  // Regenerate the thumbnail & preview?
+  try {
+    // Don't fetch the replay file from the video storage if we keep the existing thumbnails
+    if (videoWithFiles.Thumbnails.every(t => t.automaticallyGenerated !== false)) {
+      const videoFile = videoWithFiles.getMaxQualityFile(VideoFileStream.VIDEO) || videoWithFiles.getMaxQualityFile(VideoFileStream.AUDIO)
+
+      await VideoPathManager.Instance.makeAvailableVideoFile(videoFile.withVideoOrPlaylist(videoWithFiles), videoFileInput => {
+        return regenerateLocalVideoThumbnailsFromVideoIfNeeded(videoWithFiles, undefined, videoFileInput)
+      })
+    }
+  } catch (err) {
+    logger.error(`Cannot regenerate thumbnails of ended live ${videoWithFiles.uuid}`)
+  }
+
+  // We consider this is a new video
+  await moveToNextState({ video: videoWithFiles })
+
+  await createStoryboardJob(videoWithFiles)
+  await createTranscriptionTaskIfNeeded(videoWithFiles)
+}
+
+async function assignReplayFilesToVideo (options: {
+  video: MVideo
+  replayDirectory: string
+}) {
+  const { video, replayDirectory } = options
+
+  const concatenatedTsFiles = await readdir(replayDirectory)
+
+  logger.info(`Assigning replays ${replayDirectory} to video ${video.uuid}.`, { concatenatedTsFiles })
+
+  for (const concatenatedTsFile of concatenatedTsFiles) {
+    // Generating hls playlist can be long, reload the video in this case
+    await video.reload()
+
+    const concatenatedTsFilePath = join(replayDirectory, concatenatedTsFile)
+
+    const probe = await ffprobePromise(concatenatedTsFilePath)
+    const { audioStream } = await getAudioStream(concatenatedTsFilePath, probe)
+    const { resolution } = await getVideoStreamDimensionsInfo(concatenatedTsFilePath, probe)
+    const fps = await getVideoStreamFPS(concatenatedTsFilePath, probe)
+
+    try {
+      await generateHlsPlaylistResolutionFromTS({
+        video,
+        inputFileMutexReleaser: null, // Already locked in parent
+        preventInputFileLocking: true,
+        concatenatedTsFilePath,
+        resolution,
+        fps,
+        isAAC: audioStream?.codec_name === 'aac'
+      })
+    } catch (err) {
+      logger.error('Cannot generate HLS playlist resolution from TS files.', { err })
+    }
+  }
+
+  return video
+}
+
+async function cleanupLiveAndFederate (options: {
+  video: MVideo
+  permanentLive: boolean
+  streamingPlaylistId: number
+}) {
+  const { permanentLive, video, streamingPlaylistId } = options
+
+  const streamingPlaylist = await VideoStreamingPlaylistModel.loadWithVideo(streamingPlaylistId)
+
+  if (streamingPlaylist) {
+    if (permanentLive) {
+      await cleanupAndDestroyPermanentLive(video, streamingPlaylist)
+    } else {
+      await cleanupUnsavedNormalLive(video, streamingPlaylist)
+    }
+  }
+
+  try {
+    // Reload the video: the cleanup may have changed its state
+    const refreshedVideo = await VideoModel.load(video.id)
+    if (!refreshedVideo) return
+
+    scheduleVideoFederation({ video: refreshedVideo })
+  } catch (err) {
+    logger.warn('Cannot federate live after cleanup', { videoId: video.id, err })
+  }
+}
+
+function createStoryboardJob (video: MVideo) {
+  return addLocalOrRemoteStoryboardJobIfNeeded({ video, federate: true })
+}
+
+async function hasReplayFiles (replayDirectory: string) {
+  return await pathExists(replayDirectory) && (await readdir(replayDirectory)).length !== 0
+}

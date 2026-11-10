@@ -1,0 +1,294 @@
+import {
+  HttpStatusCode,
+  InstallOrUpdatePlugin,
+  ManagePlugin,
+  PeertubePluginIndexList,
+  PublicServerSetting,
+  RegisteredServerSettings,
+  UserRight
+} from '@peertube/peertube-models'
+import { createLogger } from '@server/helpers/logger.js'
+import { getFormattedObjects } from '@server/helpers/utils.js'
+import { auditLog, buildPluginAuditEntity, getAuditActorFromRes } from '@server/lib/audit-log/index.js'
+import { listAvailablePluginsFromIndex } from '@server/lib/plugins/plugin-index.js'
+import { PluginManager } from '@server/lib/plugins/plugin-manager.js'
+import { currentProcessId, RedisChannels } from '@server/lib/redis/index.js'
+import {
+  apiRateLimiter,
+  asyncMiddleware,
+  authenticate,
+  availablePluginsSortValidator,
+  ensureUserHasRight,
+  openapiOperationDoc,
+  paginationValidator,
+  pluginsSortValidator,
+  primaryOnly,
+  setDefaultPagination,
+  setDefaultSort
+} from '@server/middlewares/index.js'
+import {
+  existingPluginValidator,
+  installOrUpdatePluginValidator,
+  listAvailablePluginsValidator,
+  listPluginsValidator,
+  uninstallPluginValidator,
+  updatePluginSettingsValidator
+} from '@server/middlewares/validators/plugins.js'
+import { PluginModel } from '@server/models/server/plugin.js'
+import express from 'express'
+import { basename } from 'path'
+
+const logger = createLogger()
+
+const pluginRouter = express.Router()
+
+pluginRouter.use(apiRateLimiter)
+
+pluginRouter.get(
+  '/available',
+  openapiOperationDoc({ operationId: 'getAvailablePlugins' }),
+  authenticate,
+  ensureUserHasRight(UserRight.MANAGE_PLUGINS),
+  listAvailablePluginsValidator,
+  paginationValidator,
+  availablePluginsSortValidator,
+  setDefaultSort,
+  setDefaultPagination,
+  asyncMiddleware(listAvailablePlugins)
+)
+
+pluginRouter.get(
+  '/',
+  openapiOperationDoc({ operationId: 'getPlugins' }),
+  authenticate,
+  ensureUserHasRight(UserRight.MANAGE_PLUGINS),
+  listPluginsValidator,
+  paginationValidator,
+  pluginsSortValidator,
+  setDefaultSort,
+  setDefaultPagination,
+  asyncMiddleware(listPlugins)
+)
+
+pluginRouter.get(
+  '/:npmName/registered-settings',
+  authenticate,
+  ensureUserHasRight(UserRight.MANAGE_PLUGINS),
+  asyncMiddleware(existingPluginValidator),
+  getPluginRegisteredSettings
+)
+
+pluginRouter.get('/:npmName/public-settings', asyncMiddleware(existingPluginValidator), getPublicPluginSettings)
+
+pluginRouter.put(
+  '/:npmName/settings',
+  authenticate,
+  ensureUserHasRight(UserRight.MANAGE_PLUGINS),
+  updatePluginSettingsValidator,
+  asyncMiddleware(existingPluginValidator),
+  asyncMiddleware(updatePluginSettings)
+)
+
+pluginRouter.get(
+  '/:npmName',
+  authenticate,
+  ensureUserHasRight(UserRight.MANAGE_PLUGINS),
+  asyncMiddleware(existingPluginValidator),
+  getPlugin
+)
+
+// Plugins are installed in the plugin directory of the primary, that the secondaries sync from
+
+pluginRouter.post(
+  '/install',
+  openapiOperationDoc({ operationId: 'addPlugin' }),
+  primaryOnly,
+  authenticate,
+  ensureUserHasRight(UserRight.MANAGE_PLUGINS),
+  asyncMiddleware(installOrUpdatePluginValidator),
+  asyncMiddleware(installPlugin)
+)
+
+pluginRouter.post(
+  '/update',
+  openapiOperationDoc({ operationId: 'updatePlugin' }),
+  primaryOnly,
+  authenticate,
+  ensureUserHasRight(UserRight.MANAGE_PLUGINS),
+  asyncMiddleware(installOrUpdatePluginValidator),
+  asyncMiddleware(updatePlugin)
+)
+
+pluginRouter.post(
+  '/uninstall',
+  openapiOperationDoc({ operationId: 'uninstallPlugin' }),
+  primaryOnly,
+  authenticate,
+  ensureUserHasRight(UserRight.MANAGE_PLUGINS),
+  uninstallPluginValidator,
+  asyncMiddleware(uninstallPlugin)
+)
+
+// ---------------------------------------------------------------------------
+
+export {
+  pluginRouter
+}
+
+// ---------------------------------------------------------------------------
+
+async function listPlugins (req: express.Request, res: express.Response) {
+  const pluginType = req.query.pluginType
+  const uninstalled = req.query.uninstalled
+
+  const resultList = await PluginModel.listForApi({
+    pluginType,
+    uninstalled,
+    start: req.query.start,
+    count: req.query.count,
+    sort: req.query.sort
+  })
+
+  return res.json(getFormattedObjects(resultList.data, resultList.total))
+}
+
+function getPlugin (req: express.Request, res: express.Response) {
+  const plugin = res.locals.plugin
+
+  return res.json(plugin.toFormattedJSON())
+}
+
+async function installPlugin (req: express.Request, res: express.Response) {
+  const body: InstallOrUpdatePlugin = req.body
+
+  const fromDisk = !!body.path
+  const toInstall = body.npmName || body.path
+
+  const pluginVersion = body.pluginVersion && body.npmName
+    ? body.pluginVersion
+    : undefined
+
+  try {
+    const plugin = await PluginManager.Instance.install({ toInstall, version: pluginVersion, fromDisk })
+
+    auditLog.create(
+      getAuditActorFromRes(res),
+      () => buildPluginAuditEntity({ plugin, npmName: PluginModel.buildNpmName(plugin.name, plugin.type) })
+    )
+
+    return res.json(plugin.toFormattedJSON())
+  } catch (err) {
+    logger.warn('Cannot install plugin %s.', toInstall, { err })
+    return res.fail({ message: 'Cannot install plugin ' + toInstall })
+  }
+}
+
+async function updatePlugin (req: express.Request, res: express.Response) {
+  const body: InstallOrUpdatePlugin = req.body
+
+  const fromDisk = !!body.path
+  const toUpdate = body.npmName || body.path
+  try {
+    const oldPluginAuditEntity = await auditLog.snapshot(async () => {
+      const npmName = fromDisk ? basename(toUpdate) : toUpdate
+      const oldPlugin = await PluginModel.loadByNpmName(npmName)
+
+      return oldPlugin
+        ? buildPluginAuditEntity({ plugin: oldPlugin, npmName })
+        : null
+    })
+
+    const plugin = await PluginManager.Instance.update(toUpdate, fromDisk)
+
+    auditLog.update(
+      getAuditActorFromRes(res),
+      () => buildPluginAuditEntity({ plugin, npmName: PluginModel.buildNpmName(plugin.name, plugin.type) }),
+      oldPluginAuditEntity
+    )
+
+    return res.json(plugin.toFormattedJSON())
+  } catch (err) {
+    logger.warn('Cannot update plugin %s.', toUpdate, { err })
+    return res.fail({ message: 'Cannot update plugin ' + toUpdate })
+  }
+}
+
+async function uninstallPlugin (req: express.Request, res: express.Response) {
+  const body: ManagePlugin = req.body
+
+  const pluginAuditEntity = await auditLog.snapshot(async () => {
+    const plugin = await PluginModel.loadByNpmName(body.npmName)
+
+    return plugin
+      ? buildPluginAuditEntity({ plugin, npmName: body.npmName })
+      : null
+  })
+
+  await PluginManager.Instance.uninstall({ npmName: body.npmName })
+
+  auditLog.delete(getAuditActorFromRes(res), pluginAuditEntity)
+
+  return res.status(HttpStatusCode.NO_CONTENT_204).end()
+}
+
+function getPublicPluginSettings (req: express.Request, res: express.Response) {
+  const plugin = res.locals.plugin
+  const registeredSettings = PluginManager.Instance.getRegisteredSettings(req.params.npmName)
+  const publicSettings = plugin.getPublicSettings(registeredSettings)
+
+  const json: PublicServerSetting = { publicSettings }
+
+  return res.json(json)
+}
+
+function getPluginRegisteredSettings (req: express.Request, res: express.Response) {
+  const registeredSettings = PluginManager.Instance.getRegisteredSettings(req.params.npmName)
+
+  const json: RegisteredServerSettings = { registeredSettings }
+
+  return res.json(json)
+}
+
+async function updatePluginSettings (req: express.Request, res: express.Response) {
+  const plugin = res.locals.plugin
+  const npmName = req.params.npmName
+
+  const registeredSettings = PluginManager.Instance.getRegisteredSettings(npmName)
+  const oldPluginAuditEntity = auditLog.snapshot(() =>
+    buildPluginAuditEntity({ plugin, npmName, settings: plugin.settings ?? {}, registeredSettings })
+  )
+
+  plugin.settings = req.body.settings
+  await plugin.save()
+
+  auditLog.update(
+    getAuditActorFromRes(res),
+    () => buildPluginAuditEntity({ plugin, npmName, settings: plugin.settings ?? {}, registeredSettings }),
+    oldPluginAuditEntity
+  )
+
+  await PluginManager.Instance.onSettingsChanged(plugin.name, plugin.settings)
+
+  try {
+    await RedisChannels.pluginChanges.publish({ type: 'plugin-settings-changed', npmName: req.params.npmName, senderId: currentProcessId })
+  } catch (err) {
+    logger.error('Failed to publish plugin settings change for %s.', req.params.npmName, { err })
+  }
+
+  return res.status(HttpStatusCode.NO_CONTENT_204).end()
+}
+
+async function listAvailablePlugins (req: express.Request, res: express.Response) {
+  const query: PeertubePluginIndexList = req.query
+
+  const resultList = await listAvailablePluginsFromIndex(query)
+
+  if (!resultList) {
+    return res.fail({
+      status: HttpStatusCode.SERVICE_UNAVAILABLE_503,
+      message: 'Plugin index unavailable. Please retry later'
+    })
+  }
+
+  return res.json(resultList)
+}

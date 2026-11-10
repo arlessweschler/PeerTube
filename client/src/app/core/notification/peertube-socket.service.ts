@@ -1,26 +1,23 @@
 import { Subject } from 'rxjs'
-import { Injectable, NgZone } from '@angular/core'
-import { LiveVideoEventPayload, LiveVideoEventType, UserNotification as UserNotificationServer } from '@shared/models'
+import { ManagerOptions, Socket, SocketOptions } from 'socket.io-client'
+import { Injectable, inject } from '@angular/core'
+import { LiveVideoEventPayload, LiveVideoEventType, UserNotification as UserNotificationServer } from '@peertube/peertube-models'
 import { environment } from '../../../environments/environment'
 import { AuthService } from '../auth'
-import { io, Socket } from 'socket.io-client'
 
 export type NotificationEvent = 'new' | 'read' | 'read-all'
 
 @Injectable()
 export class PeerTubeSocket {
-  private io: typeof io
+  private auth = inject(AuthService)
+
+  private io: (uri: string, opts?: Partial<ManagerOptions & SocketOptions>) => Socket
 
   private notificationSubject = new Subject<{ type: NotificationEvent, notification?: UserNotificationServer }>()
   private liveVideosSubject = new Subject<{ type: LiveVideoEventType, payload: LiveVideoEventPayload }>()
 
   private notificationSocket: Socket
   private liveVideosSocket: Socket
-
-  constructor (
-    private auth: AuthService,
-    private ngZone: NgZone
-  ) {}
 
   async getMyNotificationsSocket () {
     await this.initNotificationSocket()
@@ -38,7 +35,7 @@ export class PeerTubeSocket {
     this.liveVideosSocket.emit('subscribe', { videoId })
   }
 
-  async unsubscribeLiveVideos (videoId: number) {
+  unsubscribeLiveVideos (videoId: number) {
     if (!this.liveVideosSocket) return
 
     this.liveVideosSocket.emit('unsubscribe', { videoId })
@@ -53,15 +50,12 @@ export class PeerTubeSocket {
 
     await this.importIOIfNeeded()
 
-    // Prevent protractor issues https://github.com/angular/angular/issues/11853
-    this.ngZone.runOutsideAngular(() => {
-      this.notificationSocket = this.io(environment.apiUrl + '/user-notifications', {
-        query: { accessToken: this.auth.getAccessToken() }
-      })
+    this.notificationSocket = this.io(environment.apiUrl + '/user-notifications', {
+      query: { accessToken: this.auth.getAccessToken() }
     })
 
     this.notificationSocket.on('new-notification', (n: UserNotificationServer) => {
-      this.ngZone.run(() => this.dispatchNotificationEvent('new', n))
+      this.dispatchNotificationEvent('new', n)
     })
   }
 
@@ -70,16 +64,13 @@ export class PeerTubeSocket {
 
     await this.importIOIfNeeded()
 
-    // Prevent protractor issues https://github.com/angular/angular/issues/11853
-    this.ngZone.runOutsideAngular(() => {
-      this.liveVideosSocket = this.io(environment.apiUrl + '/live-videos')
-    })
+    this.liveVideosSocket = this.io(environment.apiUrl + '/live-videos')
 
-    const types: LiveVideoEventType[] = [ 'views-change', 'state-change' ]
+    const types: LiveVideoEventType[] = [ 'views-change', 'state-change', 'force-end' ]
 
     for (const type of types) {
       this.liveVideosSocket.on(type, (payload: LiveVideoEventPayload) => {
-        this.ngZone.run(() => this.dispatchLiveVideoEvent(type, payload))
+        this.dispatchLiveVideoEvent(type, payload)
       })
     }
   }

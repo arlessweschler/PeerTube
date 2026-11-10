@@ -1,84 +1,142 @@
-import * as debug from 'debug'
-import { uniq } from 'lodash-es'
-import { asyncScheduler, merge, Observable, of, ReplaySubject, Subject } from 'rxjs'
-import { bufferTime, catchError, filter, map, observeOn, share, switchMap, tap, distinctUntilChanged } from 'rxjs/operators'
-import { HttpClient, HttpParams } from '@angular/common/http'
-import { Injectable, NgZone } from '@angular/core'
-import { AuthUser, ComponentPaginationLight, RestExtractor, RestService, ServerService } from '@app/core'
-import { enterZone, leaveZone, objectToFormData } from '@app/helpers'
-import { Account, AccountService, VideoChannel, VideoChannelService } from '@app/shared/shared-main'
+import { HttpClient, HttpContext, HttpParams } from '@angular/common/http'
+import { inject, Injectable } from '@angular/core'
+import { AuthService, AuthUser, ComponentPaginationLight, RestExtractor, RestPagination, RestService, ServerService } from '@app/core'
+import { buildBulkObservable, objectToFormData } from '@app/helpers'
+import { NGX_LOADING_BAR_IGNORED } from '@ngx-loading-bar/http-client'
+import { arrayify } from '@peertube/peertube-core-utils'
 import {
+  CachedVideoExistInPlaylist,
+  CachedVideosExistInPlaylists,
   ResultList,
-  VideoExistInPlaylist,
-  VideoPlaylist as VideoPlaylistServerModel,
-  VideoPlaylistCreate,
+  Video,
   VideoPlaylistElement as ServerVideoPlaylistElement,
+  VideoChannelSummary,
+  VideoExistInPlaylist,
+  VideoPlaylistCreate,
   VideoPlaylistElementCreate,
   VideoPlaylistElementUpdate,
   VideoPlaylistReorder,
+  VideoPlaylist as VideoPlaylistServerModel,
   VideoPlaylistUpdate,
   VideosExistInPlaylists
-} from '@shared/models'
+} from '@peertube/peertube-models'
+import debug from 'debug'
+import { SortMeta } from 'primeng/api'
+import { from, merge, Observable, of, ReplaySubject, Subject } from 'rxjs'
+import { catchError, concatMap, filter, map, share, switchMap, tap, toArray } from 'rxjs/operators'
 import { environment } from '../../../environments/environment'
+import { Account } from '../shared-main/account/account.model'
+import { AccountService } from '../shared-main/account/account.service'
+import { VideoChannel } from '../shared-main/channel/video-channel.model'
+import { VideoChannelService } from '../shared-main/channel/video-channel.service'
 import { VideoPlaylistElement } from './video-playlist-element.model'
 import { VideoPlaylist } from './video-playlist.model'
 
-const logger = debug('peertube:playlists:VideoPlaylistService')
+const debugLogger = debug('peertube:playlists:VideoPlaylistService')
 
-export type CachedPlaylist = VideoPlaylist | { id: number, displayName: string }
+export type CachedPlaylist = VideoPlaylist | { id: number, displayName: string, videoChannel?: VideoChannelSummary }
 
-@Injectable()
+export type PlaylistElementToAdd = Omit<VideoPlaylistElementCreate, 'videoId'> & {
+  video: Pick<Video, 'id' | 'uuid'>
+}
+
+@Injectable({ providedIn: 'root' })
 export class VideoPlaylistService {
+  private authHttp = inject(HttpClient)
+  private auth = inject(AuthService)
+  private serverService = inject(ServerService)
+  private restExtractor = inject(RestExtractor)
+  private restService = inject(RestService)
+
   static BASE_VIDEO_PLAYLIST_URL = environment.apiUrl + '/api/v1/video-playlists/'
   static MY_VIDEO_PLAYLIST_URL = environment.apiUrl + '/api/v1/users/me/video-playlists/'
 
   // Use a replay subject because we "next" a value before subscribing
   private videoExistsInPlaylistNotifier = new ReplaySubject<number>(1)
-  private videoExistsInPlaylistCacheSubject = new Subject<VideosExistInPlaylists>()
-  private readonly videoExistsInPlaylistObservable: Observable<VideosExistInPlaylists>
+  private videoExistsInPlaylistCacheSubject = new Subject<CachedVideosExistInPlaylists>()
+  private readonly videoExistsInPlaylistObservable: Observable<CachedVideosExistInPlaylists>
 
-  private videoExistsObservableCache: { [ id: number ]: Observable<VideoExistInPlaylist[]> } = {}
-  private videoExistsCache: { [ id: number ]: VideoExistInPlaylist[] } = {}
+  private videoExistsObservableCache: { [id: number]: Observable<CachedVideoExistInPlaylist[]> } = {}
+  private videoExistsCache: { [id: number]: CachedVideoExistInPlaylist[] } = {}
 
   private myAccountPlaylistCache: ResultList<CachedPlaylist> = undefined
   private myAccountPlaylistCacheRunning: Observable<ResultList<CachedPlaylist>>
   private myAccountPlaylistCacheSubject = new Subject<ResultList<CachedPlaylist>>()
 
-  constructor (
-    private authHttp: HttpClient,
-    private serverService: ServerService,
-    private restExtractor: RestExtractor,
-    private restService: RestService,
-    private ngZone: NgZone
-  ) {
+  constructor () {
     this.videoExistsInPlaylistObservable = merge(
-      this.videoExistsInPlaylistNotifier.pipe(
-        distinctUntilChanged(),
-        // We leave Angular zone so Protractor does not get stuck
-        bufferTime(500, leaveZone(this.ngZone, asyncScheduler)),
-        filter(videoIds => videoIds.length !== 0),
-        map(videoIds => uniq(videoIds)),
-        observeOn(enterZone(this.ngZone, asyncScheduler)),
-        switchMap(videoIds => this.doVideosExistInPlaylist(videoIds)),
-        share()
-      ),
+      buildBulkObservable({
+        time: 200,
+        bulkGet: (videoIds: number[]) => {
+          // We added a delay to the request, so ensure the user is still logged in
+          if (this.auth.isLoggedIn()) {
+            return this.doVideosExistInPlaylist(videoIds)
+          }
 
+          return of({})
+        },
+        notifierObservable: this.videoExistsInPlaylistNotifier
+      }).pipe(map(({ response }) => response)),
       this.videoExistsInPlaylistCacheSubject
     )
   }
 
-  listChannelPlaylists (videoChannel: VideoChannel, componentPagination: ComponentPaginationLight): Observable<ResultList<VideoPlaylist>> {
+  listChannelPlaylists (options: {
+    videoChannel: Pick<VideoChannel, 'nameWithHost'>
+    sort?: SortMeta | string
+    componentPagination?: ComponentPaginationLight
+    restPagination?: RestPagination
+    search?: string
+    includeCollaborations?: boolean
+  }): Observable<ResultList<VideoPlaylist>> {
+    const { videoChannel } = options
+
     const url = VideoChannelService.BASE_VIDEO_CHANNEL_URL + videoChannel.nameWithHost + '/video-playlists'
-    const pagination = this.restService.componentPaginationToRestPagination(componentPagination)
+
+    return this.listPlaylists({ url, ...options })
+  }
+
+  listAccountPlaylists (options: {
+    account: Account
+    sort: SortMeta | string
+    restPagination?: RestPagination
+    search?: string
+    includeCollaborations?: boolean
+  }): Observable<ResultList<VideoPlaylist>> {
+    const { account } = options
+
+    const url = AccountService.BASE_ACCOUNT_URL + account.nameWithHost + '/video-playlists'
+
+    return this.listPlaylists({ url, ...options })
+  }
+
+  private listPlaylists (options: {
+    url: string
+    sort?: SortMeta | string
+    componentPagination?: ComponentPaginationLight
+    restPagination?: RestPagination
+    search?: string
+    includeCollaborations?: boolean
+  }) {
+    const { url, sort, search, includeCollaborations } = options
 
     let params = new HttpParams()
-    params = this.restService.addRestGetParams(params, pagination)
+
+    let restPagination = options.restPagination
+    if (!restPagination && options.componentPagination) {
+      restPagination = this.restService.componentToRestPagination(options.componentPagination)
+    }
+
+    params = this.restService.addRestGetParams(params, restPagination, sort)
+
+    if (includeCollaborations) params = params.append('includeCollaborations', 'true')
+    if (search) params = this.restService.addObjectParams(params, { search })
 
     return this.authHttp.get<ResultList<VideoPlaylist>>(url, { params })
-               .pipe(
-                 switchMap(res => this.extractPlaylists(res)),
-                 catchError(err => this.restExtractor.handleError(err))
-               )
+      .pipe(
+        switchMap(res => this.extractPlaylists(res)),
+        catchError(err => this.restExtractor.handleError(err))
+      )
   }
 
   listMyPlaylistWithCache (user: AuthUser, search?: string) {
@@ -87,196 +145,235 @@ export class VideoPlaylistService {
       if (this.myAccountPlaylistCache) return of(this.myAccountPlaylistCache)
     }
 
-    const obs = this.listAccountPlaylists(user.account, undefined, '-updatedAt', search)
-               .pipe(
-                 tap(result => {
-                   if (!search) {
-                     this.myAccountPlaylistCacheRunning = undefined
-                     this.myAccountPlaylistCache = result
-                   }
-                 }),
-                 share()
-               )
+    const obs = this.listAccountPlaylists({
+      account: user.account,
+      sort: '-updatedAt',
+      includeCollaborations: true,
+      search
+    }).pipe(
+      tap(result => {
+        if (!search) {
+          this.myAccountPlaylistCacheRunning = undefined
+          this.myAccountPlaylistCache = result
+        }
+      }),
+      share()
+    )
 
     if (!search) this.myAccountPlaylistCacheRunning = obs
     return obs
   }
 
-  listAccountPlaylists (
-    account: Account,
-    componentPagination: ComponentPaginationLight,
-    sort: string,
-    search?: string
-  ): Observable<ResultList<VideoPlaylist>> {
-    const url = AccountService.BASE_ACCOUNT_URL + account.nameWithHost + '/video-playlists'
-    const pagination = componentPagination
-      ? this.restService.componentPaginationToRestPagination(componentPagination)
-      : undefined
-
-    let params = new HttpParams()
-    params = this.restService.addRestGetParams(params, pagination, sort)
-    if (search) params = this.restService.addObjectParams(params, { search })
-
-    return this.authHttp.get<ResultList<VideoPlaylist>>(url, { params })
-               .pipe(
-                 switchMap(res => this.extractPlaylists(res)),
-                 catchError(err => this.restExtractor.handleError(err))
-               )
-  }
+  // ---------------------------------------------------------------------------
 
   getVideoPlaylist (id: string | number) {
     const url = VideoPlaylistService.BASE_VIDEO_PLAYLIST_URL + id
 
     return this.authHttp.get<VideoPlaylist>(url)
-               .pipe(
-                 switchMap(res => this.extractPlaylist(res)),
-                 catchError(err => this.restExtractor.handleError(err))
-               )
+      .pipe(
+        switchMap(res => this.extractPlaylist(res)),
+        catchError(err => this.restExtractor.handleError(err))
+      )
   }
 
   createVideoPlaylist (body: VideoPlaylistCreate) {
     const data = objectToFormData(body)
 
     return this.authHttp.post<{ videoPlaylist: { id: number } }>(VideoPlaylistService.BASE_VIDEO_PLAYLIST_URL, data)
-               .pipe(
-                 tap(res => {
-                   if (!this.myAccountPlaylistCache) return
+      .pipe(
+        tap(res => {
+          if (!this.myAccountPlaylistCache) return
 
-                   this.myAccountPlaylistCache.total++
+          this.myAccountPlaylistCache.total++
 
-                   this.myAccountPlaylistCache.data.push({
-                     id: res.videoPlaylist.id,
-                     displayName: body.displayName
-                   })
+          this.myAccountPlaylistCache.data.push({
+            id: res.videoPlaylist.id,
+            displayName: body.displayName
+          })
 
-                   this.myAccountPlaylistCacheSubject.next(this.myAccountPlaylistCache)
-                 }),
-                 catchError(err => this.restExtractor.handleError(err))
-               )
+          this.myAccountPlaylistCacheSubject.next(this.myAccountPlaylistCache)
+        }),
+        catchError(err => this.restExtractor.handleError(err))
+      )
   }
 
   updateVideoPlaylist (videoPlaylist: VideoPlaylist, body: VideoPlaylistUpdate) {
     const data = objectToFormData(body)
 
     return this.authHttp.put(VideoPlaylistService.BASE_VIDEO_PLAYLIST_URL + videoPlaylist.id, data)
-               .pipe(
-                 map(this.restExtractor.extractDataBool),
-                 tap(() => {
-                   if (!this.myAccountPlaylistCache) return
+      .pipe(
+        tap(() => {
+          if (!this.myAccountPlaylistCache) return
 
-                   const playlist = this.myAccountPlaylistCache.data.find(p => p.id === videoPlaylist.id)
-                   playlist.displayName = body.displayName
+          const playlist = this.myAccountPlaylistCache.data.find(p => p.id === videoPlaylist.id)
+          playlist.displayName = body.displayName
 
-                   this.myAccountPlaylistCacheSubject.next(this.myAccountPlaylistCache)
-                 }),
-                 catchError(err => this.restExtractor.handleError(err))
-               )
+          this.myAccountPlaylistCacheSubject.next(this.myAccountPlaylistCache)
+        }),
+        catchError(err => this.restExtractor.handleError(err))
+      )
   }
 
   removeVideoPlaylist (videoPlaylist: VideoPlaylist) {
     return this.authHttp.delete(VideoPlaylistService.BASE_VIDEO_PLAYLIST_URL + videoPlaylist.id)
-               .pipe(
-                 map(this.restExtractor.extractDataBool),
-                 tap(() => {
-                   if (!this.myAccountPlaylistCache) return
+      .pipe(
+        tap(() => {
+          if (!this.myAccountPlaylistCache) return
 
-                   this.myAccountPlaylistCache.total--
-                   this.myAccountPlaylistCache.data = this.myAccountPlaylistCache.data
-                                                          .filter(p => p.id !== videoPlaylist.id)
+          this.myAccountPlaylistCache.total--
+          this.myAccountPlaylistCache.data = this.myAccountPlaylistCache.data
+            .filter(p => p.id !== videoPlaylist.id)
 
-                   this.myAccountPlaylistCacheSubject.next(this.myAccountPlaylistCache)
-                 }),
-                 catchError(err => this.restExtractor.handleError(err))
-               )
+          this.myAccountPlaylistCacheSubject.next(this.myAccountPlaylistCache)
+        }),
+        catchError(err => this.restExtractor.handleError(err))
+      )
   }
 
-  addVideoInPlaylist (playlistId: number, body: VideoPlaylistElementCreate) {
+  // ---------------------------------------------------------------------------
+
+  addVideoInPlaylist (playlistId: number, elementsArg: PlaylistElementToAdd | PlaylistElementToAdd[]) {
     const url = VideoPlaylistService.BASE_VIDEO_PLAYLIST_URL + playlistId + '/videos'
 
-    return this.authHttp.post<{ videoPlaylistElement: { id: number } }>(url, body)
-               .pipe(
-                 tap(res => {
-                   const existsResult = this.videoExistsCache[body.videoId]
-                   existsResult.push({
-                     playlistId,
-                     playlistElementId: res.videoPlaylistElement.id,
-                     startTimestamp: body.startTimestamp,
-                     stopTimestamp: body.stopTimestamp
-                   })
+    return from(arrayify(elementsArg))
+      .pipe(
+        concatMap(({ video, ...attributes }) => {
+          // Use the UUID: the server refuses the numeric id of an unlisted video we don't own
+          const body: VideoPlaylistElementCreate = { ...attributes, videoId: video.uuid }
 
-                   this.runPlaylistCheck(body.videoId)
-                 }),
-                 catchError(err => this.restExtractor.handleError(err))
-               )
+          return this.authHttp.post<{ videoPlaylistElement: { id: number } }>(url, body)
+            .pipe(map(res => ({ res, videoId: video.id, body })))
+        }),
+        tap(({ res, videoId, body }) => {
+          const existsResult = this.videoExistsCache[videoId]
+
+          if (existsResult) {
+            existsResult.push({
+              playlistId,
+              playlistElementId: res.videoPlaylistElement.id,
+              startTimestamp: body.startTimestamp,
+              stopTimestamp: body.stopTimestamp
+            })
+          }
+
+          this.runVideoExistsInPlaylistCheck(videoId)
+
+          if (this.myAccountPlaylistCache) {
+            const playlist = this.myAccountPlaylistCache.data.find(p => p.id === playlistId)
+            if (!playlist) return
+
+            const otherPlaylists = this.myAccountPlaylistCache.data.filter(p => p !== playlist)
+            this.myAccountPlaylistCache.data = [ playlist, ...otherPlaylists ]
+          }
+        }),
+        map(({ res }) => res),
+        toArray(),
+        catchError(err => this.restExtractor.handleError(err))
+      )
   }
 
-  updateVideoOfPlaylist (playlistId: number, playlistElementId: number, body: VideoPlaylistElementUpdate, videoId: number) {
-    return this.authHttp.put(VideoPlaylistService.BASE_VIDEO_PLAYLIST_URL + playlistId + '/videos/' + playlistElementId, body)
-               .pipe(
-                 map(this.restExtractor.extractDataBool),
-                 tap(() => {
-                   const existsResult = this.videoExistsCache[videoId]
+  updateVideoOfPlaylist (options: {
+    playlistId: number
 
-                   if (existsResult) {
-                     const elem = existsResult.find(e => e.playlistElementId === playlistElementId)
+    elements: ({
+      playlistElementId: number
+      videoId: number
+    } & VideoPlaylistElementUpdate)[]
+  }) {
+    const { playlistId, elements } = options
 
-                     elem.startTimestamp = body.startTimestamp
-                     elem.stopTimestamp = body.stopTimestamp
-                   }
+    return from(elements)
+      .pipe(
+        concatMap(({ playlistElementId, videoId, ...body }) => {
+          return this.authHttp.put(VideoPlaylistService.BASE_VIDEO_PLAYLIST_URL + playlistId + '/videos/' + playlistElementId, body)
+            .pipe(map(() => ({ playlistElementId, videoId, body })))
+        }),
+        tap(({ playlistElementId, videoId, body }) => {
+          const existsResult = this.videoExistsCache[videoId]
 
-                   this.runPlaylistCheck(videoId)
-                 }),
-                 catchError(err => this.restExtractor.handleError(err))
-               )
+          if (existsResult) {
+            const elem = existsResult.find(e => e.playlistElementId === playlistElementId)
+
+            elem.startTimestamp = body.startTimestamp
+            elem.stopTimestamp = body.stopTimestamp
+          }
+
+          this.runVideoExistsInPlaylistCheck(videoId)
+        }),
+        toArray(),
+        catchError(err => this.restExtractor.handleError(err))
+      )
   }
 
-  removeVideoFromPlaylist (playlistId: number, playlistElementId: number, videoId?: number) {
-    return this.authHttp.delete(VideoPlaylistService.BASE_VIDEO_PLAYLIST_URL + playlistId + '/videos/' + playlistElementId)
-               .pipe(
-                 map(this.restExtractor.extractDataBool),
-                 tap(() => {
-                   if (!videoId) return
+  removeElementsFromPlaylist (options: {
+    playlistId: number
 
-                   if (this.videoExistsCache[videoId]) {
-                     this.videoExistsCache[videoId] = this.videoExistsCache[videoId]
-                       .filter(e => e.playlistElementId !== playlistElementId)
-                   }
+    elements: {
+      playlistElementId: number
+      videoId: number
+    }[]
+  }) {
+    const { playlistId, elements } = options
 
-                   this.runPlaylistCheck(videoId)
-                 }),
-                 catchError(err => this.restExtractor.handleError(err))
-               )
+    return from(elements)
+      .pipe(
+        concatMap(({ playlistElementId, videoId }) =>
+          this.authHttp.delete(VideoPlaylistService.BASE_VIDEO_PLAYLIST_URL + playlistId + '/videos/' + playlistElementId)
+            .pipe(map(() => ({ playlistElementId, videoId })))
+        ),
+        tap(({ playlistElementId, videoId }) => {
+          if (this.videoExistsCache[videoId]) {
+            this.videoExistsCache[videoId] = this.videoExistsCache[videoId]
+              .filter(e => e.playlistElementId !== playlistElementId)
+          }
+
+          this.runVideoExistsInPlaylistCheck(videoId)
+        }),
+        toArray(),
+        catchError(err => this.restExtractor.handleError(err))
+      )
   }
 
-  reorderPlaylist (playlistId: number, oldPosition: number, newPosition: number) {
+  // ---------------------------------------------------------------------------
+
+  reorderPlaylistsOfChannel (channelName: string, oldPosition: number, newPosition: number) {
+    const body: VideoPlaylistReorder = {
+      startPosition: oldPosition,
+      insertAfterPosition: newPosition
+    }
+
+    return this.authHttp.post(VideoChannelService.BASE_VIDEO_CHANNEL_URL + channelName + '/video-playlists/reorder', body)
+      .pipe(catchError(err => this.restExtractor.handleError(err)))
+  }
+
+  reorderVideosOfPlaylist (playlistId: number, oldPosition: number, newPosition: number) {
     const body: VideoPlaylistReorder = {
       startPosition: oldPosition,
       insertAfterPosition: newPosition
     }
 
     return this.authHttp.post(VideoPlaylistService.BASE_VIDEO_PLAYLIST_URL + playlistId + '/videos/reorder', body)
-               .pipe(
-                 map(this.restExtractor.extractDataBool),
-                 catchError(err => this.restExtractor.handleError(err))
-               )
+      .pipe(catchError(err => this.restExtractor.handleError(err)))
   }
 
-  getPlaylistVideos (
-    videoPlaylistId: number | string,
+  // ---------------------------------------------------------------------------
+
+  getPlaylistVideos (options: {
+    videoPlaylistId: number | string
     componentPagination: ComponentPaginationLight
-  ): Observable<ResultList<VideoPlaylistElement>> {
-    const path = VideoPlaylistService.BASE_VIDEO_PLAYLIST_URL + videoPlaylistId + '/videos'
-    const pagination = this.restService.componentPaginationToRestPagination(componentPagination)
+  }): Observable<ResultList<VideoPlaylistElement>> {
+    const path = VideoPlaylistService.BASE_VIDEO_PLAYLIST_URL + options.videoPlaylistId + '/videos'
+    const pagination = this.restService.componentToRestPagination(options.componentPagination)
 
     let params = new HttpParams()
     params = this.restService.addRestGetParams(params, pagination)
 
     return this.authHttp
-               .get<ResultList<ServerVideoPlaylistElement>>(path, { params })
-               .pipe(
-                 switchMap(res => this.extractVideoPlaylistElements(res)),
-                 catchError(err => this.restExtractor.handleError(err))
-               )
+      .get<ResultList<ServerVideoPlaylistElement>>(path, { params })
+      .pipe(
+        switchMap(res => this.extractVideoPlaylistElements(res)),
+        catchError(err => this.restExtractor.handleError(err))
+      )
   }
 
   listenToMyAccountPlaylistsChange () {
@@ -284,80 +381,83 @@ export class VideoPlaylistService {
   }
 
   listenToVideoPlaylistChange (videoId: number) {
-    if (this.videoExistsObservableCache[ videoId ]) {
-      return this.videoExistsObservableCache[ videoId ]
+    if (this.videoExistsObservableCache[videoId]) {
+      return this.videoExistsObservableCache[videoId]
     }
 
     const obs = this.videoExistsInPlaylistObservable
-                    .pipe(
-                      map(existsResult => existsResult[ videoId ]),
-                      filter(r => !!r),
-                      tap(result => this.videoExistsCache[ videoId ] = result)
-                    )
+      .pipe(
+        map(existsResult => existsResult[videoId]),
+        filter(r => !!r),
+        tap(result => this.videoExistsCache[videoId] = result)
+      )
 
-    this.videoExistsObservableCache[ videoId ] = obs
+    this.videoExistsObservableCache[videoId] = obs
     return obs
   }
 
-  runPlaylistCheck (videoId: number) {
-    logger('Running playlist check.')
+  runVideoExistsInPlaylistCheck (videoIds: number | number[]) {
+    debugLogger('Running playlist check.')
 
-    if (this.videoExistsCache[videoId]) {
-      logger('Found cache for %d.', videoId)
+    for (const videoId of arrayify(videoIds)) {
+      if (this.videoExistsCache[videoId]) {
+        debugLogger('Found cache for %d.', videoId)
 
-      return this.videoExistsInPlaylistCacheSubject.next({ [videoId]: this.videoExistsCache[videoId] })
+        this.videoExistsInPlaylistCacheSubject.next({ [videoId]: this.videoExistsCache[videoId] })
+        continue
+      }
+
+      debugLogger('Fetching from network for %d.', videoId)
+      this.videoExistsInPlaylistNotifier.next(videoId)
     }
-
-    logger('Fetching from network for %d.', videoId)
-    return this.videoExistsInPlaylistNotifier.next(videoId)
   }
 
   extractPlaylists (result: ResultList<VideoPlaylistServerModel>) {
     return this.serverService.getServerLocale()
-               .pipe(
-                 map(translations => {
-                   const playlistsJSON = result.data
-                   const total = result.total
-                   const playlists: VideoPlaylist[] = []
+      .pipe(
+        map(translations => {
+          const playlistsJSON = result.data
+          const total = result.total
+          const playlists: VideoPlaylist[] = []
 
-                   for (const playlistJSON of playlistsJSON) {
-                     playlists.push(new VideoPlaylist(playlistJSON, translations))
-                   }
+          for (const playlistJSON of playlistsJSON) {
+            playlists.push(new VideoPlaylist(playlistJSON, translations))
+          }
 
-                   return { data: playlists, total }
-                 })
-               )
+          return { data: playlists, total }
+        })
+      )
   }
 
   extractPlaylist (playlist: VideoPlaylistServerModel) {
     return this.serverService.getServerLocale()
-               .pipe(map(translations => new VideoPlaylist(playlist, translations)))
+      .pipe(map(translations => new VideoPlaylist(playlist, translations)))
   }
 
   extractVideoPlaylistElements (result: ResultList<ServerVideoPlaylistElement>) {
     return this.serverService.getServerLocale()
-               .pipe(
-                 map(translations => {
-                   const elementsJson = result.data
-                   const total = result.total
-                   const elements: VideoPlaylistElement[] = []
+      .pipe(
+        map(translations => {
+          const elementsJson = result.data
+          const total = result.total
+          const elements: VideoPlaylistElement[] = []
 
-                   for (const elementJson of elementsJson) {
-                     elements.push(new VideoPlaylistElement(elementJson, translations))
-                   }
+          for (const elementJson of elementsJson) {
+            elements.push(new VideoPlaylistElement(elementJson, translations))
+          }
 
-                   return { total, data: elements }
-                 })
-               )
+          return { total, data: elements }
+        })
+      )
   }
 
-  private doVideosExistInPlaylist (videoIds: number[]): Observable<VideosExistInPlaylists> {
+  doVideosExistInPlaylist (videoIds: number[]): Observable<VideosExistInPlaylists> {
     const url = VideoPlaylistService.MY_VIDEO_PLAYLIST_URL + 'videos-exist'
 
     let params = new HttpParams()
     params = this.restService.addObjectParams(params, { videoIds })
 
-    return this.authHttp.get<VideoExistInPlaylist>(url, { params, headers: { ignoreLoadingBar: '' } })
-               .pipe(catchError(err => this.restExtractor.handleError(err)))
+    return this.authHttp.get<VideoExistInPlaylist>(url, { params, context: new HttpContext().set(NGX_LOADING_BAR_IGNORED, true) })
+      .pipe(catchError(err => this.restExtractor.handleError(err)))
   }
 }

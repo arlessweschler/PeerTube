@@ -1,0 +1,121 @@
+import { Activity, ActivityType } from '@peertube/peertube-models'
+import { StatsManager } from '@server/lib/stat-manager.js'
+import { ACTIVITY_PUB } from '../../../initializers/constants.js'
+import { createLogger } from '../../../helpers/logger.js'
+import { getRemoteErrorLogLevel } from '../../../helpers/remote-errors.js'
+import { APProcessorOptions } from '../../../types/activitypub-processor.model.js'
+import { MActorDefault, MActorSignature } from '../../../types/models/index.js'
+import { getAPId } from '../activity.js'
+import { getOrCreateAPActor } from '../actors/index.js'
+import { checkUrlsSameHost } from '../url.js'
+import { processAcceptActivity } from './process-accept.js'
+import { processAnnounceActivity } from './process-announce.js'
+import { processCreateActivity } from './process-create.js'
+import { processDeleteActivity } from './process-delete.js'
+import { processDislikeActivity } from './process-dislike.js'
+import { processFlagActivity } from './process-flag.js'
+import { processFollowActivity } from './process-follow.js'
+import { processLikeActivity } from './process-like.js'
+import { processRejectActivity } from './process-reject.js'
+import { processReplyApprovalFactory } from './process-reply-approval.js'
+import { processUndoActivity } from './process-undo.js'
+import { processUpdateActivity } from './process-update.js'
+import { processViewActivity } from './process-view.js'
+import { processDownloadActivity } from './process-download.js'
+
+const logger = createLogger('ap')
+
+const processActivity = new Map<string, (options: APProcessorOptions<Activity>) => Promise<any>>(Object.entries(
+  {
+    Create: processCreateActivity,
+    Update: processUpdateActivity,
+    Delete: processDeleteActivity,
+    Follow: processFollowActivity,
+    Accept: processAcceptActivity,
+    Reject: processRejectActivity,
+    Announce: processAnnounceActivity,
+    Undo: processUndoActivity,
+    Like: processLikeActivity,
+    Dislike: processDislikeActivity,
+    Flag: processFlagActivity,
+    View: processViewActivity,
+    Download: processDownloadActivity,
+    ApproveReply: processReplyApprovalFactory('ApproveReply'),
+    RejectReply: processReplyApprovalFactory('RejectReply')
+  } satisfies { [P in ActivityType]: (options: APProcessorOptions<Activity>) => Promise<any> }
+))
+
+export async function processActivities (
+  activities: Activity[],
+  options: {
+    signatureActor?: MActorSignature
+    inboxActor?: MActorDefault
+    outboxUrl?: string
+    fromFetch?: boolean
+  } = {}
+) {
+  const { outboxUrl, signatureActor, inboxActor, fromFetch = false } = options
+
+  if (activities.length > ACTIVITY_PUB.MAX_ACTIVITIES_PER_REQUEST) {
+    logger.warn('Truncating %d activities to process to %d.', activities.length, ACTIVITY_PUB.MAX_ACTIVITIES_PER_REQUEST)
+
+    activities = activities.slice(0, ACTIVITY_PUB.MAX_ACTIVITIES_PER_REQUEST)
+  }
+
+  const actorsCache: { [url: string]: MActorSignature } = {}
+
+  for (const activity of activities) {
+    if (!activity || typeof activity !== 'object') {
+      logger.warn('Cannot process invalid activity.', { activity })
+      continue
+    }
+
+    if (!signatureActor && [ 'Create', 'Announce', 'Like' ].includes(activity.type) === false) {
+      logger.error('Cannot process activity %s (type: %s) without the actor signature.', activity.id, activity.type)
+      continue
+    }
+
+    let byActor: MActorSignature
+
+    // Activities fetched from a remote instance are not validated, so a malformed one must not prevent processing the others
+    try {
+      const actorUrl = getAPId(activity.actor)
+      if (!actorUrl) throw new Error('Cannot find the actor URL of the activity')
+
+      // When we fetch remote data, we don't have signature
+      if (signatureActor && actorUrl !== signatureActor.url) {
+        logger.warn('Signature mismatch between %s and %s, skipping.', actorUrl, signatureActor.url)
+        continue
+      }
+
+      if (outboxUrl && checkUrlsSameHost(outboxUrl, actorUrl) !== true) {
+        logger.warn('Host mismatch between outbox URL %s and actor URL %s, skipping.', outboxUrl, actorUrl)
+        continue
+      }
+
+      byActor = signatureActor || actorsCache[actorUrl] || await getOrCreateAPActor(actorUrl)
+      actorsCache[actorUrl] = byActor
+    } catch (err) {
+      logger.log(getRemoteErrorLogLevel(err), 'Cannot get the actor of activity %s, skipping.', activity.id, { err })
+      continue
+    }
+
+    const activityProcessor = processActivity.get(activity.type)
+    if (activityProcessor === undefined) {
+      logger.warn('Unknown activity type %s.', activity.type, { activityId: activity.id })
+      continue
+    }
+
+    let success = false
+
+    try {
+      await activityProcessor({ activity, byActor, inboxActor, fromFetch })
+
+      success = true
+    } catch (err) {
+      logger.log(getRemoteErrorLogLevel(err), 'Cannot process activity %s.', activity.type, { err })
+    }
+
+    await StatsManager.Instance.addInboxProcessed(activity.type, success)
+  }
+}

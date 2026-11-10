@@ -1,0 +1,468 @@
+import { ContextType } from '../activitypub/context.js'
+import { VideoFileStreamType, VideoStateType } from '../videos/index.js'
+import { VideoStudioTaskCut } from '../videos/studio/index.js'
+import { SendEmailOptions } from './emailer.model.js'
+
+export type JobState = 'active' | 'completed' | 'failed' | 'waiting' | 'delayed' | 'wait' | 'waiting-children' | 'prioritized' | 'repeat'
+
+export type JobType =
+  | 'activitypub-cleaner'
+  | 'activitypub-follow'
+  | 'activitypub-http-broadcast-parallel'
+  | 'activitypub-http-broadcast'
+  | 'activitypub-http-fetcher'
+  | 'activitypub-http-unicast'
+  | 'activitypub-refresher'
+  | 'actor-keys'
+  | 'after-video-channel-import'
+  | 'build-automatic-tags'
+  | 'build-object-automatic-tags'
+  | 'create-user-export'
+  | 'email'
+  | 'federate-video'
+  | 'generate-video-storyboard'
+  | 'import-user-archive'
+  | 'manage-video-torrent'
+  | 'move-to-file-system'
+  | 'move-to-object-storage'
+  | 'notify'
+  | 'transcoding-job-builder'
+  | 'video-channel-import'
+  | 'video-file-import'
+  | 'video-files-lifecycle'
+  | 'video-import'
+  | 'video-duplicate'
+  | 'video-live-ending'
+  | 'video-redundancy'
+  | 'video-studio-edition'
+  | 'video-transcoding'
+  | 'video-transcription'
+  | 'videos-stats'
+
+// Client API
+export interface Job {
+  id: number | string
+  state: JobState | 'unknown'
+  type: JobType
+  data: any
+  priority: number
+  progress: number
+  error: any
+  createdAt: Date | string
+  finishedOn: Date | string
+  processedOn: Date | string
+  canCancel: boolean
+
+  parent?: {
+    id: string
+  }
+}
+
+// ---------------------------------------------------------------------------
+
+export type ActivitypubHttpBroadcastPayload = {
+  uris: string[]
+  contextType: ContextType
+  body: any
+  signatureActorId?: number
+}
+
+export type ActivitypubFollowPayload = {
+  followerActorId: number
+  name?: string
+  host: string
+  isAutoFollow?: boolean
+  assertIsChannel?: boolean
+}
+
+export type FetchType = 'activity' | 'video-shares' | 'video-comments' | 'account-playlists'
+export type ActivitypubHttpFetcherPayload = {
+  uri: string
+  type: FetchType
+  videoId?: number
+  accountId?: number
+  abortSignal?: AbortSignal
+}
+
+export type ActivitypubHttpUnicastPayload = {
+  uri: string
+  contextType: ContextType
+  signatureActorId?: number
+  body: object
+}
+
+export type RefreshPayload = {
+  type: 'video' | 'video-playlist' | 'actor'
+  url: string
+}
+
+export type EmailPayload = SendEmailOptions
+
+export type VideoFileImportPayload = {
+  videoUUID: string
+  filePath: string
+}
+
+// ---------------------------------------------------------------------------
+
+export type VideoImportTorrentPayloadType = 'magnet-uri' | 'torrent-file'
+export type VideoImportYoutubeDLPayloadType = 'youtube-dl'
+
+interface VideoImportAbstractPayload {
+  preventException: boolean
+  videoImportId: number
+  generateTranscription: boolean
+
+  fromChannelImport?: boolean
+
+  ignoreMaxAttempts?: boolean
+}
+
+export interface VideoImportYoutubeDLPayload extends VideoImportAbstractPayload {
+  type: VideoImportYoutubeDLPayloadType
+
+  fileExt?: string
+}
+
+export interface VideoImportTorrentPayload extends VideoImportAbstractPayload {
+  type: VideoImportTorrentPayloadType
+
+  // Both null if magnet URI
+  torrentPath: string | null
+  torrentStagingKey?: string // The torrent file is in object storage staging instead of `torrentPath`
+}
+
+export type VideoImportPayload = VideoImportYoutubeDLPayload | VideoImportTorrentPayload
+
+export interface VideoImportPreventExceptionResult {
+  resultType: 'success' | 'error'
+}
+
+// ---------------------------------------------------------------------------
+
+export type VideoRedundancyPayload = {
+  videoId: number
+}
+
+export type ManageVideoTorrentPayload = {
+  action: 'create'
+  videoId: number
+  videoFileId: number
+} | {
+  action: 'update-metadata'
+
+  videoId?: number
+  streamingPlaylistId?: number
+
+  videoFileId: number
+}
+
+// Video transcoding payloads
+
+interface BaseTranscodingPayload {
+  videoUUID: string
+  canMoveVideoState: boolean
+}
+
+export interface HLSTranscodingPayload extends BaseTranscodingPayload {
+  type: 'new-resolution-to-hls'
+  resolution: number
+  fps: number
+
+  separatedAudio: boolean
+
+  deleteWebVideoFiles: boolean
+
+  inputStreams: VideoFileStreamType[]
+
+  transcodingRequestAt: string
+}
+
+export interface NewWebVideoResolutionTranscodingPayload extends BaseTranscodingPayload {
+  type: 'new-resolution-to-web-video'
+  resolution: number
+  fps: number
+}
+
+export interface MergeAudioTranscodingPayload extends BaseTranscodingPayload {
+  type: 'merge-audio-to-web-video'
+
+  resolution: number
+  fps: number
+}
+
+export interface OptimizeTranscodingPayload extends BaseTranscodingPayload {
+  type: 'optimize-to-web-video'
+}
+
+export type VideoTranscodingPayload =
+  | HLSTranscodingPayload
+  | NewWebVideoResolutionTranscodingPayload
+  | OptimizeTranscodingPayload
+  | MergeAudioTranscodingPayload
+
+export interface VideoLiveEndingPayload {
+  // Deprecated: use `videoUUID` instead
+  // Remove in PeerTube v9.2
+  videoId?: number
+
+  // Not set by the jobs created by previous versions
+  videoUUID?: string
+
+  publishedAt: string
+  liveSessionId: number
+  streamingPlaylistId: number
+
+  replayDirectory?: string
+}
+
+export interface ActorKeysPayload {
+  actorId: number
+}
+
+// ---------------------------------------------------------------------------
+
+export type MoveStoragePayload =
+  | MoveVideoStoragePayload
+  | MoveCaptionPayload
+  | MoveActorImagesPayload
+  | MoveUploadImagePayload
+  | MoveVideoPlaylistPayload
+
+export interface MoveVideoStoragePayload {
+  videoUUID: string
+
+  moveVideoState?: {
+    previousVideoState: VideoStateType
+  }
+}
+
+export interface MoveCaptionPayload {
+  captionId: number
+}
+
+// All the avatars and banners of an actor, so the actor is federated only once
+export interface MoveActorImagesPayload {
+  actorId: number
+}
+
+export interface MoveUploadImagePayload {
+  uploadImageId: number
+}
+
+export interface MoveVideoPlaylistPayload {
+  videoPlaylistId: number
+}
+
+export function isMoveVideoStoragePayload (payload: any): payload is MoveVideoStoragePayload {
+  return 'videoUUID' in payload
+}
+
+export function isMoveCaptionPayload (payload: any): payload is MoveCaptionPayload {
+  return 'captionId' in payload
+}
+
+export function isMoveActorImagesPayload (payload: any): payload is MoveActorImagesPayload {
+  return 'actorId' in payload
+}
+
+export function isMoveUploadImagePayload (payload: any): payload is MoveUploadImagePayload {
+  return 'uploadImageId' in payload
+}
+
+export function isMoveVideoPlaylistPayload (payload: any): payload is MoveVideoPlaylistPayload {
+  return 'videoPlaylistId' in payload
+}
+
+// ---------------------------------------------------------------------------
+
+export interface VideoFilesLifecyclePayload {
+  videoUUID: string
+
+  policyName: string
+}
+
+// ---------------------------------------------------------------------------
+
+export type VideoStudioTaskCutPayload = VideoStudioTaskCut
+
+export type VideoStudioTaskIntroPayload = {
+  name: 'add-intro'
+
+  options: {
+    file: string
+  }
+}
+
+export type VideoStudioTaskOutroPayload = {
+  name: 'add-outro'
+
+  options: {
+    file: string
+  }
+}
+
+export type VideoStudioTaskWatermarkPayload = {
+  name: 'add-watermark'
+
+  options: {
+    file: string
+
+    watermarkSizeRatio: number
+    horizontalMarginRatio: number
+    verticalMarginRatio: number
+  }
+}
+
+export type VideoStudioTaskRemoveSegmentsPayload = {
+  name: 'remove-segments'
+
+  options: {
+    segments: {
+      start: number
+      end: number
+    }[]
+  }
+}
+
+export type VideoStudioTaskPayload =
+  | VideoStudioTaskCutPayload
+  | VideoStudioTaskIntroPayload
+  | VideoStudioTaskOutroPayload
+  | VideoStudioTaskWatermarkPayload
+  | VideoStudioTaskRemoveSegmentsPayload
+
+export interface VideoStudioEditionPayload {
+  videoUUID: string
+  tasks: VideoStudioTaskPayload[]
+
+  // Task files are staged in object storage: their `file` option is a staging key instead of a local path
+  taskFilesStaged?: boolean
+
+  isDuplicate?: boolean
+}
+
+export interface VideoDuplicatePayload {
+  videoUUID: string
+  sourceVideoUUID: string
+
+  // 'max-quality': the max quality files are copied as web video files, without torrent nor original file
+  // 'all': all the files are copied
+  filesToCopy: 'max-quality' | 'all'
+
+  // Additional job after duplication
+  studio?: {
+    tasks: VideoStudioTaskPayload[]
+    taskFilesStaged: boolean
+
+    // The studio tasks were validated against these files
+    sourceFilenames: string[]
+  }
+}
+
+// ---------------------------------------------------------------------------
+
+export interface VideoChannelImportPayload {
+  externalChannelUrl: string
+  videoChannelId: number
+
+  partOfChannelSyncId?: number
+}
+
+export interface AfterVideoChannelImportPayload {
+  channelSyncId: number
+  buildJobErrors: number
+}
+
+// ---------------------------------------------------------------------------
+
+export type NotifyPayload = {
+  action: 'new-video'
+  videoUUID: string
+}
+
+// ---------------------------------------------------------------------------
+
+export interface FederateVideoPayload {
+  videoUUID: string
+
+  // Actor that overrides the video channel account actor to send the update activity
+  overriddenByActorId?: number
+}
+
+// ---------------------------------------------------------------------------
+
+export interface TranscodingJobBuilderPayload {
+  videoUUID: string
+
+  // This is a transcoding job to optimize the video
+  // Set {} for now, can accept more options in the future
+  optimizeJob?: {}
+
+  // Array of jobs to create
+  jobs?: {
+    type: 'video-transcoding'
+    payload: VideoTranscodingPayload
+    priority?: number
+  }[]
+
+  // Array of sequential jobs to create
+  sequentialJobs?: {
+    type: 'video-transcoding'
+    payload: VideoTranscodingPayload
+    priority?: number
+  }[][]
+}
+
+// ---------------------------------------------------------------------------
+
+export interface GenerateStoryboardPayload {
+  videoUUID: string
+  federate: boolean
+}
+
+// ---------------------------------------------------------------------------
+
+export interface CreateUserExportPayload {
+  userExportId: number
+}
+
+// ---------------------------------------------------------------------------
+
+export interface ImportUserArchivePayload {
+  userImportId: number
+
+  // The archive is in object storage staging instead of the persistent temporary directory
+  stagingKey?: string
+}
+
+// ---------------------------------------------------------------------------
+
+export interface VideoTranscriptionPayload {
+  videoUUID: string
+}
+
+// ---------------------------------------------------------------------------
+
+export interface BuildAutomaticTagsPayload {
+  accountId: number
+  ofComments: boolean
+  ofVideos: boolean
+}
+
+// How the job has to handle the moderation policies bound to automatic tags:
+//  * `apply`: nothing is on hold, apply the policies using the tags built by the job
+//  * `release-hold`: the object has been put on hold (comment held for review, video auto blocked) while waiting for
+//     its tags, so the job has to confirm or release that hold
+//  * `none`: only rebuild the tags
+export type AutomaticTagsModeration = 'apply' | 'release-hold' | 'none'
+
+export interface BuildObjectAutomaticTagsPayload {
+  objectType: 'video' | 'comment'
+  objectId: number
+
+  moderation: AutomaticTagsModeration
+
+  // Only supported for comments
+  notify: boolean | null
+}

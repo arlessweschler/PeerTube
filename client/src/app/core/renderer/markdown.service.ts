@@ -1,13 +1,14 @@
-import * as MarkdownIt from 'markdown-it'
-import { buildVideoLink } from 'src/assets/player/utils'
-import { Injectable } from '@angular/core'
+import { inject, Injectable } from '@angular/core'
 import {
+  buildVideoLink,
   COMPLETE_RULES,
+  decorateVideoLink,
   ENHANCED_RULES,
   ENHANCED_WITH_HTML_RULES,
   TEXT_RULES,
   TEXT_WITH_HTML_RULES
-} from '@shared/core-utils/renderer/markdown'
+} from '@peertube/peertube-core-utils'
+import type { MarkdownIt } from 'markdown-it'
 import { HtmlRendererService } from './html-renderer.service'
 
 type MarkdownParsers = {
@@ -35,6 +36,8 @@ type MarkdownParserConfigs = {
 
 @Injectable()
 export class MarkdownService {
+  private htmlRenderer = inject(HtmlRendererService)
+
   private markdownParsers: MarkdownParsers = {
     textMarkdownIt: null,
     textWithHTMLMarkdownIt: null,
@@ -60,32 +63,57 @@ export class MarkdownService {
 
   private emojiModule: any
 
-  constructor (private htmlRenderer: HtmlRendererService) {}
+  textMarkdownToHTML (options: {
+    markdown: string
+    withHtml?: boolean // default false
+    withEmoji?: boolean // default false
+    userGeneratedLinks?: boolean // default true
+  }) {
+    const { markdown, withHtml = false, withEmoji = false, userGeneratedLinks = true } = options
 
-  textMarkdownToHTML (markdown: string, withHtml = false, withEmoji = false) {
-    if (withHtml) return this.render({ name: 'textWithHTMLMarkdownIt', markdown, withEmoji })
+    if (withHtml) return this.render({ name: 'textWithHTMLMarkdownIt', markdown, withEmoji, userGeneratedLinks })
 
-    return this.render({ name: 'textMarkdownIt', markdown, withEmoji })
+    return this.render({ name: 'textMarkdownIt', markdown, withEmoji, userGeneratedLinks })
   }
 
-  enhancedMarkdownToHTML (markdown: string, withHtml = false, withEmoji = false) {
-    if (withHtml) return this.render({ name: 'enhancedWithHTMLMarkdownIt', markdown, withEmoji })
+  enhancedMarkdownToHTML (options: {
+    markdown: string
+    withHtml?: boolean // default false
+    withEmoji?: boolean // default false
+    userGeneratedLinks?: boolean // default true
+  }) {
+    const { markdown, withHtml = false, withEmoji = false, userGeneratedLinks = true } = options
 
-    return this.render({ name: 'enhancedMarkdownIt', markdown, withEmoji })
+    if (withHtml) return this.render({ name: 'enhancedWithHTMLMarkdownIt', markdown, withEmoji, userGeneratedLinks })
+
+    return this.render({ name: 'enhancedMarkdownIt', markdown, withEmoji, userGeneratedLinks })
   }
 
-  unsafeMarkdownToHTML (markdown: string, _trustedInput: true) {
-    return this.render({ name: 'unsafeMarkdownIt', markdown, withEmoji: true })
+  markdownToUnsafeHTML (options: { markdown: string }) {
+    return this.render({ name: 'unsafeMarkdownIt', markdown: options.markdown, withEmoji: true, userGeneratedLinks: true })
   }
 
-  customPageMarkdownToHTML (markdown: string, additionalAllowedTags: string[]) {
-    return this.render({ name: 'customPageMarkdownIt', markdown, withEmoji: true, additionalAllowedTags })
+  customPageMarkdownToHTML (options: {
+    markdown: string
+    additionalAllowedTags: string[]
+  }) {
+    const { markdown, additionalAllowedTags } = options
+
+    return this.render({ name: 'customPageMarkdownIt', markdown, withEmoji: true, additionalAllowedTags, userGeneratedLinks: false })
   }
 
-  processVideoTimestamps (html: string) {
-    return html.replace(/((\d{1,2}):)?(\d{1,2}):(\d{1,2})/g, function (str, _, h, m, s) {
+  // ---------------------------------------------------------------------------
+
+  processVideoTimestamps (videoShortUUID: string, html: string) {
+    return html.replace(/\b((\d{1,2}):)?(\d{1,2}):(\d{1,2})\b/g, function (str, _, h, m, s) {
       const t = (3600 * +(h || 0)) + (60 * +(m || 0)) + (+(s || 0))
-      const url = buildVideoLink({ startTime: t })
+
+      const url = decorateVideoLink({
+        url: buildVideoLink({ shortUUID: videoShortUUID }),
+        startTime: t
+      })
+
+      // Sync class name with timestamp-route-transformer directive
       return `<a class="video-timestamp" href="${url}">${str}</a>`
     })
   }
@@ -95,47 +123,57 @@ export class MarkdownService {
     markdown: string
     withEmoji: boolean
     additionalAllowedTags?: string[]
+    userGeneratedLinks: boolean
   }) {
-    const { name, markdown, withEmoji, additionalAllowedTags } = options
+    const { name, markdown, withEmoji, additionalAllowedTags, userGeneratedLinks } = options
     if (!markdown) return ''
 
-    const config = this.parsersConfig[ name ]
-    if (!this.markdownParsers[ name ]) {
-      this.markdownParsers[ name ] = await this.createMarkdownIt(config)
+    const config = this.parsersConfig[name]
+    if (!this.markdownParsers[name]) {
+      this.markdownParsers[name] = await this.createMarkdownIt(config, { userGeneratedLinks })
 
       if (withEmoji) {
         if (!this.emojiModule) {
-          this.emojiModule = (await import('markdown-it-emoji/light')).default
+          this.emojiModule = (await import('markdown-it-emoji/lib/light.mjs')).default
         }
 
-        this.markdownParsers[ name ].use(this.emojiModule)
+        this.markdownParsers[name].use(this.emojiModule)
       }
     }
 
-    let html = this.markdownParsers[ name ].render(markdown)
-    html = this.avoidTruncatedTags(html)
+    const html = this.markdownParsers[name].render(markdown)
 
-    if (config.escape) return this.htmlRenderer.toSafeHtml(html, additionalAllowedTags)
+    if (config.escape) {
+      if (name === 'customPageMarkdownIt') {
+        return this.htmlRenderer.toCustomPageSafeHtml(html, additionalAllowedTags)
+      }
+
+      if (name === 'enhancedMarkdownIt' || name === 'enhancedWithHTMLMarkdownIt') {
+        return this.htmlRenderer.toSimpleSafeHtmlWithLinks(html, { allowImages: true })
+      }
+
+      return this.htmlRenderer.toSimpleSafeHtmlWithLinks(html)
+    }
 
     return html
   }
 
-  private async createMarkdownIt (config: MarkdownConfig) {
-    // FIXME: import('...') returns a struct module, containing a "default" field
-    const MarkdownItClass: typeof import ('markdown-it') = (await import('markdown-it') as any).default
+  private async createMarkdownIt (config: MarkdownConfig, options: { userGeneratedLinks: boolean }) {
+    const MarkdownItClass = (await import('markdown-it')).default
 
     const markdownIt = new MarkdownItClass('zero', { linkify: true, breaks: config.breaks, html: config.html })
+    markdownIt.linkify.set({ fuzzyLink: true })
 
     for (const rule of config.rules) {
       markdownIt.enable(rule)
     }
 
-    this.setTargetToLinks(markdownIt)
+    this.setTargetToLinks(markdownIt, options)
 
     return markdownIt
   }
 
-  private setTargetToLinks (markdownIt: MarkdownIt) {
+  private setTargetToLinks (markdownIt: MarkdownIt, { userGeneratedLinks }: { userGeneratedLinks: boolean }) {
     // Snippet from markdown-it documentation: https://github.com/markdown-it/markdown-it/blob/master/docs/architecture.md#renderer
     const defaultRender = markdownIt.renderer.rules.link_open || function (tokens, idx, options, env, self) {
       return self.renderToken(tokens, idx, options)
@@ -148,19 +186,13 @@ export class MarkdownService {
       if (targetIndex < 0) token.attrPush([ 'target', '_blank' ])
       else token.attrs[targetIndex][1] = '_blank'
 
+      const relValues = 'noopener noreferrer '.concat(userGeneratedLinks ? 'ugc' : '')
       const relIndex = token.attrIndex('rel')
-      if (relIndex < 0) token.attrPush([ 'rel', 'noopener noreferrer' ])
-      else token.attrs[relIndex][1] = 'noopener noreferrer'
+      if (relIndex < 0) token.attrPush([ 'rel', relValues ])
+      else token.attrs[relIndex][1] = relValues
 
-      // pass token to default renderer.
+      // pass token to default renderer.*
       return defaultRender(tokens, index, options, env, self)
     }
-  }
-
-  private avoidTruncatedTags (html: string) {
-    return html.replace(/\*\*?([^*]+)$/, '$1')
-      .replace(/<a[^>]+>([^<]+)<\/a>\s*...((<\/p>)|(<\/li>)|(<\/strong>))?$/mi, '$1...')
-      .replace(/\[[^\]]+\]\(([^\)]+)$/m, '$1')
-      .replace(/\s?\[[^\]]+\]?[.]{3}<\/p>$/m, '...</p>')
   }
 }

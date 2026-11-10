@@ -1,49 +1,59 @@
 import { Account } from '@app/shared/shared-main/account/account.model'
-import { VideoChannel } from '@app/shared/shared-main/video-channel/video-channel.model'
+import { VideoChannel } from '@app/shared/shared-main/channel/video-channel.model'
 import {
-  VideoConstant,
+  ConstantLabel,
+  VideoCommentPolicyType,
   VideoDetails as VideoDetailsServerModel,
+  VideoEmbedPrivacyPolicy,
+  VideoEmbedPrivacyPolicyType,
   VideoFile,
-  VideoState,
+  VideoStateType,
   VideoStreamingPlaylist,
   VideoStreamingPlaylistType
-} from '@shared/models'
+} from '@peertube/peertube-models'
 import { Video } from './video.model'
+import { sortBy } from '@peertube/peertube-core-utils'
 
 export class VideoDetails extends Video implements VideoDetailsServerModel {
-  descriptionPath: string
+  declare channel: VideoChannel
+  declare account: Account
+
   support: string
-  channel: VideoChannel
-  tags: string[]
-  files: VideoFile[]
-  account: Account
-  commentsEnabled: boolean
   downloadEnabled: boolean
 
-  waitTranscoding: boolean
-  state: VideoConstant<VideoState>
+  commentsPolicy: ConstantLabel<VideoCommentPolicyType>
 
   likesPercent: number
   dislikesPercent: number
 
   trackerUrls: string[]
 
-  streamingPlaylists: VideoStreamingPlaylist[]
+  inputFileUpdatedAt: Date | string
+
+  embedPrivacyPolicy: ConstantLabel<VideoEmbedPrivacyPolicyType>
+
+  // These fields are not optional
+  declare files: VideoFile[]
+  declare streamingPlaylists: VideoStreamingPlaylist[]
+  declare waitTranscoding: boolean
+  declare state: ConstantLabel<VideoStateType>
+  declare tags: string[]
 
   constructor (hash: VideoDetailsServerModel, translations = {}) {
     super(hash, translations)
 
-    this.descriptionPath = hash.descriptionPath
-    this.files = hash.files
     this.channel = new VideoChannel(hash.channel)
     this.account = new Account(hash.account)
     this.tags = hash.tags
     this.support = hash.support
-    this.commentsEnabled = hash.commentsEnabled
+    this.commentsPolicy = hash.commentsPolicy
     this.downloadEnabled = hash.downloadEnabled
 
+    this.inputFileUpdatedAt = hash.inputFileUpdatedAt
+
     this.trackerUrls = hash.trackerUrls
-    this.streamingPlaylists = hash.streamingPlaylists
+
+    this.embedPrivacyPolicy = hash.embedPrivacyPolicy
 
     this.buildLikeAndDislikePercents()
   }
@@ -61,12 +71,25 @@ export class VideoDetails extends Video implements VideoDetailsServerModel {
     return !!this.getHlsPlaylist()
   }
 
-  getFiles () {
-    if (this.files.length !== 0) return this.files
+  hasEmbedRestrictions () {
+    return this.embedPrivacyPolicy.id !== VideoEmbedPrivacyPolicy.ALL_ALLOWED
+  }
 
-    const hls = this.getHlsPlaylist()
-    if (hls) return hls.files
+  hasEmbedDisabled () {
+    return this.embedPrivacyPolicy.id === VideoEmbedPrivacyPolicy.DISABLED
+  }
 
-    return []
+  // Try to find the best video file to download
+  // It builds an array and prioritizes web videos that play on more third-party players.
+  getFilesForDownload () {
+    const store = this.files
+
+    for (const file of (this.getHlsPlaylist()?.files || [])) {
+      if (!store.some(f => f.resolution.id === file.resolution.id && f.fps === file.fps)) {
+        store.push(file)
+      }
+    }
+
+    return sortBy(store, 'resolution', 'id').reverse()
   }
 }

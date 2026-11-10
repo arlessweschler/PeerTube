@@ -1,0 +1,28 @@
+<div class="cfp-hotkeys-container fade" data-nosnippet [ngClass]="{'in': helpVisible}">
+  <div class="cfp-hotkeys">
+    <h2 class="cfp-hotkeys-title">{{ title() }}</h2>
+
+    <div class="d-flex justify-content-center m-3">
+      <my-peertube-checkbox
+        inputName="enable-hotkeys" [(ngModel)]="hotkeysEnabled" (ngModelChange)="onHotkeysEnabledChange()"
+        i18n-labelText labelText="Enable hotkeys in this web browser"
+      ></my-peertube-checkbox>
+    </div>
+
+    <ul role="presentation">
+      @for (hotkey of hotkeys; track hotkey) {
+        <li>
+          <div class="cfp-hotkeys-keys">
+            @for (key of hotkey.formatted; track key) {
+              <span>{{ key }}</span>
+            }
+          </div>
+
+          <div class="cfp-hotkeys-text">{{ hotkey.description }}</div>
+        </li>
+      }
+    </ul>
+
+    <button class="button-unstyle cfp-hotkeys-close" (click)="toggleCheatSheet()">&#215;</button>
+  </div>
+</div>

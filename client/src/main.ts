@@ -1,16 +1,123 @@
-import { ApplicationRef, enableProdMode } from '@angular/core'
-import { enableDebugTools } from '@angular/platform-browser'
-import { platformBrowserDynamic } from '@angular/platform-browser-dynamic'
-import { AppModule } from './app/app.module'
+import { APP_BASE_HREF, registerLocaleData } from '@angular/common'
+import { provideHttpClient, withInterceptors } from '@angular/common/http'
+import {
+  ApplicationRef,
+  enableProdMode,
+  importProvidersFrom,
+  inject,
+  provideAppInitializer,
+  provideZoneChangeDetection
+} from '@angular/core'
+import { BrowserModule, bootstrapApplication, enableDebugTools } from '@angular/platform-browser'
+import { RouteReuseStrategy, provideRouter, withInMemoryScrolling, withPreloading } from '@angular/router'
+import { ServiceWorkerModule } from '@angular/service-worker'
+import { PTPrimeTheme } from '@app/core/theme/primeng/primeng-theme'
+import localeOc from '@app/helpers/locales/oc'
+import { getFormProviders } from '@app/shared/shared-forms/shared-form-providers'
+import { languageInterceptor } from '@app/shared/shared-main/http/language-interceptor.service'
+import { NgbModalModule } from '@ng-bootstrap/ng-bootstrap'
+import { LoadingBarHttpClientModule } from '@ngx-loading-bar/http-client'
+import { providePrimeNG } from 'primeng/config'
+import { ToastModule } from 'primeng/toast'
+import { switchMap } from 'rxjs/operators'
+import { AppComponent } from './app/app.component'
+import routes from './app/app.routes'
+import {
+  CustomReuseStrategy,
+  PluginService,
+  PreloadSelectedModulesList,
+  RedirectService,
+  ServerService,
+  ThemeService,
+  getCoreProviders
+} from './app/core'
+import { getMainProviders } from './app/shared/shared-main/main-providers'
 import { environment } from './environments/environment'
+import { logger } from './root-helpers'
+
+registerLocaleData(localeOc, 'oc')
+
+export function loadConfigFactory (
+  server: ServerService,
+  pluginService: PluginService,
+  themeService: ThemeService,
+  redirectService: RedirectService
+) {
+  const initializeServices = () => {
+    redirectService.init()
+    themeService.initialize()
+
+    return pluginService.initializePlugins()
+  }
+
+  return () => {
+    const result = server.loadHTMLConfig()
+    if (result) return result.pipe(switchMap(() => initializeServices()))
+
+    return initializeServices()
+  }
+}
 
 if (environment.production) {
   enableProdMode()
 }
 
-const bootstrap = () => platformBrowserDynamic()
-  .bootstrapModule(AppModule)
-  .then(bootstrapModule => {
+logger.registerServerSending(environment.apiUrl)
+
+const bootstrap = () => {
+  return bootstrapApplication(AppComponent, {
+    providers: [
+      provideZoneChangeDetection({ eventCoalescing: true }),
+
+      importProvidersFrom(
+        BrowserModule,
+        ServiceWorkerModule.register('ngsw-worker.js', { enabled: environment.production })
+      ),
+
+      provideHttpClient(
+        withInterceptors([ languageInterceptor ])
+      ),
+
+      importProvidersFrom(
+        LoadingBarHttpClientModule,
+        ToastModule,
+        NgbModalModule
+      ),
+
+      getCoreProviders(),
+      getMainProviders(),
+      getFormProviders(),
+
+      PreloadSelectedModulesList,
+      { provide: RouteReuseStrategy, useClass: CustomReuseStrategy },
+
+      provideRouter(
+        routes,
+        withPreloading(PreloadSelectedModulesList),
+        withInMemoryScrolling({
+          anchorScrolling: 'disabled',
+          // Redefined in app component
+          scrollPositionRestoration: 'disabled'
+        })
+      ),
+
+      {
+        provide: APP_BASE_HREF,
+        useValue: '/'
+      },
+      provideAppInitializer(() => {
+        const initializerFn = loadConfigFactory(inject(ServerService), inject(PluginService), inject(ThemeService), inject(RedirectService))
+
+        return initializerFn()
+      }),
+
+      providePrimeNG({
+        theme: {
+          preset: PTPrimeTheme
+        }
+      })
+    ]
+  }).then(bootstrapModule => {
     if (!environment.production) {
       const applicationRef = bootstrapModule.injector.get(ApplicationRef)
       const componentRef = applicationRef.components[0]
@@ -20,10 +127,22 @@ const bootstrap = () => platformBrowserDynamic()
     }
 
     return bootstrapModule
+  }).catch(err => {
+    try {
+      logger.error(err)
+    } catch (err2) {
+      console.error('Cannot log error', { err, err2 })
+    }
+
+    // Ensure we display an "incompatible message" on Angular bootstrap error
+    setTimeout(() => {
+      if (document.querySelector('my-app').innerHTML === '') {
+        throw err
+      }
+    }, 1000)
+
+    return null as any
   })
-  .catch(err => {
-    console.error(err)
-    return null
-  })
+}
 
 bootstrap()

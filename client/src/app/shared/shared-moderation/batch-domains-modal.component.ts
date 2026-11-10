@@ -1,39 +1,39 @@
-import { Component, EventEmitter, Input, OnInit, Output, ViewChild } from '@angular/core'
-import { FormReactive, FormValidatorService } from '@app/shared/shared-forms'
-import { NgbModal } from '@ng-bootstrap/ng-bootstrap'
-import { NgbModalRef } from '@ng-bootstrap/ng-bootstrap/modal/modal-ref'
-import { DOMAINS_VALIDATOR, getNotEmptyHosts } from '../form-validators/batch-domains-validators'
+import { NgClass } from '@angular/common'
+import { Component, OnInit, inject, input, output, viewChild, ChangeDetectionStrategy } from '@angular/core'
+import { FormsModule, ReactiveFormsModule } from '@angular/forms'
+import { FormReactive } from '@app/shared/shared-forms/form-reactive'
+import { FormReactiveService } from '@app/shared/shared-forms/form-reactive.service'
+import { NgbModal, NgbModalRef } from '@ng-bootstrap/ng-bootstrap'
+import { splitAndGetNotEmpty } from '@root-helpers/string'
+import { UNIQUE_HOSTS_VALIDATOR } from '../form-validators/host-validators'
+import { GlobalIconComponent } from '../shared-icons/global-icon.component'
 
 @Component({
   selector: 'my-batch-domains-modal',
   templateUrl: './batch-domains-modal.component.html',
-  styleUrls: [ './batch-domains-modal.component.scss' ]
+  styleUrls: [ './batch-domains-modal.component.scss' ],
+  changeDetection: ChangeDetectionStrategy.Eager,
+  imports: [ GlobalIconComponent, FormsModule, ReactiveFormsModule, NgClass ]
 })
 export class BatchDomainsModalComponent extends FormReactive implements OnInit {
-  @ViewChild('modal', { static: true }) modal: NgbModal
-  @Input() placeholder = 'example.com'
-  @Input() action: string
-  @Output() domains = new EventEmitter<string[]>()
+  protected formReactiveService = inject(FormReactiveService)
+  private modalService = inject(NgbModal)
+
+  readonly modal = viewChild<NgbModal>('modal')
+  readonly placeholder = input('example.com')
+  readonly action = input<string>($localize`Process domains`)
+  readonly domains = output<string[]>()
 
   private openedModal: NgbModalRef
 
-  constructor (
-    protected formValidatorService: FormValidatorService,
-    private modalService: NgbModal
-  ) {
-    super()
-  }
-
   ngOnInit () {
-    if (!this.action) this.action = $localize`Process domains`
-
     this.buildForm({
-      domains: DOMAINS_VALIDATOR
+      hosts: UNIQUE_HOSTS_VALIDATOR
     })
   }
 
   openModal () {
-    this.openedModal = this.modalService.open(this.modal, { centered: true })
+    this.openedModal = this.modalService.open(this.modal(), { centered: true })
   }
 
   hide () {
@@ -41,9 +41,7 @@ export class BatchDomainsModalComponent extends FormReactive implements OnInit {
   }
 
   submit () {
-    this.domains.emit(
-      getNotEmptyHosts(this.form.controls['domains'].value)
-    )
+    this.domains.emit(splitAndGetNotEmpty(this.form.controls['hosts'].value))
     this.form.reset()
     this.hide()
   }

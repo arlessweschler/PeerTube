@@ -1,0 +1,837 @@
+/* oxlint-disable @typescript-eslint/no-unused-expressions,@typescript-eslint/require-await */
+
+import { CustomConfig, HttpStatusCode, Video, VideoImportState, VideoPrivacy, VideoResolution, VideoState } from '@peertube/peertube-models'
+import { areHttpImportTestsDisabled, areYoutubeImportTestsDisabled } from '@peertube/peertube-node-utils'
+import {
+  PeerTubeServer,
+  cleanupTests,
+  createMultipleServers,
+  createSingleServer,
+  doubleFollow,
+  getServerImportConfig,
+  setAccessTokensToServers,
+  setDefaultVideoChannel,
+  waitJobs
+} from '@peertube/peertube-server-commands'
+import { DeepPartial } from '@peertube/peertube-typescript-utils'
+import { testCaptionFile } from '@tests/shared/captions.js'
+import { FIXTURE_URLS } from '@tests/shared/fixture-urls.js'
+import { SQLCommand } from '@tests/shared/sql-command.js'
+import { checkThumbnails } from '@tests/shared/videos.js'
+import { expect } from 'chai'
+import { pathExists, remove } from 'fs-extra/esm'
+import { readdir } from 'fs/promises'
+import { join } from 'path'
+
+async function checkVideosServer1 (server: PeerTubeServer, idHttp: string | undefined, idMagnet: string, idTorrent: string) {
+  if (idHttp) {
+    const videoHttp = await server.videos.get({ id: idHttp })
+
+    expect(videoHttp.name).to.equal('small video - youtube')
+    expect(videoHttp.category.label).to.equal('News & Politics')
+    expect(videoHttp.licence.label).to.equal('Attribution')
+    expect(videoHttp.language.label).to.equal('Unknown')
+    expect(videoHttp.nsfw).to.be.false
+    expect(videoHttp.description).to.equal('this is a super description')
+    expect(videoHttp.tags).to.deep.equal([ 'tag1', 'tag2' ])
+    expect(videoHttp.files).to.have.lengthOf(1)
+
+    const originallyPublishedAt = new Date(videoHttp.originallyPublishedAt)
+    expect(originallyPublishedAt.getDate()).to.equal(14)
+    expect(originallyPublishedAt.getMonth()).to.equal(0)
+    expect(originallyPublishedAt.getFullYear()).to.equal(2019)
+
+    const bodyCaptions = await server.captions.list({ videoId: idHttp })
+    expect(bodyCaptions.total).to.equal(2)
+  }
+
+  const videoMagnet = await server.videos.get({ id: idMagnet })
+  const videoTorrent = await server.videos.get({ id: idTorrent })
+
+  for (const video of [ videoMagnet, videoTorrent ]) {
+    expect(video.category.label).to.equal('Unknown')
+    expect(video.licence.label).to.equal('Unknown')
+    expect(video.language.label).to.equal('Unknown')
+    expect(video.nsfw).to.be.false
+    expect(video.description).to.equal('this is a super torrent description')
+    expect(video.tags).to.deep.equal([ 'tag_torrent1', 'tag_torrent2' ])
+    expect(video.files).to.have.lengthOf(1)
+  }
+
+  expect(videoTorrent.name).to.contain('你好 世界 720p.mp4')
+  expect(videoMagnet.name).to.contain('super peertube2 video')
+}
+
+async function checkVideoServer2 (server: PeerTubeServer, id: number | string) {
+  const video = await server.videos.get({ id })
+
+  expect(video.name).to.equal('my super name')
+  expect(video.category.label).to.equal('Entertainment')
+  expect(video.licence.label).to.equal('Public Domain Dedication')
+  expect(video.language.label).to.equal('English')
+  expect(video.nsfw).to.be.false
+  expect(video.description).to.equal('my super description')
+  expect(video.tags).to.deep.equal([ 'supertag1', 'supertag2' ])
+
+  await checkThumbnails({ server, video, thumbnails: [ 'custom-thumbnail-280x157.jpg', 'custom-thumbnail-850x480.jpg' ] })
+
+  expect(video.files).to.have.lengthOf(1)
+
+  const bodyCaptions = await server.captions.list({ videoId: id })
+  expect(bodyCaptions.total).to.equal(2)
+}
+
+describe('Test video imports', function () {
+  if (areHttpImportTestsDisabled()) return
+
+  function runSuite (mode: 'youtube-dl' | 'yt-dlp') {
+    describe('Import ' + mode, function () {
+      let servers: PeerTubeServer[] = []
+      let importId: number
+      let importVideoId: number
+
+      before(async function () {
+        this.timeout(60_000)
+
+        servers = await createMultipleServers(2, getServerImportConfig(mode))
+
+        await setAccessTokensToServers(servers)
+        await setDefaultVideoChannel(servers)
+
+        for (const server of servers) {
+          await server.config.updateExistingConfig({
+            newConfig: {
+              transcoding: {
+                alwaysTranscodeOriginalResolution: false
+              }
+            }
+          })
+        }
+
+        await doubleFollow(servers[0], servers[1])
+      })
+
+      it('Should import a youtube-dl video on server 1', async function () {
+        if (areYoutubeImportTestsDisabled()) return
+
+        this.timeout(60_000)
+
+        const attributes = { privacy: VideoPrivacy.PUBLIC, targetUrl: FIXTURE_URLS.youtube }
+        const { video, id } = await servers[0].videoImports.importVideo({ attributes })
+        importId = id
+        importVideoId = video.id
+
+        expect(video.name).to.equal('small video - youtube')
+
+        const extension = video.thumbnails[0].fileUrl.endsWith('.webp')
+          ? '.webp'
+          : '.jpg'
+
+        const pathRegexp = new RegExp(`^/lazy-static/thumbnails/.+.${extension}$`)
+        const urlRegexp = new RegExp(`^${servers[0].url}/lazy-static/thumbnails/.+.${extension}$`)
+
+        // oxlint-disable-next-line @typescript-eslint/no-deprecated
+        expect(video.thumbnailPath).to.match(pathRegexp)
+        // oxlint-disable-next-line @typescript-eslint/no-deprecated
+        expect(video.previewPath).to.match(pathRegexp)
+
+        for (const thumbnail of video.thumbnails) {
+          expect(thumbnail.fileUrl).to.match(urlRegexp)
+        }
+
+        const bodyCaptions = await servers[0].captions.list({ videoId: video.id })
+        const videoCaptions = bodyCaptions.data
+        expect(videoCaptions).to.have.lengthOf(2)
+
+        {
+          const enCaption = videoCaptions.find(caption => caption.language.id === 'en')
+          expect(enCaption).to.exist
+          expect(enCaption.language.label).to.equal('English')
+          expect(enCaption.fileUrl).to.match(new RegExp(`^${servers[0].url}/lazy-static/video-captions/.+-en.vtt$`))
+
+          const regex = `WEBVTT[ \n]+Kind: captions[ \n]+` +
+            `(Language: en[ \n]+)?` +
+            `00:00:01.600 --> 00:00:04.200( position:\\d+% line:\\d+%)?[ \n]+English \\(US\\)[ \n]+` +
+            `00:00:05.900 --> 00:00:07.999( position:\\d+% line:\\d+%)?[ \n]+This is a subtitle in American English[ \n]+` +
+            `00:00:10.000 --> 00:00:14.000( position:\\d+% line:\\d+%)?[ \n]+Adding subtitles is very easy to do`
+          await testCaptionFile(enCaption.fileUrl, new RegExp(regex))
+        }
+
+        {
+          const frCaption = videoCaptions.find(caption => caption.language.id === 'fr')
+          expect(frCaption).to.exist
+          expect(frCaption.language.label).to.equal('French')
+          expect(frCaption.fileUrl).to.match(new RegExp(`^${servers[0].url}/lazy-static/video-captions/.+-fr.vtt`))
+
+          const regex = `WEBVTT[ \n]+Kind: captions[ \n]+` +
+            `(Language: fr[ \n]+)?` +
+            `00:00:01.600 --> 00:00:04.200( position:\\d+% line:\\d+%)?[ \n]+Français \\(FR\\)[ \n]+` +
+            `00:00:05.900 --> 00:00:07.999( position:\\d+% line:\\d+%)?[ \n]+C'est un sous-titre français[ \n]+` +
+            `00:00:10.000 --> 00:00:14.000( position:\\d+% line:\\d+%)?[ \n]+Ajouter un sous-titre est vraiment facile`
+
+          await testCaptionFile(frCaption.fileUrl, new RegExp(regex))
+        }
+      })
+
+      it('Should import a magnet video on server 1', async function () {
+        this.timeout(60_000)
+
+        const attributes = {
+          privacy: VideoPrivacy.PUBLIC,
+          magnetUri: FIXTURE_URLS.magnet,
+          description: 'this is a super torrent description',
+          tags: [ 'tag_torrent1', 'tag_torrent2' ]
+        }
+        const { video } = await servers[0].videoImports.importVideo({ attributes })
+        expect(video.name).to.equal('super peertube2 video')
+      })
+
+      it('Should import a torrent video on server 1', async function () {
+        const attributes = {
+          privacy: VideoPrivacy.PUBLIC,
+          torrentfile: 'video-720p.torrent' as any,
+          description: 'this is a super torrent description',
+          tags: [ 'tag_torrent1', 'tag_torrent2' ]
+        }
+        const { video } = await servers[0].videoImports.importVideo({ attributes })
+        expect(video.name).to.equal('你好 世界 720p.mp4')
+      })
+
+      it('Should list the videos to import in my videos on server 1', async function () {
+        const { total, data } = await servers[0].videos.listMyVideos({ sort: 'createdAt' })
+
+        const expected = [ 'super peertube2 video', '你好 世界 720p.mp4' ]
+
+        if (!areYoutubeImportTestsDisabled()) {
+          expected.unshift('small video - youtube')
+        }
+
+        expect(total).to.equal(expected.length)
+        expect(data).to.have.lengthOf(expected.length)
+        expect(data.map(d => d.name)).to.have.deep.equal(expected)
+      })
+
+      it('Should list the videos to import in my imports on server 1', async function () {
+        if (areYoutubeImportTestsDisabled()) return
+
+        const { total, data: videoImports } = await servers[0].videoImports.listMyVideoImports({ sort: '-createdAt' })
+
+        const totalExpected = areYoutubeImportTestsDisabled()
+          ? 2
+          : 3
+
+        expect(total).to.equal(totalExpected)
+        expect(videoImports).to.have.lengthOf(totalExpected)
+
+        if (!areYoutubeImportTestsDisabled()) {
+          const videoImport = videoImports.pop()
+
+          expect(videoImport.targetUrl).to.equal(FIXTURE_URLS.youtube)
+          expect(videoImport.magnetUri).to.be.null
+          expect(videoImport.torrentName).to.be.null
+          expect(videoImport.video.name).to.equal('small video - youtube')
+        }
+
+        {
+          const videoImport = videoImports.pop()
+
+          expect(videoImport.targetUrl).to.be.null
+          expect(videoImport.magnetUri).to.equal(FIXTURE_URLS.magnet)
+          expect(videoImport.torrentName).to.be.null
+          expect(videoImport.video.name).to.equal('super peertube2 video')
+        }
+
+        {
+          const videoImport = videoImports.pop()
+
+          expect(videoImport.magnetUri).to.be.null
+          expect(videoImport.targetUrl).to.be.null
+          expect(videoImport.torrentName).to.equal('video-720p.torrent')
+          expect(videoImport.video.name).to.equal('你好 世界 720p.mp4')
+        }
+      })
+
+      it('Should filter my imports on id', async function () {
+        if (areYoutubeImportTestsDisabled()) return
+
+        const { total, data: videoImports } = await servers[0].videoImports.listMyVideoImports({ id: importId })
+        expect(total).to.equal(1)
+        expect(videoImports).to.have.lengthOf(1)
+
+        expect(videoImports[0].id).to.equal(importId)
+      })
+
+      it('Should filter my imports on videoId', async function () {
+        if (areYoutubeImportTestsDisabled()) return
+
+        const { total, data: videoImports } = await servers[0].videoImports.listMyVideoImports({ videoId: importVideoId })
+        expect(total).to.equal(1)
+        expect(videoImports).to.have.lengthOf(1)
+
+        expect(videoImports[0].id).to.equal(importId)
+      })
+
+      it('Should filter my imports on target URL', async function () {
+        if (areYoutubeImportTestsDisabled()) return
+
+        const { total, data: videoImports } = await servers[0].videoImports.listMyVideoImports({ targetUrl: FIXTURE_URLS.youtube })
+        expect(total).to.equal(1)
+        expect(videoImports).to.have.lengthOf(1)
+
+        expect(videoImports[0].targetUrl).to.equal(FIXTURE_URLS.youtube)
+      })
+
+      it('Should search in my imports', async function () {
+        {
+          const { total, data } = await servers[0].videoImports.listMyVideoImports({ search: 'peertube2' })
+          expect(total).to.equal(1)
+          expect(data).to.have.lengthOf(1)
+
+          expect(data[0].magnetUri).to.equal(FIXTURE_URLS.magnet)
+          expect(data[0].video.name).to.equal('super peertube2 video')
+        }
+
+        {
+          const { total, data } = await servers[0].videoImports.listMyVideoImports({ search: FIXTURE_URLS.magnet })
+          expect(total).to.equal(1)
+          expect(data).to.have.lengthOf(1)
+
+          expect(data[0].magnetUri).to.equal(FIXTURE_URLS.magnet)
+          expect(data[0].video.name).to.equal('super peertube2 video')
+        }
+      })
+
+      it('Should have the video listed on the two instances', async function () {
+        this.timeout(120_000)
+
+        await waitJobs(servers)
+
+        const totalExpected = areYoutubeImportTestsDisabled()
+          ? 2
+          : 3
+
+        for (const server of servers) {
+          const { total, data } = await server.videos.list()
+          expect(total).to.equal(totalExpected)
+          expect(data).to.have.lengthOf(totalExpected)
+
+          const [ videoHttp, videoMagnet, videoTorrent ] = areYoutubeImportTestsDisabled()
+            ? [ undefined, ...data ]
+            : data
+
+          await checkVideosServer1(server, videoHttp?.uuid, videoMagnet.uuid, videoTorrent.uuid)
+        }
+      })
+
+      it('Should filter my imports on stateOneOf', async function () {
+        const { total, data: videoImports } = await servers[0].videoImports.listMyVideoImports({
+          stateOneOf: [ VideoImportState.SUCCESS ]
+        })
+
+        const totalExpected = areYoutubeImportTestsDisabled()
+          ? 2
+          : 3
+
+        expect(total).to.equal(totalExpected)
+        expect(videoImports).to.have.lengthOf(totalExpected)
+
+        for (const videoImport of videoImports) {
+          expect(videoImport.state.id).to.equal(VideoImportState.SUCCESS)
+        }
+      })
+
+      it('Should import a video on server 2 with some fields', async function () {
+        if (areYoutubeImportTestsDisabled()) return
+
+        this.timeout(60_000)
+
+        const { video } = await servers[1].videoImports.importVideo({
+          attributes: {
+            targetUrl: FIXTURE_URLS.youtube,
+            channelId: servers[1].store.channel.id,
+            privacy: VideoPrivacy.PUBLIC,
+            category: 10,
+            licence: 7,
+            language: 'en',
+            name: 'my super name',
+            description: 'my super description',
+            tags: [ 'supertag1', 'supertag2' ],
+            thumbnailfile: 'custom-thumbnail-input.jpg'
+          }
+        })
+        expect(video.name).to.equal('my super name')
+      })
+
+      it('Should have the videos listed on the two instances', async function () {
+        if (areYoutubeImportTestsDisabled()) return
+
+        this.timeout(120_000)
+
+        await waitJobs(servers)
+
+        for (const server of servers) {
+          const { total, data } = await server.videos.list()
+          expect(total).to.equal(4)
+          expect(data).to.have.lengthOf(4)
+
+          await checkVideoServer2(server, data[0].uuid)
+
+          const [ , videoHttp, videoMagnet, videoTorrent ] = data
+          await checkVideosServer1(server, videoHttp.uuid, videoMagnet.uuid, videoTorrent.uuid)
+        }
+      })
+
+      it('Should import a video that will be transcoded', async function () {
+        this.timeout(240_000)
+
+        const attributes = {
+          name: 'transcoded video',
+          magnetUri: FIXTURE_URLS.magnet,
+          channelId: servers[1].store.channel.id,
+          privacy: VideoPrivacy.PUBLIC
+        }
+        const { video } = await servers[1].videoImports.importVideo({ attributes })
+        const videoUUID = video.uuid
+
+        await waitJobs(servers)
+
+        for (const server of servers) {
+          const video = await server.videos.get({ id: videoUUID })
+
+          expect(video.name).to.equal('transcoded video')
+          expect(video.files).to.have.lengthOf(4)
+        }
+      })
+
+      it('Should import no HDR version on a HDR video', async function () {
+        if (areYoutubeImportTestsDisabled()) return
+
+        this.timeout(300_000)
+
+        const config: DeepPartial<CustomConfig> = {
+          transcoding: {
+            enabled: true,
+            resolutions: {
+              '0p': false,
+              '144p': true,
+              '240p': true,
+              '360p': false,
+              '480p': false,
+              '720p': false,
+              '1080p': false, // the resulting resolution shouldn't be higher than this, and not vp9.2/av01
+              '1440p': false,
+              '2160p': false
+            },
+            webVideos: { enabled: true },
+            hls: { enabled: false }
+          }
+        }
+        await servers[0].config.updateExistingConfig({ newConfig: config })
+
+        const attributes = {
+          name: 'hdr video',
+          targetUrl: FIXTURE_URLS.youtubeHDR,
+          channelId: servers[0].store.channel.id,
+          privacy: VideoPrivacy.PUBLIC
+        }
+        const { video: videoImported } = await servers[0].videoImports.importVideo({ attributes })
+        const videoUUID = videoImported.uuid
+
+        await waitJobs(servers)
+
+        // test resolution
+        const video = await servers[0].videos.get({ id: videoUUID })
+        expect(video.name).to.equal('hdr video')
+        const maxResolution = Math.max.apply(
+          Math,
+          video.files.map(function (o) {
+            return o.resolution.id
+          })
+        )
+        expect(maxResolution, 'expected max resolution not met').to.equals(VideoResolution.H_240P)
+      })
+
+      it('Should not import resolution higher than enabled transcoding resolution', async function () {
+        if (areYoutubeImportTestsDisabled()) return
+
+        this.timeout(300_000)
+
+        const config: DeepPartial<CustomConfig> = {
+          transcoding: {
+            enabled: true,
+            resolutions: {
+              '0p': false,
+              '144p': true,
+              '240p': false,
+              '360p': false,
+              '480p': false,
+              '720p': false,
+              '1080p': false,
+              '1440p': false,
+              '2160p': false
+            },
+            alwaysTranscodeOriginalResolution: false
+          }
+        }
+        await servers[0].config.updateExistingConfig({ newConfig: config })
+
+        const attributes = {
+          name: 'small resolution video',
+          targetUrl: FIXTURE_URLS.youtube,
+          channelId: servers[0].store.channel.id,
+          privacy: VideoPrivacy.PUBLIC
+        }
+        const { video: videoImported } = await servers[0].videoImports.importVideo({ attributes })
+        const videoUUID = videoImported.uuid
+
+        await waitJobs(servers)
+
+        // test resolution
+        const video = await servers[0].videos.get({ id: videoUUID })
+        expect(video.name).to.equal('small resolution video')
+        expect(video.files).to.have.lengthOf(1)
+        expect(video.files[0].resolution.id).to.equal(144)
+      })
+
+      it('Should import resolution higher than enabled transcoding resolution', async function () {
+        if (areYoutubeImportTestsDisabled()) return
+
+        this.timeout(300_000)
+
+        const config: DeepPartial<CustomConfig> = {
+          transcoding: {
+            alwaysTranscodeOriginalResolution: true
+          }
+        }
+        await servers[0].config.updateExistingConfig({ newConfig: config })
+
+        const attributes = {
+          name: 'bigger resolution video',
+          targetUrl: FIXTURE_URLS.youtube,
+          channelId: servers[0].store.channel.id,
+          privacy: VideoPrivacy.PUBLIC
+        }
+        const { video: videoImported } = await servers[0].videoImports.importVideo({ attributes })
+        const videoUUID = videoImported.uuid
+
+        await waitJobs(servers)
+
+        // test resolution
+        const video = await servers[0].videos.get({ id: videoUUID })
+        expect(video.name).to.equal('bigger resolution video')
+
+        expect(video.files).to.have.lengthOf(2)
+        expect(video.files.find(f => f.resolution.id === 320)).to.exist
+        expect(video.files.find(f => f.resolution.id === 144)).to.exist
+      })
+
+      it('Should import a peertube video', async function () {
+        this.timeout(120_000)
+
+        const toTest = [ FIXTURE_URLS.peertubeLong ]
+
+        // TODO: include peertube_short when https://github.com/ytdl-org/youtube-dl/pull/29475 is merged
+        if (mode === 'yt-dlp') {
+          toTest.push(FIXTURE_URLS.peertubeShort)
+        }
+
+        for (const targetUrl of toTest) {
+          await servers[0].config.disableTranscoding()
+
+          const attributes = {
+            targetUrl,
+            channelId: servers[0].store.channel.id,
+            privacy: VideoPrivacy.PUBLIC
+          }
+          const { video } = await servers[0].videoImports.importVideo({ attributes })
+          const videoUUID = video.uuid
+
+          await waitJobs(servers)
+
+          for (const server of servers) {
+            const video = await server.videos.get({ id: videoUUID })
+
+            expect(video.name).to.equal('E2E tests')
+
+            const { data: captions } = await server.captions.list({ videoId: videoUUID })
+            expect(captions).to.have.lengthOf(1)
+            expect(captions[0].language.id).to.equal('fr')
+
+            const str = `WEBVTT FILE\r?\n\r?\n` +
+              `1\r?\n` +
+              `00:00:04.000 --> 00:00:09.000\r?\n` +
+              `January 1, 1994. The North American`
+            await testCaptionFile(captions[0].fileUrl, new RegExp(str))
+          }
+        }
+      })
+
+      after(async function () {
+        await cleanupTests(servers)
+      })
+    })
+  }
+
+  // FIXME: youtube-dl seems broken
+  // runSuite('youtube-dl')
+
+  runSuite('yt-dlp')
+
+  describe('Managing an import', function () {
+    let server: PeerTubeServer
+    let sqlCommand: SQLCommand
+
+    let finishedImportId: number
+    let finishedVideo: Video
+    let pendingImportId: number
+
+    async function importVideo (name: string) {
+      const attributes = { name, channelId: server.store.channel.id, targetUrl: FIXTURE_URLS.goodVideo }
+      const res = await server.videoImports.importVideo({ attributes })
+
+      return res.id
+    }
+
+    before(async function () {
+      this.timeout(120_000)
+
+      server = await createSingleServer(1)
+      sqlCommand = new SQLCommand(server)
+
+      await setAccessTokensToServers([ server ])
+      await setDefaultVideoChannel([ server ])
+
+      finishedImportId = await importVideo('finished')
+      await waitJobs([ server ])
+
+      await server.jobs.pauseJobQueue()
+      pendingImportId = await importVideo('pending')
+
+      const { data } = await server.videoImports.listMyVideoImports()
+      expect(data).to.have.lengthOf(2)
+
+      finishedVideo = data.find(i => i.id === finishedImportId).video
+    })
+
+    it('Should delete a video import', async function () {
+      await server.videoImports.delete({ importId: finishedImportId })
+
+      const { data } = await server.videoImports.listMyVideoImports()
+      expect(data).to.have.lengthOf(1)
+      expect(data[0].id).to.equal(pendingImportId)
+      expect(data[0].state.id).to.equal(VideoImportState.PENDING)
+    })
+
+    it('Should not have deleted the associated video', async function () {
+      const video = await server.videos.get({ id: finishedVideo.id, token: server.accessToken, expectedStatus: HttpStatusCode.OK_200 })
+      expect(video.name).to.equal('finished')
+      expect(video.state.id).to.equal(VideoState.PUBLISHED)
+    })
+
+    it('Should cancel a video import', async function () {
+      await server.videoImports.cancel({ importId: pendingImportId })
+
+      const { data } = await server.videoImports.listMyVideoImports()
+      expect(data).to.have.lengthOf(1)
+      expect(data[0].id).to.equal(pendingImportId)
+      expect(data[0].state.id).to.equal(VideoImportState.CANCELLED)
+    })
+
+    it('Should not have processed the cancelled video import', async function () {
+      this.timeout(60_000)
+
+      await server.jobs.resumeJobQueue()
+
+      await waitJobs([ server ])
+
+      const { data } = await server.videoImports.listMyVideoImports()
+      expect(data).to.have.lengthOf(1)
+      expect(data[0].id).to.equal(pendingImportId)
+      expect(data[0].state.id).to.equal(VideoImportState.CANCELLED)
+      expect(data[0].video.state.id).to.equal(VideoState.TO_IMPORT)
+    })
+
+    it('Should delete the cancelled video import', async function () {
+      await server.videoImports.delete({ importId: pendingImportId })
+      const { data } = await server.videoImports.listMyVideoImports()
+      expect(data).to.have.lengthOf(0)
+    })
+
+    it('Should fail an import', async function () {
+      await server.jobs.pauseJobQueue()
+
+      pendingImportId = await importVideo('to retry')
+
+      await sqlCommand.setImportUrl(pendingImportId, FIXTURE_URLS.badVideo)
+      await server.jobs.resumeJobQueue()
+
+      await waitJobs([ server ])
+
+      const { data } = await server.videoImports.listMyVideoImports()
+      expect(data[0].state.id).to.equal(VideoImportState.FAILED)
+
+      const video = await server.videos.getWithToken({ id: data[0].video.id })
+      expect(video.state.id).to.equal(VideoState.TO_IMPORT_FAILED)
+    })
+
+    it('Should retry an import job', async function () {
+      await sqlCommand.setImportUrl(pendingImportId, FIXTURE_URLS.goodVideo)
+
+      await server.videoImports.retry({ importId: pendingImportId })
+      await waitJobs([ server ])
+
+      const { data } = await server.videoImports.listMyVideoImports()
+      expect(data[0].state.id).to.equal(VideoImportState.SUCCESS)
+
+      const video = await server.videos.getWithToken({ id: data[0].video.id })
+      expect(video.state.id).to.equal(VideoState.PUBLISHED)
+    })
+
+    it('Should retry a cancelled import job', async function () {
+      this.timeout(60_000)
+
+      await server.jobs.pauseJobQueue()
+
+      const cancelledImportId = await importVideo('to retry from cancel')
+      await server.videoImports.cancel({ importId: cancelledImportId })
+
+      await server.jobs.resumeJobQueue()
+      await waitJobs([ server ])
+
+      {
+        const { data } = await server.videoImports.listMyVideoImports({ id: cancelledImportId })
+        expect(data[0].state.id).to.equal(VideoImportState.CANCELLED)
+      }
+
+      await server.videoImports.retry({ importId: cancelledImportId })
+      await waitJobs([ server ])
+
+      {
+        const { data } = await server.videoImports.listMyVideoImports({ id: cancelledImportId })
+        expect(data[0].state.id).to.equal(VideoImportState.SUCCESS)
+
+        const video = await server.videos.getWithToken({ id: data[0].video.id })
+        expect(video.state.id).to.equal(VideoState.PUBLISHED)
+      }
+    })
+
+    it('Should retry by video another user import that reached the maximum number of attempts as admin', async function () {
+      this.timeout(60_000)
+
+      const userToken = await server.users.generateUserAndToken('import_user')
+
+      await server.jobs.pauseJobQueue()
+
+      const { id: importId, video } = await server.videoImports.quickImport({
+        name: 'user import to retry',
+        targetUrl: FIXTURE_URLS.goodVideo,
+        token: userToken
+      })
+
+      await sqlCommand.setImportUrl(importId, FIXTURE_URLS.badVideo)
+      await server.jobs.resumeJobQueue()
+      await waitJobs([ server ])
+
+      await sqlCommand.setImportAttempts(importId, 1000)
+      await sqlCommand.setImportUrl(importId, FIXTURE_URLS.goodVideo)
+
+      await server.videoImports.retryByVideo({ videoId: video.uuid, token: userToken, expectedStatus: HttpStatusCode.BAD_REQUEST_400 })
+
+      await server.videoImports.retryByVideo({ videoId: video.uuid })
+      await waitJobs([ server ])
+
+      const { data } = await server.videoImports.listMyVideoImports({ id: importId, token: userToken })
+      expect(data[0].state.id).to.equal(VideoImportState.SUCCESS)
+      expect(data[0].attempts).to.equal(1001)
+
+      const videoDetails = await server.videos.getWithToken({ id: video.uuid })
+      expect(videoDetails.state.id).to.equal(VideoState.PUBLISHED)
+    })
+
+    after(async function () {
+      await sqlCommand?.cleanup()
+
+      await cleanupTests([ server ])
+    })
+  })
+
+  describe('Auto update', function () {
+    let server: PeerTubeServer
+
+    function quickPeerTubeImport () {
+      const attributes = {
+        targetUrl: FIXTURE_URLS.peertubeLong,
+        channelId: server.store.channel.id,
+        privacy: VideoPrivacy.PUBLIC
+      }
+
+      return server.videoImports.importVideo({ attributes })
+    }
+
+    async function testBinaryUpdate (releaseUrl: string, releaseName: string, pythonPath = '/usr/bin/python3') {
+      await remove(join(server.servers.buildDirectory('bin'), releaseName))
+
+      await server.kill()
+      await server.run({
+        import: {
+          videos: {
+            http: {
+              youtube_dl_release: {
+                url: releaseUrl,
+                name: releaseName,
+                python_path: pythonPath
+              }
+            }
+          }
+        }
+      })
+
+      await quickPeerTubeImport()
+
+      const base = server.servers.buildDirectory('bin')
+      const content = await readdir(base)
+      const binaryPath = join(base, releaseName)
+
+      expect(await pathExists(binaryPath), `${binaryPath} does not exist in ${base} (${content.join(', ')})`).to.be.true
+    }
+
+    before(async function () {
+      this.timeout(30_000)
+
+      // Run servers
+      server = await createSingleServer(1)
+
+      await setAccessTokensToServers([ server ])
+      await setDefaultVideoChannel([ server ])
+    })
+
+    it('Should update youtube-dl from github URL', async function () {
+      this.timeout(120_000)
+
+      await testBinaryUpdate('https://api.github.com/repos/ytdl-org/youtube-dl/releases', 'youtube-dl')
+    })
+
+    // FIXME: official instance is broken
+    // it('Should update youtube-dl from raw URL', async function () {
+    //   this.timeout(120_000)
+
+    //   await testBinaryUpdate('https://yt-dl.org/downloads/latest/youtube-dl', 'youtube-dl')
+    // })
+
+    it('Should update youtube-dl from youtube-dl fork', async function () {
+      this.timeout(120_000)
+
+      await testBinaryUpdate('https://api.github.com/repos/yt-dlp/yt-dlp/releases', 'yt-dlp')
+    })
+
+    it('Should update and import youtube-dl linux executable', async function () {
+      this.timeout(120_000)
+
+      await testBinaryUpdate('https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp_linux', 'yt-dlp', null)
+    })
+
+    after(async function () {
+      await cleanupTests([ server ])
+    })
+  })
+})

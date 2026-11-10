@@ -1,0 +1,165 @@
+@use "_variables" as *;
+@use "_css-variables" as *;
+@use "_mixins" as *;
+
+$filters-background: pvar(--bg-secondary-400);
+
+.root {
+  margin-bottom: 1rem;
+
+  // Prevent layout shift
+  min-height: 140px;
+}
+
+.scope-info {
+  font-size: 20px;
+  color: pvar(--fg-350);
+}
+
+.select-label {
+  font-weight: normal;
+  margin-bottom: 0;
+  color: pvar(--fg-200);
+  font-size: 1rem;
+
+  @include margin-right(0.5rem);
+}
+
+.section {
+  min-width: 1px;
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+}
+
+.section-title {
+  font-size: 1.25rem;
+  font-weight: $font-bold;
+  color: pvar(--fg-300);
+  margin-bottom: 0.5rem;
+
+  .with-description {
+    font-size: 14px;
+    font-weight: normal;
+
+    a {
+      color: inherit;
+    }
+  }
+}
+
+.form-group-description {
+  color: pvar(--fg-300);
+}
+
+.filters {
+  display: flex;
+  flex-wrap: wrap;
+  background-color: $filters-background;
+  border-radius: 14px;
+
+  @include define-input-css-variables-in-secondary;
+  @include rfs(1.5rem, padding);
+  @include rfs(3rem, gap);
+
+  input[type="radio"] + label {
+    font-weight: $font-regular;
+  }
+
+  .form-group {
+    margin-bottom: 1.5rem;
+
+    > label:not(.select-label) {
+      display: block;
+      color: pvar(--fg-300);
+      font-size: 18px;
+    }
+  }
+}
+
+.active-filters {
+  .active-filter:not(:last-child)::after {
+    content: "•";
+    font-weight: normal;
+    display: inline-block;
+    margin: 0 5px;
+  }
+}
+
+.filters-summary {
+  color: pvar(--fg-200);
+}
+
+.filters-toggle {
+  padding: pvar(--input-y-padding) 0.5rem calc(#{pvar(--input-y-padding)} + 0.75rem) 0.75rem;
+
+  @include margin-left(0.75rem);
+
+  my-global-icon {
+    color: pvar(--secondary-icon-color);
+
+    @include margin-left(5px);
+  }
+
+  &.active {
+    background-color: $filters-background;
+    border-start-start-radius: 14px;
+    border-start-end-radius: 14px;
+
+    my-global-icon {
+      position: relative;
+      top: -1px;
+    }
+  }
+
+  &:not(.active) my-global-icon ::ng-deep svg {
+    transform: rotate(180deg);
+  }
+}
+
+.scope-select {
+  min-width: 250px;
+  max-width: 300px;
+  height: min-content;
+}
+
+my-select-videos-sort,
+my-select-videos-scope,
+my-select-languages,
+my-select-categories {
+  max-width: 300px;
+  display: inline-block;
+}
+
+.update-your-settings {
+  font-size: 12px;
+  margin-bottom: 10px;
+
+  a {
+    color: pvar(--primary);
+    text-decoration: underline;
+  }
+}
+
+@media screen and (max-width: $small-view) {
+  .scope-select {
+    min-width: auto;
+    max-width: 90%;
+  }
+
+  .filters-toggle {
+    margin-top: 0.5rem;
+
+    @include margin-left(0);
+  }
+
+  .filters-summary {
+    display: flex;
+    flex-direction: column;
+  }
+
+  .filters {
+    border-start-start-radius: 0;
+    border-start-end-radius: 0;
+  }
+}

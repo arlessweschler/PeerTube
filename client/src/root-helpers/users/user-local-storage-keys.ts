@@ -1,15 +1,34 @@
 export const UserLocalStorageKeys = {
   ID: 'id',
+  USERNAME: 'username',
   ROLE: 'role',
   EMAIL: 'email',
-  VIDEOS_HISTORY_ENABLED: 'videos-history-enabled',
-  USERNAME: 'username',
+
   NSFW_POLICY: 'nsfw_policy',
-  WEBTORRENT_ENABLED: 'peertube-videojs-' + 'webtorrent_enabled',
+
+  NSFW_FLAGS_DISPLAYED: 'nsfw_flags_displayed',
+  NSFW_FLAGS_HIDDEN: 'nsfw_flags_hidden',
+  NSFW_FLAGS_WARNED: 'nsfw_flags_warned',
+  NSFW_FLAGS_BLURRED: 'nsfw_flags_blurred',
+
+  AI_USAGES_HIDDEN: 'ai_usages_hidden',
+
+  P2P_ENABLED: 'peertube-videojs-webtorrent_enabled',
+
   AUTO_PLAY_VIDEO: 'auto_play_video',
-  SESSION_STORAGE_AUTO_PLAY_NEXT_VIDEO: 'auto_play_next_video',
+  AUTO_PLAY_NEXT_VIDEO: 'auto_play_next_video',
   AUTO_PLAY_VIDEO_PLAYLIST: 'auto_play_video_playlist',
+
   THEME: 'theme',
   LAST_ACTIVE_THEME: 'last_active_theme',
-  VIDEO_LANGUAGES: 'video_languages'
+
+  VIDEO_LANGUAGES: 'video_languages',
+  VIDEO_CATEGORIES: 'video_categories',
+  VIDEO_LIVE: 'video_live'
+}
+
+export const UserTokenLocalStorageKeys = {
+  ACCESS_TOKEN: 'access_token',
+  REFRESH_TOKEN: 'refresh_token',
+  TOKEN_TYPE: 'token_type'
 }

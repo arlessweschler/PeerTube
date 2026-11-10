@@ -1,0 +1,308 @@
+import { pick } from '@peertube/peertube-core-utils'
+import {
+  HttpStatusCode,
+  UserRegister,
+  UserRegistrationRequest,
+  UserRegistrationState,
+  UserRegistrationUpdateState,
+  UserRight
+} from '@peertube/peertube-models'
+import { USER_REGISTRATION_STATES } from '@server/initializers/constants.js'
+import { Emailer } from '@server/lib/emailer.js'
+import { Hooks } from '@server/lib/plugins/hooks.js'
+import { Redis } from '@server/lib/redis/index.js'
+import { UserRegistrationModel } from '@server/models/user/user-registration.js'
+import express from 'express'
+import {
+  auditLog,
+  buildRegistrationAuditEntity,
+  buildUserAuditEntity,
+  getAuditActorFromRes,
+  getAuditActorFromUser,
+  getAuditAnonymousActor
+} from '../../../lib/audit-log/index.js'
+import { createLogger } from '../../../helpers/logger.js'
+import { CONFIG } from '../../../initializers/config.js'
+import { Notifier } from '../../../lib/notifier/index.js'
+import {
+  buildUser,
+  createUserAccountAndChannelAndPlaylist,
+  sendVerifyRegistrationEmail,
+  sendVerifyRegistrationRequestEmail
+} from '../../../lib/user.js'
+import {
+  acceptOrRejectRegistrationValidator,
+  asyncMiddleware,
+  asyncRetryTransactionMiddleware,
+  authenticate,
+  buildRateLimiter,
+  determineSignupMode,
+  ensureUserHasRight,
+  ensureUserRegistrationAllowedFactory,
+  ensureUserRegistrationAllowedForIP,
+  getRegistrationValidator,
+  listRegistrationsValidator,
+  paginationValidator,
+  setDefaultPagination,
+  setDefaultSort,
+  userRegistrationsSortValidator,
+  usersRegistrationValidator,
+  usersRequestRegistrationValidator
+} from '../../../middlewares/index.js'
+
+const logger = createLogger()
+
+const registrationRateLimiter = buildRateLimiter({
+  enabled: CONFIG.RATES_LIMIT.SIGNUP.ENABLED,
+  name: 'signup',
+  windowMs: CONFIG.RATES_LIMIT.SIGNUP.WINDOW_MS,
+  max: CONFIG.RATES_LIMIT.SIGNUP.MAX,
+  skipFailedRequests: true,
+  failOnUnavailableRedis: true
+})
+
+const registrationsRouter = express.Router()
+
+registrationsRouter.post(
+  '/registrations/request',
+  registrationRateLimiter,
+  asyncMiddleware(ensureUserRegistrationAllowedFactory('request-registration')),
+  ensureUserRegistrationAllowedForIP,
+  asyncMiddleware(usersRequestRegistrationValidator),
+  asyncRetryTransactionMiddleware(requestRegistration)
+)
+
+registrationsRouter.post(
+  '/registrations/:registrationId/accept',
+  authenticate,
+  ensureUserHasRight(UserRight.MANAGE_REGISTRATIONS),
+  asyncMiddleware(acceptOrRejectRegistrationValidator),
+  asyncRetryTransactionMiddleware(acceptRegistration)
+)
+registrationsRouter.post(
+  '/registrations/:registrationId/reject',
+  authenticate,
+  ensureUserHasRight(UserRight.MANAGE_REGISTRATIONS),
+  asyncMiddleware(acceptOrRejectRegistrationValidator),
+  asyncRetryTransactionMiddleware(rejectRegistration)
+)
+
+registrationsRouter.delete(
+  '/registrations/:registrationId',
+  authenticate,
+  ensureUserHasRight(UserRight.MANAGE_REGISTRATIONS),
+  asyncMiddleware(getRegistrationValidator),
+  asyncRetryTransactionMiddleware(deleteRegistration)
+)
+
+registrationsRouter.get(
+  '/registrations',
+  authenticate,
+  ensureUserHasRight(UserRight.MANAGE_REGISTRATIONS),
+  paginationValidator,
+  userRegistrationsSortValidator,
+  setDefaultSort,
+  setDefaultPagination,
+  listRegistrationsValidator,
+  asyncMiddleware(listRegistrations)
+)
+
+registrationsRouter.post(
+  '/register',
+  registrationRateLimiter,
+  asyncMiddleware(determineSignupMode),
+  asyncMiddleware(ensureUserRegistrationAllowedFactory()),
+  ensureUserRegistrationAllowedForIP,
+  usersRegistrationValidator,
+  asyncRetryTransactionMiddleware(registerUser)
+)
+
+// ---------------------------------------------------------------------------
+
+export {
+  registrationsRouter
+}
+
+// ---------------------------------------------------------------------------
+
+async function requestRegistration (req: express.Request, res: express.Response) {
+  const body: UserRegistrationRequest = req.body
+
+  const registration = new UserRegistrationModel({
+    ...pick(body, [ 'username', 'password', 'email', 'registrationReason' ]),
+
+    accountDisplayName: body.displayName,
+    channelDisplayName: body.channel?.displayName,
+    channelHandle: body.channel?.name,
+
+    state: UserRegistrationState.PENDING,
+
+    emailVerified: CONFIG.SIGNUP.REQUIRES_EMAIL_VERIFICATION ? false : null
+  })
+
+  await registration.save()
+
+  if (body.signupClient) await Redis.Instance.setRegistrationSignupClient(registration.id, body.signupClient)
+
+  auditLog.create(getAuditAnonymousActor(req), () => buildRegistrationAuditEntity(registration))
+
+  if (CONFIG.SIGNUP.REQUIRES_EMAIL_VERIFICATION) {
+    await sendVerifyRegistrationRequestEmail(registration)
+  }
+
+  Notifier.Instance.notifyOnNewRegistrationRequest(registration)
+
+  Hooks.runAction('action:api.user.requested-registration', { body, registration, req, res })
+
+  return res.json(registration.toFormattedJSON())
+}
+
+// ---------------------------------------------------------------------------
+
+async function acceptRegistration (req: express.Request, res: express.Response) {
+  const registration = res.locals.userRegistration
+  const body: UserRegistrationUpdateState = req.body
+
+  const oldRegistrationAuditEntity = auditLog.snapshot(() => buildRegistrationAuditEntity(registration))
+
+  const userToCreate = buildUser({
+    username: registration.username,
+    password: registration.password,
+    email: registration.email,
+    emailVerified: registration.emailVerified
+  })
+  // We already encrypted password in registration model
+  userToCreate.skipPasswordEncryption = true
+
+  // TODO: handle conflicts if someone else created a channel handle/user handle/user email between registration and approval
+
+  const { user } = await createUserAccountAndChannelAndPlaylist({
+    userToCreate,
+    userDisplayName: registration.accountDisplayName,
+    channelNames: registration.channelHandle && registration.channelDisplayName
+      ? {
+        name: registration.channelHandle,
+        displayName: registration.channelDisplayName
+      }
+      : undefined
+  })
+
+  registration.userId = user.id
+  registration.state = UserRegistrationState.ACCEPTED
+  registration.moderationResponse = body.moderationResponse
+
+  if (!registration.processedAt) registration.processedAt = new Date()
+
+  await registration.save()
+
+  const auditActor = getAuditActorFromRes(res)
+  auditLog.create(auditActor, () => buildUserAuditEntity(user))
+  auditLog.update(auditActor, () => buildRegistrationAuditEntity(registration), oldRegistrationAuditEntity)
+
+  logger.info('Registration of %s accepted', registration.username)
+
+  if (body.preventEmailDelivery !== true) {
+    const signupClient = await Redis.Instance.getRegistrationSignupClient(registration.id)
+
+    Emailer.Instance.addUserRegistrationRequestProcessedJob(registration, signupClient)
+  }
+
+  return res.sendStatus(HttpStatusCode.NO_CONTENT_204)
+}
+
+async function rejectRegistration (req: express.Request, res: express.Response) {
+  const registration = res.locals.userRegistration
+  const body: UserRegistrationUpdateState = req.body
+
+  const oldRegistrationAuditEntity = auditLog.snapshot(() => buildRegistrationAuditEntity(registration))
+
+  registration.state = UserRegistrationState.REJECTED
+  registration.moderationResponse = body.moderationResponse
+
+  if (!registration.processedAt) registration.processedAt = new Date()
+
+  await registration.save()
+
+  auditLog.update(getAuditActorFromRes(res), () => buildRegistrationAuditEntity(registration), oldRegistrationAuditEntity)
+
+  if (body.preventEmailDelivery !== true) {
+    Emailer.Instance.addUserRegistrationRequestProcessedJob(registration)
+  }
+
+  logger.info('Registration of %s rejected', registration.username)
+
+  return res.sendStatus(HttpStatusCode.NO_CONTENT_204)
+}
+
+// ---------------------------------------------------------------------------
+
+async function deleteRegistration (req: express.Request, res: express.Response) {
+  const registration = res.locals.userRegistration
+
+  await registration.destroy()
+
+  auditLog.delete(getAuditActorFromRes(res), () => buildRegistrationAuditEntity(registration))
+
+  logger.info('Registration of %s deleted', registration.username)
+
+  return res.sendStatus(HttpStatusCode.NO_CONTENT_204)
+}
+
+// ---------------------------------------------------------------------------
+
+async function listRegistrations (req: express.Request, res: express.Response) {
+  const resultList = await UserRegistrationModel.listForApi({
+    start: req.query.start,
+    count: req.query.count,
+    sort: req.query.sort,
+    search: req.query.search,
+    stateOneOf: req.query.stateOneOf
+  })
+
+  return res.json({
+    total: resultList.total,
+    data: resultList.data.map(d => d.toFormattedJSON())
+  })
+}
+
+// ---------------------------------------------------------------------------
+
+async function registerUser (req: express.Request, res: express.Response) {
+  if (res.locals.signupMode === 'request-registration') {
+    return requestRegistration(req, res)
+  }
+
+  const body: UserRegister = req.body
+
+  const userToCreate = buildUser({
+    ...pick(body, [ 'username', 'password', 'email' ]),
+
+    emailVerified: CONFIG.SIGNUP.REQUIRES_EMAIL_VERIFICATION ? false : null
+  })
+
+  const { user, account, videoChannel } = await createUserAccountAndChannelAndPlaylist({
+    userToCreate,
+    userDisplayName: body.displayName || undefined,
+    channelNames: body.channel
+  })
+
+  auditLog.create(getAuditActorFromUser(user, req), () => buildUserAuditEntity(user))
+  logger.info('User %s with its channel and account registered.', body.username)
+
+  if (body.signupClient) await Redis.Instance.setUserSignupClient(user.id, body.signupClient)
+
+  if (CONFIG.SIGNUP.REQUIRES_EMAIL_VERIFICATION) {
+    await sendVerifyRegistrationEmail(user)
+  }
+
+  Notifier.Instance.notifyOnNewDirectRegistration(user)
+
+  Hooks.runAction('action:api.user.registered', { body, user, account, videoChannel, req, res })
+
+  return res.json({
+    state: {
+      id: UserRegistrationState.ACCEPTED,
+      label: USER_REGISTRATION_STATES[UserRegistrationState.ACCEPTED]
+    }
+  })
+}

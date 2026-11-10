@@ -1,4 +1,6 @@
-name: "Stats"
+name: Stats
+
+permissions: {}
 
 on:
   push:
@@ -18,51 +20,42 @@ jobs:
       CI_BRANCH_BASE: develop
 
     steps:
-      - uses: actions/checkout@v2
-
-      - name: Use Node.js
-        uses: actions/setup-node@v1
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
         with:
-          node-version: '12.x'
+          persist-credentials: false
 
-      - name: Cache Node.js modules
-        uses: actions/cache@v2
+      - uses: './.github/actions/reusable-prepare-peertube-build'
         with:
-          path: |
-            **/node_modules
-          key: ${{ runner.OS }}-node-${{ hashFiles('**/yarn.lock') }}
-          restore-keys: |
-            ${{ runner.OS }}-node-
-            ${{ runner.OS }}-
+          node-version: '22.x'
 
-      - name: Install dependencies
-        run: yarn install --frozen-lockfile
-
-      - name: Angular bundlewatch
-        uses: jackyef/bundlewatch-gh-action@master
-        with:
-          build-script: npm run build -- --analyze-bundle
-          branch-base: develop
-          bundlewatch-github-token: ${{ secrets.BUNDLEWATCH_GITHUB_TOKEN }}
+      - name: Build
+        run: npm run build -- --analyze-bundle
 
       - name: PeerTube code stats
         if: github.event_name != 'pull_request'
+        env:
+          SCC_VERSION: '3.0.0'
+          SCC_SHA256: '13ca47ce00b5bd032f97f3af7aa8eb3c717b8972b404b155a378b09110e4aa0c'
         run: |
-          wget "https://github.com/boyter/scc/releases/download/v3.0.0/scc-3.0.0-x86_64-unknown-linux.zip"
-          unzip "scc-3.0.0-x86_64-unknown-linux.zip"
-          ./scc --format=json --exclude-dir .git,node_modules,client/node_modules,client/dist,dist,yarn.lock,client/yarn.lock,client/src/locale,test1,test2,test3,client/src/assets/images,config,storage,server/tests/fixtures,support/openapi,.idea,.vscode,docker-volume,ffmpeg-3,ffmpeg-4 > ./scc.json
+          set -euo pipefail
+
+          curl -fsSL -o "$RUNNER_TEMP/scc.zip" "https://github.com/boyter/scc/releases/download/v$SCC_VERSION/scc-$SCC_VERSION-x86_64-unknown-linux.zip"
+          echo "$SCC_SHA256  $RUNNER_TEMP/scc.zip" | sha256sum --check --strict
+          unzip -o "$RUNNER_TEMP/scc.zip" scc -d "$RUNNER_TEMP/scc"
+
+          "$RUNNER_TEMP/scc/scc" --format=json --exclude-dir .git,node_modules,client/node_modules,client/dist,dist,pnpm-lock.yaml,client/src/locale,test1,test2,test3,client/src/assets/images,config,storage,packages/tests/fixtures,support/openapi,.idea,.vscode,docker-volume,ffmpeg-3,ffmpeg-4 > ./scc.json
 
       - name: PeerTube client stats
         if: github.event_name != 'pull_request'
         run: |
-          node dist/scripts/client-build-stats.js > client-build-stats.json
+          npm run -s client:build-stats > client-build-stats.json
 
       - name: PeerTube client lighthouse report
         if: github.event_name != 'pull_request'
         run: |
           sudo apt-get install chromium-browser
-          sudo npm install -g lighthouse
-          lighthouse --chrome-flags="--headless" https://peertube2.cpy.re --output=json --output-path=./lighthouse.json
+          sudo npm install -g lighthouse@13.5.0
+          lighthouse --chrome-flags="--disable-gpu --no-sandbox --no-zygote --headless=new" https://peertube2.cpy.re --output=json --output-path=./lighthouse.json
 
       - name: Display stats
         if: github.event_name != 'pull_request'
@@ -73,27 +66,11 @@ jobs:
 
       - name: Upload stats
         if: github.event_name != 'pull_request'
-        env:
-          STATS_DEPLOYEMENT_KNOWN_HOSTS: ${{ secrets.STATS_DEPLOYEMENT_KNOWN_HOSTS }}
-          STATS_DEPLOYEMENT_KEY: ${{ secrets.STATS_DEPLOYEMENT_KEY }}
-          STATS_DEPLOYEMENT_USER: ${{ secrets.STATS_DEPLOYEMENT_USER }}
-          STATS_DEPLOYEMENT_HOST: ${{ secrets.STATS_DEPLOYEMENT_HOST }}
-        run: |
-          mkdir -p ~/.ssh
-          chmod 700  ~/.ssh
-          if [ ! -z ${STATS_DEPLOYEMENT_KNOWN_HOSTS+x} ]; then
-            echo "Adding ssh key to known hosts"
-            echo -e "${STATS_DEPLOYEMENT_KNOWN_HOSTS}" > ~/.ssh/known_hosts;
-          fi
-
-          eval `ssh-agent -s`
-
-          if [ ! -z ${STATS_DEPLOYEMENT_KEY+x} ]; then
-            echo "Adding ssh reployement key"
-            ssh-add <(echo "${STATS_DEPLOYEMENT_KEY}");
-          fi
-
-          if [ ! -z ${STATS_DEPLOYEMENT_KEY+x} ]; then
-            echo "Uploading files"
-            scp lighthouse.json client-build-stats.json scc.json ${STATS_DEPLOYEMENT_USER}@${STATS_DEPLOYEMENT_HOST}:../../web/peertube-stats;
-          fi
+        uses: './.github/actions/reusable-deploy'
+        with:
+          source: lighthouse.json client-build-stats.json scc.json
+          destination: peertube-stats
+          knownHosts: ${{ secrets.STATS_DEPLOYEMENT_KNOWN_HOSTS }}
+          deployKey: ${{ secrets.STATS_DEPLOYEMENT_KEY }}
+          deployUser: ${{ secrets.STATS_DEPLOYEMENT_USER }}
+          deployHost: ${{ secrets.STATS_DEPLOYEMENT_HOST }}

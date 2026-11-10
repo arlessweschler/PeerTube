@@ -1,13 +1,19 @@
-@import '_variables';
-@import '_mixins';
+@use "_variables" as *;
+@use "_mixins" as *;
+@use "_form-mixins" as *;
 
-$optional-rows-checkbox-width: 34px;
-$timestamp-width: 50px;
-$timestamp-margin-right: 10px;
+my-timestamp-input {
+  width: 100px;
+}
+
+my-playlist-create-block {
+  display: block;
+}
 
 .header,
 .dropdown-item,
-.input-container {
+.input-container,
+my-playlist-create-block {
   padding: 8px 24px;
 }
 
@@ -32,7 +38,7 @@ $timestamp-margin-right: 10px;
 }
 
 .playlists {
-  max-height: 180px;
+  max-height: 200px;
   overflow-y: auto;
 }
 
@@ -44,7 +50,7 @@ $timestamp-margin-right: 10px;
   }
 
   > .optional-rows {
-    padding-left: 24px;
+    @include padding-left(24px);
   }
 
   &.has-optional-row:hover {
@@ -52,13 +58,14 @@ $timestamp-margin-right: 10px;
   }
 }
 
-.primary-row,
-.optional-rows > div {
+.primary-row {
   display: flex;
+  width: 100%;
 
   my-peertube-checkbox {
-    margin-right: 10px;
     align-self: center;
+
+    @include margin-right(10px);
   }
 
   .display-name {
@@ -68,60 +75,54 @@ $timestamp-margin-right: 10px;
     margin: 0;
     font-weight: $font-regular;
     cursor: pointer;
+    font-size: 1rem;
   }
 
   .optional-row-icon {
-    display: flex;
-    align-items: center;
-    font-size: 14px;
     cursor: pointer;
 
+    @include margin-left(0.5rem);
+
     my-global-icon {
-      @include apply-svg-color(#333);
+      color: pvar(--fg-400);
 
-      width: 19px;
-      height: 19px;
-      margin-right: 0;
+      @include global-icon-size(19px);
     }
-  }
 
-  my-timestamp-input {
-    margin-right: $timestamp-margin-right;
-
-    ::ng-deep .ui-inputtext {
-      padding: 0;
-      width: $timestamp-width;
+    &:hover {
+      opacity: 0.8;
     }
   }
 }
 
 .optional-rows {
-  > div {
-    padding: 8px 5px 5px 10px;
-  }
+  display: grid;
+  grid-template-columns: 35px 105px 105px;
+  row-gap: 3px;
+  column-gap: 10px;
+  align-items: center;
 
   my-peertube-checkbox {
-    display: block;
-    width: $optional-rows-checkbox-width;
-    margin-right: 0 !important;
+    @include margin-left(auto);
   }
 
-  .labels {
-    margin-left: $optional-rows-checkbox-width;
+  .header-label {
     font-size: 13px;
-    color: pvar(--greyForegroundColor);
-    padding-top: 5px;
-    padding-bottom: 0;
+    color: pvar(--fg-300);
+    padding-left: 2px;
 
-    div {
-      margin-right: $timestamp-margin-right;
-      width: $timestamp-width;
+    &:nth-child(1) {
+      grid-column: 2;
+    }
+
+    &:nth-child(2) {
+      grid-column: 3;
     }
   }
 }
 
 .new-playlist-button,
-.new-playlist-block {
+my-playlist-create-block {
   padding-top: 10px;
   border-top: 1px solid $separator-border-color;
 }
@@ -130,24 +131,19 @@ $timestamp-margin-right: 10px;
   cursor: pointer;
 
   my-global-icon {
-    @include apply-svg-color(#333);
-
     position: relative;
     left: -1px;
     top: -1px;
-    margin-right: 4px;
     width: 21px;
     height: 21px;
+    line-height: 21px;
+    display: inline-block;
+    color: pvar(--fg-400);
+
+    @include margin-right(13px);
   }
 }
 
-input[type=text] {
+input[type="text"] {
   @include peertube-input-text(200px);
-
-  display: block;
-}
-
-input[type=submit] {
-  @include peertube-button;
-  @include orange-button;
 }

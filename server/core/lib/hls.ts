@@ -1,0 +1,481 @@
+import { sortBy, uniqify, uuidRegex } from '@peertube/peertube-core-utils'
+import { ffprobePromise, getVideoStreamDimensionsInfo, hasAudioStream } from '@peertube/peertube-ffmpeg'
+import { FileStorage, VideoResolution } from '@peertube/peertube-models'
+import { sha256 } from '@peertube/peertube-node-utils'
+import { ApplicationModel } from '@server/models/application/application.js'
+import { VideoCaptionModel } from '@server/models/video/video-caption.js'
+import {
+  MStreamingPlaylist,
+  MStreamingPlaylistFilesVideo,
+  MStreamingPlaylistVideo,
+  MVideo,
+  MVideoCaption,
+  MVideoFileStreamingPlaylistVideo
+} from '@server/types/models/index.js'
+import { FfprobeData } from 'fluent-ffmpeg'
+import { ensureDir, move, outputJSON, remove } from 'fs-extra/esm'
+import { open, readFile, stat, writeFile } from 'fs/promises'
+import flatten from 'lodash-es/flatten.js'
+import PQueue from 'p-queue'
+import { basename, dirname, join } from 'path'
+import { getAudioStreamCodec, getVideoStreamCodec } from '../helpers/ffmpeg/index.js'
+import { createLogger } from '../helpers/logger.js'
+import { doRequest, doRequestAndSaveToFile } from '../helpers/requests.js'
+import { generateRandomString } from '../helpers/utils.js'
+import { CONFIG } from '../initializers/config.js'
+import { P2P_MEDIA_LOADER_PEER_VERSION, REQUEST_TIMEOUTS } from '../initializers/constants.js'
+import { runTransaction } from '../helpers/database-utils.js'
+import { VideoFileModel } from '../models/video/video-file.js'
+import { VideoStreamingPlaylistModel } from '../models/video/video-streaming-playlist.js'
+import { storeHLSFileFromContent } from './object-storage/index.js'
+import { generateHLSMasterPlaylistFilename, generateHlsSha256SegmentsFilename, getHLSResolutionPlaylistFilename } from './paths.js'
+import { VideoPathManager } from './video-path-manager.js'
+
+const logger = createLogger('hls')
+
+export async function updateStreamingPlaylistsInfohashesIfNeeded () {
+  let playlistsToUpdateIds = new Set(await VideoStreamingPlaylistModel.listIdsByIncorrectPeerVersion())
+
+  if (playlistsToUpdateIds.size !== 0) {
+    logger.info(`Will update ${playlistsToUpdateIds.size} streaming playlists infohash because of protocol version change.`)
+  }
+
+  if (await ApplicationModel.streamingPlaylistBaseUrlChanged()) {
+    const localIds = await VideoStreamingPlaylistModel.listIdsLocals()
+
+    if (localIds.length !== 0) {
+      logger.info(`Will update ${localIds.length} local streaming playlists infohash because of object storage base URL change.`)
+
+      playlistsToUpdateIds = new Set([ ...playlistsToUpdateIds, ...localIds ])
+    }
+  }
+
+  // Use separate SQL queries, because we could have many videos to update
+  for (const playlistId of playlistsToUpdateIds) {
+    try {
+      await runTransaction(async t => {
+        const playlist = await VideoStreamingPlaylistModel.loadWithVideo(playlistId, t)
+        const videoFiles = await VideoFileModel.listByStreamingPlaylist(playlistId, t)
+
+        await playlist.buildAndSetInfoHashes(playlist.Video, videoFiles, t)
+        playlist.p2pMediaLoaderPeerVersion = P2P_MEDIA_LOADER_PEER_VERSION
+
+        await playlist.save({ transaction: t })
+      })
+    } catch (err) {
+      logger.error(`Cannot update streaming playlist infohash of playlist id ${playlistId}`, { err })
+    }
+  }
+}
+
+// Local copies of some files of the playlist, keyed by video filename, to not re-download them from object storage
+export type LocalHLSFiles = {
+  [videoFilename: string]: {
+    videoPath: string
+    resolutionPlaylistPath: string
+  }
+}
+
+export async function updateM3U8AndShaPlaylistUnderLock (video: MVideo, playlist: MStreamingPlaylist, localFiles: LocalHLSFiles = {}) {
+  try {
+    await updateM3U8AndShaPlaylistUnderLockOrThrow(video, playlist, localFiles)
+  } catch (err) {
+    logger.warn('Cannot update playlist after file change. Maybe due to concurrent transcoding', { err })
+  }
+}
+
+export async function updateM3U8AndShaPlaylistUnderLockOrThrow (
+  video: MVideo,
+  playlist: MStreamingPlaylist,
+  localFiles: LocalHLSFiles = {}
+) {
+  let playlistWithFiles = await updateMasterHLSPlaylist(video, playlist, localFiles)
+  playlistWithFiles = await updateSha256VODSegments(video, playlist, localFiles)
+
+  // Refresh playlist, operations can take some time
+  playlistWithFiles = await VideoStreamingPlaylistModel.loadWithVideoAndFiles(playlist.id)
+  await playlistWithFiles.buildAndSetInfoHashes(video, playlistWithFiles.VideoFiles)
+  await playlistWithFiles.save()
+
+  video.setHLSPlaylist(playlistWithFiles)
+}
+
+export async function copySha256Segments (options: {
+  sourcePlaylist: MStreamingPlaylistVideo
+  playlist: MStreamingPlaylist
+  video: MVideo
+
+  // Source filename -> filename of the copy
+  filenames: Map<string, string>
+}) {
+  const { sourcePlaylist, playlist, video, filenames } = options
+
+  const sourceJSON = await readPreviousSha256Segments(sourcePlaylist)
+
+  const json: SegmentsSha256 = {}
+  for (const [ sourceFilename, filename ] of filenames) {
+    if (sourceJSON[sourceFilename]) json[filename] = sourceJSON[sourceFilename]
+  }
+
+  if (playlist.storage === FileStorage.OBJECT_STORAGE) {
+    await storeHLSFileFromContent({ video, pathOrFilename: playlist.segmentsSha256Filename, content: JSON.stringify(json) })
+  } else {
+    await outputJSON(VideoPathManager.Instance.getFSHLSOutputPath(video, playlist.segmentsSha256Filename), json)
+  }
+}
+
+// ---------------------------------------------------------------------------
+
+// Avoid concurrency issues when updating streaming playlist files
+const playlistFilesQueue = new PQueue({ concurrency: 1 })
+
+function updateMasterHLSPlaylist (
+  video: MVideo,
+  playlistArg: MStreamingPlaylist,
+  localFiles: LocalHLSFiles
+): Promise<MStreamingPlaylistFilesVideo> {
+  return playlistFilesQueue.add(async () => {
+    const playlist = await VideoStreamingPlaylistModel.loadWithVideoAndFiles(playlistArg.id)
+    const captions = await VideoCaptionModel.listVideoCaptions(video.id)
+
+    const extMediaAudio: string[] = []
+    const extMediaSubtitle: string[] = []
+    const extStreamInfo: string[] = []
+    let separatedAudioCodec: string
+
+    const splitAudioAndVideo = playlist.hasAudioAndVideoSplitted()
+
+    for (const caption of captions) {
+      if (!caption.m3u8Filename) continue
+
+      extMediaSubtitle.push(
+        `#EXT-X-MEDIA:TYPE=SUBTITLES,GROUP-ID="subtitles",` +
+          `NAME="${VideoCaptionModel.getLanguageLabel(caption.language)}",DEFAULT=NO,AUTOSELECT=NO,FORCED=NO,` +
+          `LANGUAGE="${caption.language}",URI="${caption.m3u8Filename}"`
+      )
+    }
+
+    // Sort to have the audio resolution first (if it exists)
+    for (const file of sortBy(playlist.VideoFiles, 'resolution')) {
+      const playlistFilename = getHLSResolutionPlaylistFilename(file.filename)
+
+      await withVideoFileProbe({ file: file.withVideoOrPlaylist(playlist), localFiles }, async ({ videoFilePath, probe }) => {
+        // Every helper below is given `probe`, so it never actually reads this path: safe to fall back to a name that does not resolve
+        const path = videoFilePath ?? file.filename
+
+        if (splitAudioAndVideo && file.resolution === VideoResolution.H_NOVIDEO) {
+          separatedAudioCodec = await getAudioStreamCodec(path, probe)
+        }
+
+        const size = await getVideoStreamDimensionsInfo(path, probe)
+
+        const bandwidth = 'BANDWIDTH=' + video.getBandwidthBits(file)
+        const resolution = file.resolution === VideoResolution.H_NOVIDEO
+          ? ''
+          : `,RESOLUTION=${size?.width || 0}x${size?.height || 0}`
+
+        let line = `#EXT-X-STREAM-INF:${bandwidth}${resolution}`
+        if (file.fps) line += ',FRAME-RATE=' + file.fps
+
+        const [ videoCodec, audioCodec, hasAudio ] = await Promise.all([
+          getVideoStreamCodec(path, probe),
+          separatedAudioCodec || getAudioStreamCodec(path, probe),
+          splitAudioAndVideo || hasAudioStream(path, probe)
+        ])
+
+        // Omit CODECS it if one of the codec is unknown to not break players
+        const codecs = [ videoCodec, audioCodec ].filter(c => !!c)
+        if (codecs.length !== 0 && (audioCodec || !hasAudio)) {
+          line += `,CODECS="${codecs.join(',')}"`
+        }
+
+        if (splitAudioAndVideo) line += `,AUDIO="audio"`
+        if (extMediaSubtitle.length !== 0) line += `,SUBTITLES="subtitles"`
+
+        // Don't include audio only resolution as a regular "video" resolution
+        // Some player may use it automatically and so the user would not have a video stream
+        // But if it's the only resolution we can treat it as a regular stream
+        if (resolution || playlist.VideoFiles.length === 1) {
+          extStreamInfo.push(line)
+          extStreamInfo.push(playlistFilename)
+        } else if (splitAudioAndVideo) {
+          extMediaAudio.push(`#EXT-X-MEDIA:TYPE=AUDIO,GROUP-ID="audio",NAME="Audio",AUTOSELECT=YES,DEFAULT=YES,URI="${playlistFilename}"`)
+        }
+      })
+    }
+
+    const masterPlaylists = [ '#EXTM3U', '#EXT-X-VERSION:3', '', ...extMediaSubtitle, '', ...extMediaAudio, '', ...extStreamInfo ]
+
+    await playlist.reload()
+
+    if (playlist.playlistFilename) {
+      await video.removeStreamingPlaylistFile(playlist, playlist.playlistFilename)
+    }
+    playlist.playlistFilename = generateHLSMasterPlaylistFilename(video.isLive)
+
+    const masterPlaylistContent = masterPlaylists.join('\n') + '\n'
+
+    if (playlist.storage === FileStorage.OBJECT_STORAGE) {
+      await storeHLSFileFromContent({
+        video,
+        pathOrFilename: playlist.playlistFilename,
+        content: masterPlaylistContent
+      })
+
+      logger.info(`Updated master playlist file of video ${video.uuid} to object storage`)
+    } else {
+      const masterPlaylistPath = VideoPathManager.Instance.getFSHLSOutputPath(video, playlist.playlistFilename)
+      await writeFile(masterPlaylistPath, masterPlaylistContent)
+
+      logger.info(`Updated master playlist file ${masterPlaylistPath} of video ${video.uuid}`)
+    }
+
+    return playlist.save()
+  })
+}
+
+// ---------------------------------------------------------------------------
+
+function updateSha256VODSegments (
+  video: MVideo,
+  playlistArg: MStreamingPlaylist,
+  localFiles: LocalHLSFiles
+): Promise<MStreamingPlaylistFilesVideo> {
+  return playlistFilesQueue.add(async () => {
+    const json: SegmentsSha256 = {}
+
+    const playlist = await VideoStreamingPlaylistModel.loadWithVideoAndFiles(playlistArg.id)
+
+    // A video file never changes once generated (a new file has a new filename)
+    // So reuse the hashes of the previous JSON file, instead of downloading every file from object storage to hash it again
+    const previousJSON = await readPreviousSha256Segments(playlist)
+
+    // For all the resolutions available for this video
+    for (const file of playlist.VideoFiles) {
+      const videoFilename = file.filename
+
+      const local = localFiles[videoFilename]
+      if (local) {
+        json[videoFilename] = await hashSegments(local.videoPath, local.resolutionPlaylistPath)
+        continue
+      }
+
+      if (previousJSON[videoFilename]) {
+        json[videoFilename] = previousJSON[videoFilename]
+        continue
+      }
+
+      const fileWithPlaylist = file.withVideoOrPlaylist(playlist)
+
+      await VideoPathManager.Instance.makeAvailableVideoFile(fileWithPlaylist, videoPath => {
+        return VideoPathManager.Instance.makeAvailableResolutionPlaylistFile(fileWithPlaylist, async resolutionPlaylistPath => {
+          json[videoFilename] = await hashSegments(videoPath, resolutionPlaylistPath)
+        })
+      })
+    }
+
+    if (playlist.segmentsSha256Filename) {
+      await video.removeStreamingPlaylistFile(playlist, playlist.segmentsSha256Filename)
+    }
+    playlist.segmentsSha256Filename = generateHlsSha256SegmentsFilename(video.isLive)
+
+    if (playlist.storage === FileStorage.OBJECT_STORAGE) {
+      await storeHLSFileFromContent({
+        video,
+        pathOrFilename: playlist.segmentsSha256Filename,
+        content: JSON.stringify(json)
+      })
+    } else {
+      const outputPath = VideoPathManager.Instance.getFSHLSOutputPath(video, playlist.segmentsSha256Filename)
+      await outputJSON(outputPath, json)
+    }
+
+    return playlist.save()
+  })
+}
+
+type SegmentsSha256 = { [filename: string]: { [range: string]: string } }
+
+async function readPreviousSha256Segments (playlist: MStreamingPlaylistVideo): Promise<SegmentsSha256> {
+  if (!playlist.segmentsSha256Filename) return {}
+
+  try {
+    return await VideoPathManager.Instance.makeAvailablePlaylistFile(playlist, playlist.segmentsSha256Filename, async path => {
+      return JSON.parse(await readFile(path, 'utf8'))
+    })
+  } catch (err) {
+    logger.debug(`Cannot read previous segments sha256 file of video ${playlist.Video.uuid}, hashing all segments.`, { err })
+
+    return {}
+  }
+}
+
+async function hashSegments (videoPath: string, resolutionPlaylistPath: string) {
+  const rangeHashes: { [range: string]: string } = {}
+
+  const playlistContent = await readFile(resolutionPlaylistPath)
+  const ranges = getRangesFromPlaylist(playlistContent.toString())
+
+  const fd = await open(videoPath, 'r')
+
+  try {
+    for (const range of ranges) {
+      const buf = Buffer.alloc(range.length)
+      await fd.read(buf, 0, range.length, range.offset)
+
+      rangeHashes[`${range.offset}-${range.offset + range.length - 1}`] = sha256(buf)
+    }
+  } finally {
+    await fd.close()
+  }
+
+  return rangeHashes
+}
+
+// The ffprobe output of a video file is saved in database: use it instead of downloading the file from object storage
+async function withVideoFileProbe (
+  options: {
+    file: MVideoFileStreamingPlaylistVideo
+    localFiles: LocalHLSFiles
+  },
+  cb: (options: { videoFilePath?: string, probe: FfprobeData }) => Promise<void>
+) {
+  const { file, localFiles } = options
+
+  const localPath = localFiles[file.filename]?.videoPath
+  if (localPath) return cb({ videoFilePath: localPath, probe: await ffprobePromise(localPath) })
+
+  if (file.metadata?.streams && file.metadata.format) {
+    return cb({ probe: file.metadata as FfprobeData })
+  }
+
+  return VideoPathManager.Instance.makeAvailableVideoFile(file, async videoFilePath => {
+    return cb({ videoFilePath, probe: await ffprobePromise(videoFilePath) })
+  })
+}
+
+// ---------------------------------------------------------------------------
+
+export async function buildSha256Segment (segmentPath: string) {
+  const buf = await readFile(segmentPath)
+  return sha256(buf)
+}
+
+export function downloadPlaylistSegments (playlistUrl: string, destinationDir: string, timeout: number, bodyKBLimit: number) {
+  let timer
+  let remainingBodyKBLimit = bodyKBLimit
+
+  logger.info('Importing HLS playlist %s', playlistUrl)
+
+  return new Promise<void>(async (res, rej) => {
+    const tmpDirectory = join(CONFIG.STORAGE.TMP_DIR, await generateRandomString(10))
+
+    await ensureDir(tmpDirectory)
+
+    timer = setTimeout(() => {
+      deleteTmpDirectory(tmpDirectory)
+
+      return rej(new Error('HLS download timeout.'))
+    }, timeout)
+
+    try {
+      // Fetch master playlist
+      const subPlaylistUrls = await fetchUniqUrls(playlistUrl)
+
+      const subRequests = subPlaylistUrls.map(u => fetchUniqUrls(u))
+      const fileUrls = uniqify(flatten(await Promise.all(subRequests)))
+
+      logger.debug('Will download %d HLS files.', fileUrls.length, { fileUrls })
+
+      for (const fileUrl of fileUrls) {
+        const destPath = join(tmpDirectory, basename(fileUrl))
+
+        await doRequestAndSaveToFile(fileUrl, destPath, { bodyKBLimit: remainingBodyKBLimit, timeout: REQUEST_TIMEOUTS.REDUNDANCY })
+
+        const { size } = await stat(destPath)
+        remainingBodyKBLimit -= size / 1000
+
+        logger.debug('Downloaded HLS playlist file %s with %d kB remained limit.', fileUrl, Math.floor(remainingBodyKBLimit))
+      }
+
+      clearTimeout(timer)
+
+      await move(tmpDirectory, destinationDir, { overwrite: true })
+
+      return res()
+    } catch (err) {
+      deleteTmpDirectory(tmpDirectory)
+
+      return rej(err)
+    }
+  })
+
+  function deleteTmpDirectory (directory: string) {
+    remove(directory)
+      .catch(err => logger.error('Cannot delete path on HLS download error.', { err }))
+  }
+
+  async function fetchUniqUrls (playlistUrl: string) {
+    const { body } = await doRequest(playlistUrl)
+
+    if (!body) return []
+
+    const urls = body.split('\n')
+      .filter(line => line.endsWith('.m3u8') || line.endsWith('.mp4'))
+      .map(url => {
+        if (url.startsWith('http://') || url.startsWith('https://')) return url
+
+        return `${dirname(playlistUrl)}/${url}`
+      })
+
+    return uniqify(urls)
+  }
+}
+
+// ---------------------------------------------------------------------------
+
+export async function renameVideoFileInPlaylist (playlistPath: string, newVideoFilename: string) {
+  const content = await readFile(playlistPath, 'utf8')
+
+  const newContent = content.replace(new RegExp(`${uuidRegex}-\\d+-fragmented.mp4`, 'g'), newVideoFilename)
+
+  await writeFile(playlistPath, newContent, 'utf8')
+}
+
+// ---------------------------------------------------------------------------
+
+export function injectQueryToPlaylistUrls (content: string, queryString: string) {
+  return content.replace(/\.(m3u8|ts|mp4)/gm, '.$1?' + queryString)
+}
+
+// ---------------------------------------------------------------------------
+
+export function buildCaptionM3U8Content (options: {
+  video: MVideo
+  caption: MVideoCaption
+}) {
+  const { video, caption } = options
+
+  return `#EXTM3U\n#EXT-X-VERSION:3\n#EXT-X-TARGETDURATION:${video.duration}\n#EXT-X-MEDIA-SEQUENCE:0\n` +
+    `#EXTINF:${video.duration},\n${caption.getLocalFileUrl()}\n#EXT-X-ENDLIST\n`
+}
+
+// ---------------------------------------------------------------------------
+// Private
+// ---------------------------------------------------------------------------
+
+function getRangesFromPlaylist (playlistContent: string) {
+  const ranges: { offset: number, length: number }[] = []
+  const lines = playlistContent.split('\n')
+  const regex = /^#EXT-X-BYTERANGE:(\d+)@(\d+)$/
+
+  for (const line of lines) {
+    const captured = regex.exec(line)
+
+    if (captured) {
+      ranges.push({ length: parseInt(captured[1], 10), offset: parseInt(captured[2], 10) })
+    }
+  }
+
+  return ranges
+}

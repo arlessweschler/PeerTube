@@ -1,0 +1,317 @@
+import { arrayify } from '@peertube/peertube-core-utils'
+import {
+  ActivityCaptionUrlObject,
+  ActivityPubStoryboard,
+  ActivityTrackerUrlObject,
+  ActivityVideoFileMetadataUrlObject,
+  LiveVideoLatencyMode,
+  VideoAIUsage,
+  VideoCommentPolicy,
+  VideoCommercialContent,
+  VideoObject,
+  VideoRecommendationScope,
+  VideoState
+} from '@peertube/peertube-models'
+import { peertubeTruncate } from '@peertube/peertube-node-utils'
+import { createLogger } from '@server/helpers/logger.js'
+import { spdxToPeertubeLicence } from '@server/helpers/video.js'
+import { getDurationFromActivityStream } from '@server/lib/activitypub/activity.js'
+import validator from 'validator'
+import { ACTIVITY_PUB, CONSTRAINTS_FIELDS, MIMETYPES } from '../../../initializers/constants.js'
+import { exists, isArray, isBooleanValid, isDateValid, isUUIDValid } from '../misc.js'
+import { isTrackerUrlValid } from '../urls.js'
+import { isLiveDvrWindowValid, isLiveLatencyModeValid } from '../video-lives.js'
+import {
+  isVideoAIUsageValid,
+  isVideoCommentsPolicyValid,
+  isVideoCommercialContentValid,
+  isVideoDescriptionValid,
+  isVideoDurationValid,
+  isVideoNameValid,
+  isVideoRecommendationScopeValid,
+  isVideoStateValid,
+  isVideoTagValid,
+  isVideoViewsValid
+} from '../videos.js'
+import {
+  isActivityPubUrlValid,
+  isActivityPubVideoDurationValid,
+  isBaseActivityValid,
+  setValidAttributedTo,
+  setValidRemoteIcon
+} from './misc.js'
+
+const logger = createLogger()
+
+export function sanitizeAndCheckVideoTorrentUpdateActivity (activity: any) {
+  return isBaseActivityValid(activity, 'Update') &&
+    sanitizeAndCheckVideoTorrentObject(activity.object)
+}
+
+export function sanitizeAndCheckVideoTorrentObject (video: VideoObject) {
+  if (video?.type !== 'Video') return false
+
+  const fail = (field: string) => {
+    logger.debug(`Video field is not valid to PeerTube: ${field}`, { video })
+    return false
+  }
+
+  if (!setValidRemoteTags(video)) return fail('tags')
+  if (!setValidRemoteVideoUrls(video)) return fail('urls')
+  if (!setRemoteVideoContent(video)) return fail('content')
+  if (!setValidAttributedTo(video)) return fail('attributedTo')
+  if (!setValidRemoteCaptions(video)) return fail('captions')
+  if (!setValidRemoteIcon(video) || video.icon.length === 0) return fail('icons')
+  if (!setValidStoryboard(video)) return fail('preview (storyboard)')
+  if (!setValidLicence(video)) return fail('licence')
+
+  // Default attributes
+  if (!isVideoStateValid(video.state)) video.state = VideoState.PUBLISHED
+  if (!isBooleanValid(video.waitTranscoding)) video.waitTranscoding = false
+  if (!isBooleanValid(video.downloadEnabled)) video.downloadEnabled = true
+  if (!isBooleanValid(video.isLiveBroadcast)) video.isLiveBroadcast = false
+  if (!isBooleanValid(video.liveSaveReplay)) video.liveSaveReplay = false
+  if (!isBooleanValid(video.permanentLive)) video.permanentLive = false
+  if (!isBooleanValid(video.sensitive)) video.sensitive = false
+  if (!isLiveLatencyModeValid(video.latencyMode)) video.latencyMode = LiveVideoLatencyMode.DEFAULT
+
+  if (video.commentsPolicy) {
+    if (!isVideoCommentsPolicyValid(video.commentsPolicy)) {
+      video.commentsPolicy = VideoCommentPolicy.DISABLED
+    }
+  } else {
+    video.commentsPolicy = VideoCommentPolicy.DISABLED
+  }
+
+  // Use defaults values for remote instances that don't send these fields
+  if (!isVideoRecommendationScopeValid(video.recommendationScope)) video.recommendationScope = VideoRecommendationScope.ALL
+  // Remote platforms that don't send this field don't declare AI usage
+  if (!isVideoAIUsageValid(video.aiUsage)) video.aiUsage = VideoAIUsage.NOT_SPECIFIED
+  if (!isVideoCommercialContentValid(video.commercialContent)) video.commercialContent = VideoCommercialContent.NONE
+
+  if (!isActivityPubUrlValid(video.id)) return fail('id')
+  if (!isVideoNameValid(video.name)) return fail('name')
+
+  if (!isActivityPubVideoDurationValid(video.duration)) return fail('duration format')
+  if (!isVideoDurationValid('' + getDurationFromActivityStream(video.duration))) return fail('duration')
+
+  if (!isActivityPubVideoDurationValid(video.dvrWindow)) video.dvrWindow = 'PT0S'
+  if (!isLiveDvrWindowValid('' + getDurationFromActivityStream(video.dvrWindow), Infinity)) video.dvrWindow = 'PT0S'
+
+  if (!isUUIDValid(video.uuid)) return fail('uuid')
+
+  if (exists(video.category) && !isRemoteNumberIdentifierValid(video.category)) return fail('category')
+  if (exists(video.language) && !isRemoteStringIdentifierValid(video.language)) return fail('language')
+
+  if (!isVideoViewsValid(video.views)) return fail('views')
+  if (!isDateValid(video.published)) return fail('published')
+  if (!isDateValid(video.updated)) return fail('updated')
+
+  if (exists(video.originallyPublishedAt) && !isDateValid(video.originallyPublishedAt)) return fail('originallyPublishedAt')
+  if (exists(video.uploadDate) && !isDateValid(video.uploadDate)) return fail('uploadDate')
+  if (exists(video.content) && !isRemoteVideoContentValid(video.mediaType, video.content)) return fail('mediaType/content')
+
+  if (exists(video.audience) && !isActivityPubUrlValid(video.audience)) return fail('audience')
+
+  if (exists(video.embedUrl) && !isActivityPubUrlValid(video.embedUrl)) return fail('embedUrl')
+
+  if (video.attributedTo.length === 0) return fail('attributedTo')
+
+  return true
+}
+
+export function isRemoteVideoUrlValid (url: any) {
+  return url.type === 'Link' &&
+      // Video file link
+      (
+        MIMETYPES.AP_VIDEO.MIMETYPE_EXT[url.mediaType] &&
+        isActivityPubUrlValid(url.href) &&
+        validator.default.isInt(url.height + '', { min: 0 }) &&
+        validator.default.isInt(url.size + '', { min: 0 }) &&
+        (!url.fps || validator.default.isInt(url.fps + '', { min: -1 }))
+      ) ||
+    // Torrent link
+    (
+      MIMETYPES.AP_TORRENT.MIMETYPE_EXT[url.mediaType] &&
+      isActivityPubUrlValid(url.href) &&
+      validator.default.isInt(url.height + '', { min: 0 })
+    ) ||
+    // Magnet link
+    (
+      MIMETYPES.AP_MAGNET.MIMETYPE_EXT[url.mediaType] &&
+      validator.default.isLength(url.href, { min: 5 }) &&
+      validator.default.isInt(url.height + '', { min: 0 })
+    ) ||
+    // HLS playlist link
+    (
+      (url.mediaType || url.mimeType) === 'application/x-mpegURL' &&
+      isActivityPubUrlValid(url.href) &&
+      isArray(url.tag)
+    ) ||
+    isAPVideoTrackerUrlObject(url) ||
+    isAPVideoFileUrlMetadataObject(url)
+}
+
+export function isAPVideoFileUrlMetadataObject (url: any): url is ActivityVideoFileMetadataUrlObject {
+  return url?.type === 'Link' &&
+    url.mediaType === 'application/json' &&
+    isArray(url.rel) && url.rel.includes('metadata') &&
+    isActivityPubUrlValid(url.href)
+}
+
+export function isAPVideoTrackerUrlObject (url: any): url is ActivityTrackerUrlObject {
+  return isArray(url.rel) &&
+    url.rel.includes('tracker') &&
+    isTrackerUrlValid(url.href)
+}
+
+export function setAPCaptionUrlObject (url: any): url is ActivityCaptionUrlObject {
+  if (url?.type !== 'Link') return false
+  if (!isActivityPubUrlValid(url.href)) return false
+
+  if (!url.mediaType && url.href.endsWith('.vtt')) {
+    url.mediaType = 'text/vtt'
+  }
+
+  return url.mediaType === 'text/vtt' || url.mediaType === 'application/x-mpegURL'
+}
+
+// ---------------------------------------------------------------------------
+// Private
+// ---------------------------------------------------------------------------
+
+function setValidRemoteTags (video: VideoObject) {
+  if (Array.isArray(video.tag) === false) video.tag = []
+
+  if (video.tag.length > ACTIVITY_PUB.MAX_VIDEO_TAGS) {
+    logger.debug('Truncating remote video tag array from %d to %d entries.', video.tag.length, ACTIVITY_PUB.MAX_VIDEO_TAGS)
+
+    video.tag = video.tag.slice(0, ACTIVITY_PUB.MAX_VIDEO_TAGS)
+  }
+
+  video.tag = video.tag.filter(t => {
+    return (t.type === 'Hashtag' && isVideoTagValid(t.name)) ||
+      (t.type === 'SensitiveTag' && !!t.name)
+  })
+
+  return true
+}
+
+function setValidRemoteCaptions (video: VideoObject) {
+  if (!video.subtitleLanguage) video.subtitleLanguage = []
+
+  if (Array.isArray(video.subtitleLanguage) === false) return false
+
+  video.subtitleLanguage = video.subtitleLanguage.filter(caption => {
+    if (typeof caption.url === 'string') {
+      if (isActivityPubUrlValid(caption.url)) {
+        caption.url = [
+          {
+            type: 'Link',
+            href: caption.url,
+            mediaType: 'text/vtt'
+          }
+        ]
+      } else {
+        caption.url = []
+      }
+    } else {
+      caption.url = arrayify(caption.url).filter(u => setAPCaptionUrlObject(u))
+    }
+
+    return caption.url.length > 0 && isRemoteStringIdentifierValid(caption)
+  })
+
+  return true
+}
+
+function isRemoteNumberIdentifierValid (data: any) {
+  return validator.default.isInt(data.identifier, { min: 0 })
+}
+
+function isRemoteStringIdentifierValid (data: any) {
+  return typeof data.identifier === 'string'
+}
+
+function isRemoteVideoContentValid (mediaType: string, content: string) {
+  return (mediaType === 'text/markdown' || mediaType === 'text/html') && isVideoDescriptionValid(content)
+}
+
+function setValidRemoteVideoUrls (video: any) {
+  if (Array.isArray(video.url) === false) return false
+
+  if (video.url.length > ACTIVITY_PUB.MAX_VIDEO_URLS) {
+    logger.debug('Truncating remote video url array from %d to %d entries.', video.url.length, ACTIVITY_PUB.MAX_VIDEO_URLS)
+
+    video.url = video.url.slice(0, ACTIVITY_PUB.MAX_VIDEO_URLS)
+  }
+
+  video.url = video.url.filter(u => isRemoteVideoUrlValid(u))
+
+  // HLS playlist url objects carry their own nested `tag` array (video/torrent/magnet/metadata links + segment hashes)
+  for (const u of video.url) {
+    if (!Array.isArray(u.tag)) continue
+
+    if (u.tag.length > ACTIVITY_PUB.MAX_VIDEO_URLS) {
+      logger.debug('Truncating remote HLS playlist tag array from %d to %d entries.', u.tag.length, ACTIVITY_PUB.MAX_VIDEO_URLS)
+
+      u.tag = u.tag.slice(0, ACTIVITY_PUB.MAX_VIDEO_URLS)
+    }
+  }
+
+  return true
+}
+
+function setRemoteVideoContent (video: VideoObject) {
+  if (video.content) {
+    video.content = peertubeTruncate(video.content, { length: CONSTRAINTS_FIELDS.VIDEOS.DESCRIPTION.max })
+  }
+
+  return true
+}
+
+function setValidLicence (video: VideoObject) {
+  if (!exists(video.licence)) return true
+
+  if (validator.default.isInt(video.licence.identifier)) return isRemoteNumberIdentifierValid(video.licence)
+
+  const spdx = spdxToPeertubeLicence(video.licence.identifier)
+  video.licence.identifier = spdx
+    ? spdx + ''
+    : undefined
+
+  return true
+}
+
+function setValidStoryboard (video: VideoObject) {
+  if (!video.preview) return true
+  if (!Array.isArray(video.preview)) return false
+
+  video.preview = video.preview.filter(p => isStoryboardValid(p))
+
+  return true
+}
+
+function isStoryboardValid (preview: ActivityPubStoryboard) {
+  if (!preview) return false
+
+  if (
+    preview.type !== 'Image' ||
+    !isArray(preview.rel) ||
+    !preview.rel.includes('storyboard')
+  ) {
+    return false
+  }
+
+  preview.url = preview.url.filter(u => {
+    return !!MIMETYPES.IMAGE.MIMETYPE_EXT[u.mediaType] &&
+      isActivityPubUrlValid(u.href) &&
+      validator.default.isInt(u.width + '', { min: 0 }) &&
+      validator.default.isInt(u.height + '', { min: 0 }) &&
+      validator.default.isInt(u.tileWidth + '', { min: 0 }) &&
+      validator.default.isInt(u.tileHeight + '', { min: 0 }) &&
+      isActivityPubVideoDurationValid(u.tileDuration)
+  })
+
+  return preview.url.length !== 0
+}

@@ -1,0 +1,112 @@
+<ng-template #unverifiedEmailsMessage>
+  @if (hasMultipleRegistrations()) {
+    <my-alert i18n type="warning">
+      At least one registration email has not been verified. Email delivery has been disabled by default.
+    </my-alert>
+  } @else {
+    <my-alert i18n type="warning">
+      The registration email has not been verified. Email delivery has been disabled by default.
+    </my-alert>
+  }
+</ng-template>
+
+<ng-template #modal>
+  <div class="modal-header">
+    <h4 class="modal-title">
+      {{ getModalTitle() }}
+    </h4>
+
+    <button class="border-0 p-0" title="Close this modal" i18n-title (click)="hide()">
+      <my-global-icon iconName="cross"></my-global-icon>
+    </button>
+  </div>
+
+  <form novalidate [formGroup]="form" (ngSubmit)="processRegistration()">
+    <div class="modal-body mb-3">
+      <div class="description">
+        @if (isAccept()) {
+          <p i18n>
+            @if (hasMultipleRegistrations()) {
+              <strong>Accepting</strong>&nbsp;<em>{{ registrations.length }}</em> registrations will create the accounts and channels.
+            } @else {
+              <strong>Accepting</strong>&nbsp;<em>{{ registration.username }}</em> registration will create the account and channel.
+            }
+          </p>
+
+          @if (isEmailEnabled()) {
+            @if (hasUnverifiedEmails()) {
+              <ng-container *ngTemplateOutlet="unverifiedEmailsMessage"></ng-container>
+            } @else {
+              <p i18n>
+                @if (hasMultipleRegistrations()) {
+                  An email will be sent to each user explaining its account has been created with the moderation response you'll write below.
+                } @else {
+                  An email will be sent to <em>{{ registration.email }}</em> explaining its account has been created with the moderation response you'll write
+                  below.
+                }
+              </p>
+            }
+          } @else {
+            <my-alert type="warning" i18n>
+              Emails are not enabled on this instance so PeerTube won't be able to send an email explaining accounts have been created.
+            </my-alert>
+          }
+        } @else if (isReject()) {
+          @if (isEmailEnabled()) {
+            @if (hasUnverifiedEmails()) {
+              <ng-container *ngTemplateOutlet="unverifiedEmailsMessage"></ng-container>
+            } @else {
+              <p i18n>
+                @if (hasMultipleRegistrations()) {
+                  An email will be sent to each user explaining its registration request has been <strong>rejected</strong> with the moderation response you'll write
+                  below.
+                } @else {
+                  An email will be sent to <em>{{ registration.email }}</em> explaining its registration request has been <strong>rejected</strong> with the
+                  moderation response you'll write below.
+                }
+              </p>
+            }
+          } @else {
+            <my-alert type="warning" i18n>
+              Emails are not enabled on this instance so PeerTube won't be able to send an email explaining registration requests have been rejected.
+            </my-alert>
+          }
+        }
+      </div>
+
+      <div class="form-group">
+        <label for="moderationResponse" i18n>Send a message to the user</label>
+
+        <textarea
+          formControlName="moderationResponse"
+          ngbAutofocus
+          name="moderationResponse"
+          id="moderationResponse"
+          [ngClass]="{ 'input-error': formErrors['moderationResponse'] }"
+          class="form-control"
+        ></textarea>
+
+        @if (formErrors.moderationResponse) {
+          <div class="form-error" role="alert">
+            {{ formErrors.moderationResponse }}
+          </div>
+        }
+      </div>
+
+      <div class="form-group">
+        <my-peertube-checkbox
+          inputName="preventEmailDelivery"
+          formControlName="preventEmailDelivery"
+          i18n-labelText
+          labelText="Prevent email from being sent to the user"
+        ></my-peertube-checkbox>
+      </div>
+    </div>
+
+    <div class="modal-footer inputs">
+      <input type="button" role="button" i18n-value value="Cancel" class="peertube-button secondary-button" (click)="hide()" (key.enter)="hide()">
+
+      <input type="submit" [value]="getSubmitValue()" class="peertube-button primary-button" [disabled]="!form.valid">
+    </div>
+  </form>
+</ng-template>

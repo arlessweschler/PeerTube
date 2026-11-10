@@ -1,29 +1,34 @@
-import { Component, Input, OnInit } from '@angular/core'
+import { ChangeDetectionStrategy, Component, OnChanges, input, model } from '@angular/core'
+import { ButtonComponent, ButtonTheme } from './button.component'
 
 @Component({
   selector: 'my-delete-button',
-  styleUrls: [ './button.component.scss' ],
-  templateUrl: './delete-button.component.html'
+  template: `
+    <my-button
+      icon="delete" theme="secondary"
+      [disabled]="disabled()" [label]="label()" [title]="title()"
+      [responsiveLabel]="responsiveLabel()" [theme]="theme()"
+    ></my-button>
+  `,
+  changeDetection: ChangeDetectionStrategy.OnPush,
+  imports: [ ButtonComponent ]
 })
+export class DeleteButtonComponent implements OnChanges {
+  readonly label = model<string>(undefined)
+  readonly title = model<string>(undefined)
+  readonly responsiveLabel = input(false)
+  readonly disabled = input<boolean>(undefined)
+  readonly theme = input<ButtonTheme>('secondary')
 
-export class DeleteButtonComponent implements OnInit {
-  @Input() label: string
-  @Input() title: string
-  @Input() responsiveLabel = false
-
-  ngOnInit () {
-    // <my-delete-button /> No label
-    if (this.label === undefined && !this.title) {
-      this.title = $localize`Delete`
+  ngOnChanges () {
+    const label = this.label()
+    if (label === undefined && !this.title()) {
+      this.title.set($localize`Delete`)
     }
 
     // <my-delete-button label /> Use default label
-    if (this.label === '') {
-      this.label = $localize`Delete`
-
-      if (!this.title) {
-        this.title = this.label
-      }
+    if (label === '') {
+      this.label.set($localize`Delete`)
     }
   }
 }

@@ -1,0 +1,30 @@
+{
+  "extends": "../../tsconfig.base.json",
+  "compilerOptions": {
+    "outDir": "./dist",
+    "rootDir": "src",
+    "tsBuildInfoFile": "./dist/.tsbuildinfo",
+    "types": [ "node", "mocha" ],
+    "paths": {
+      "@tests/*": [ "./src/*" ],
+      "@server/*": [ "../../server/core/*" ]
+    }
+  },
+  "references": [
+    { "path": "../core-utils" },
+    { "path": "../ffmpeg" },
+    { "path": "../transcription-devtools" },
+    { "path": "../models" },
+    { "path": "../node-utils" },
+    { "path": "../typescript-utils" },
+    { "path": "../server-commands" },
+    { "path": "../transcription" },
+    { "path": "../../server/tsconfig.lib.json" }
+  ],
+  "include": [
+    "./src/**/*.ts"
+  ],
+  "exclude": [
+    "./fixtures"
+  ]
+}

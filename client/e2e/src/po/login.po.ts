@@ -1,23 +1,117 @@
-import { browser, element, by } from 'protractor'
+import { browserSleep, go, isAndroid } from '../utils'
 
 export class LoginPage {
-  async loginAsRootUser () {
-    await browser.get('/login')
+  async login (options: {
+    username: string
+    password: string
+    displayName?: string
+    url?: string
+  }) {
+    const { username, password, url = '/login', displayName = username } = options
 
-    await browser.executeScript(`window.localStorage.setItem('no_instance_config_warning_modal', 'true')`)
-    await browser.executeScript(`window.localStorage.setItem('no_welcome_modal', 'true')`)
+    await go(url)
 
-    element(by.css('input#username')).sendKeys('root')
-    element(by.css('input#password')).sendKeys('test1')
+    await this.disableModals()
 
-    await browser.sleep(1000)
+    await $('input#username').setValue(username)
+    await $('input#password').setValue(password)
 
-    await element(by.css('form input[type=submit]')).click()
+    await browserSleep(1000)
 
-    expect(this.getLoggedInInfo().getText()).toContain('root')
+    const submit = $('.login-form-and-externals > form input[type=submit]')
+    await submit.click()
+
+    // Have to do this on Android, don't really know why
+    // I think we need to "escape" from the password input, so click twice on the submit button
+    if (isAndroid()) {
+      await browserSleep(2000)
+      await submit.click()
+    }
+
+    await this.ensureIsLoggedInAs(displayName)
   }
 
-  private getLoggedInInfo () {
-    return element(by.css('.logged-in-display-name'))
+  async getLoginError (username: string, password: string) {
+    await go('/login')
+
+    await $('input#username').setValue(username)
+    await $('input#password').setValue(password)
+
+    await browser.pause(1000)
+
+    await $('form input[type=submit]').click()
+
+    return $('.alert-danger').getText()
+  }
+
+  async loginWithPrefilledUsername (options: {
+    password: string
+    displayName: string
+  }) {
+    await this.disableModals()
+
+    await $('input#password').setValue(options.password)
+
+    await browserSleep(1000)
+
+    await $('.login-form-and-externals > form input[type=submit]').click()
+
+    await this.ensureIsLoggedInAs(options.displayName)
+  }
+
+  getUsernameValue () {
+    return $('input#username').getValue()
+  }
+
+  loginAsRootUser () {
+    return this.login({ username: 'root', password: this.getRootPassword() })
+  }
+
+  getRootPassword () {
+    return 'test' + this.getSuffix()
+  }
+
+  loginOnPeerTube2 () {
+    if (!process.env.PEERTUBE2_E2E_PASSWORD) {
+      throw new Error('PEERTUBE2_E2E_PASSWORD env is missing for user e2e on peertube2.cpy.re')
+    }
+
+    return this.login({ username: 'e2e', password: process.env.PEERTUBE2_E2E_PASSWORD, url: 'https://peertube2.cpy.re/login' })
+  }
+
+  async logout () {
+    const loggedInDropdown = $('.logged-in-container .dropdown-toggle')
+
+    await loggedInDropdown.waitForClickable()
+    await loggedInDropdown.click()
+
+    const logout = $('.dropdown-item.logout')
+
+    await logout.waitForClickable()
+    await logout.click()
+
+    await browser.waitUntil(() => {
+      return $$('my-login-link, my-error-page a[href="/login"]').some(e => e.isDisplayed())
+    })
+  }
+
+  async ensureIsLoggedInAs (displayName: string) {
+    await this.getLoggedInInfoElem(displayName).waitForExist()
+  }
+
+  private getLoggedInInfoElem (displayName: string) {
+    return $('.logged-in-info').$('.display-name*=' + displayName)
+  }
+
+  private async disableModals () {
+    await browser.execute(`window.localStorage.setItem('no_account_setup_warning_modal', 'true')`)
+    await browser.execute(`window.localStorage.setItem('no_instance_config_warning_modal', 'true')`)
+    await browser.execute(`window.localStorage.setItem('no_welcome_modal', 'true')`)
+  }
+
+  private getSuffix () {
+    return browser.options.baseUrl
+      ? browser.options.baseUrl.slice(-1)
+      : '1'
   }
 }

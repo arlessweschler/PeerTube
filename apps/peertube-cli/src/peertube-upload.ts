@@ -1,0 +1,164 @@
+import { Command } from '@commander-js/extra-typings'
+import {
+  VideoAIUsageType,
+  VideoCommentPolicy,
+  VideoCommercialContentType,
+  VideoPrivacy,
+  VideoPrivacyType,
+  VideoRecommendationScopeType
+} from '@peertube/peertube-models'
+import { PeerTubeServer, VideoEdit } from '@peertube/peertube-server-commands'
+import { access, constants } from 'fs/promises'
+import { isAbsolute } from 'path'
+import { inspect } from 'util'
+import { assignToken, buildServer, getServerCredentials, listOptions } from './shared/index.js'
+
+const program = new Command('upload')
+  .description('Upload a video on a PeerTube instance')
+  .alias('up')
+  .option('-u, --url <url>', 'Server url')
+  .option('-U, --username <username>', 'Username')
+  .option('-p, --password <token>', 'Password')
+  .option('-b, --thumbnail <thumbnailPath>', 'Thumbnail path')
+  .option('-f, --file <file>', 'Video absolute file path')
+  .option('-n, --video-name <name>', 'Video name')
+  .option('-c, --category <category_number>', 'Category number', parseInt)
+  .option('-l, --licence <licence_number>', 'Licence number', parseInt)
+  .option('-L, --language <language_code>', 'Language ISO 639 code (fr or en...)')
+  .option('-t, --tags <tags>', 'Video tags', listOptions)
+  .option('-N, --nsfw', 'Video is Not Safe For Work')
+  .option('-d, --video-description <description>', 'Video description')
+  .option('-P, --privacy <privacy_number>', 'Privacy', v => parseInt(v) as VideoPrivacyType)
+  .option('-C, --channel-name <channel_name>', 'Channel name')
+  .option('--no-comments-enabled', 'Disable video comments')
+  .option(
+    '--recommendation-scope <scope_number>',
+    'Videos recommended next to this video: all = 1, same platform = 2, same account = 3, same channel = 4',
+    v => parseInt(v) as VideoRecommendationScopeType
+  )
+  .option(
+    '--ai-usage <ai_usage_number>',
+    'AI usage in this video: not specified = 1, no AI-generated content = 2, contains AI-generated content = 3, AI-generated = 4',
+    v => parseInt(v) as VideoAIUsageType
+  )
+  .option(
+    '--commercial-content <commercial_content_number>',
+    'Commercial content in this video: none = 1, promotional content (own products or business) = 2, paid partnership = 3',
+    v => parseInt(v) as VideoCommercialContentType
+  )
+  .option('-s, --support <support>', 'Video support text')
+  .option('--no-wait-transcoding', 'Do not wait transcoding before publishing the video')
+  .option('--no-download-enabled', 'Disable video download')
+
+export function defineUploadProgram () {
+  program.action(async options => {
+    try {
+      const { url, username, password } = await getServerCredentials(options)
+
+      if (!options.videoName || !options.file) {
+        if (!options.videoName) console.error('--video-name is required.')
+        if (!options.file) console.error('--file is required.')
+
+        process.exit(-1)
+      }
+
+      if (isAbsolute(options.file) === false) {
+        console.error('File path should be absolute.')
+        process.exit(-1)
+      }
+
+      await run({ ...options, url, username, password })
+    } catch (err) {
+      if (err.code === 'ECONNREFUSED') {
+        console.error(`Server is not responding`)
+      } else {
+        console.error('Cannot upload video: ' + err.message)
+      }
+
+      process.exit(-1)
+    }
+  })
+
+  return program
+}
+
+// ---------------------------------------------------------------------------
+// Private
+// ---------------------------------------------------------------------------
+
+async function run (options: ReturnType<typeof program.opts>) {
+  const { url, username, password } = options
+
+  const server = buildServer(url)
+  await assignToken(server, username, password)
+
+  await access(options.file, constants.F_OK)
+
+  console.log('Uploading %s video...', options.videoName)
+
+  const baseAttributes = await buildVideoAttributesFromCommander(server, options)
+
+  const attributes = {
+    ...baseAttributes,
+
+    fixture: options.file,
+    thumbnailfile: options.thumbnail
+  }
+
+  try {
+    await server.videos.upload({ attributes })
+    console.log(`Video ${options.videoName} uploaded.`)
+    process.exit(0)
+  } catch (err) {
+    const message = err.message || ''
+    if (message.includes('413')) {
+      console.error('Aborted: user quota is exceeded or video file is too big for this PeerTube instance.')
+    } else {
+      console.error(inspect(err))
+    }
+
+    process.exit(-1)
+  }
+}
+
+async function buildVideoAttributesFromCommander (server: PeerTubeServer, options: ReturnType<typeof program.opts>) {
+  const videoAttributes: VideoEdit = {
+    name: options.videoName,
+    category: options.category || undefined,
+    licence: options.licence || undefined,
+    language: options.language || undefined,
+    privacy: options.privacy || VideoPrivacy.PUBLIC,
+    support: options.support || undefined,
+    description: options.videoDescription || undefined,
+    tags: options.tags || undefined,
+
+    commentsPolicy: options.commentsEnabled === false
+      ? VideoCommentPolicy.DISABLED
+      : undefined,
+
+    recommendationScope: options.recommendationScope || undefined,
+
+    aiUsage: options.aiUsage || undefined,
+    commercialContent: options.commercialContent || undefined,
+
+    nsfw: options.nsfw,
+    downloadEnabled: options.downloadEnabled === false
+      ? false
+      : undefined,
+    waitTranscoding: options.waitTranscoding === false
+      ? false
+      : undefined
+  }
+
+  if (options.channelName) {
+    const videoChannel = await server.channels.get({ channelName: options.channelName })
+
+    Object.assign(videoAttributes, { channelId: videoChannel.id })
+
+    if (!videoAttributes.support && videoChannel.support) {
+      Object.assign(videoAttributes, { support: videoChannel.support })
+    }
+  }
+
+  return videoAttributes
+}

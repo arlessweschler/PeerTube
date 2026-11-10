@@ -1,13 +1,23 @@
 <div class="root">
-  <h4 *ngIf="title">{{ title }}</h4>
-  <div *ngIf="description" class="description">{{ description }}</div>
+  <div class="videos" [ngStyle]="limitRowsStyle()">
 
-  <div class="videos">
-    <my-video-miniature
-      *ngFor="let video of videos"
-      [video]="video" [user]="getUser()" [displayAsRow]="false"
-      [displayVideoActions]="false" [displayOptions]="displayOptions"
-    >
-    </my-video-miniature>
+    @for (video of videos; track video) {
+      <div class="video-wrapper">
+        <my-video-miniature
+          [video]="video" [user]="user" [displayAsRow]="false"
+          [displayVideoActions]="true" [displayOptions]="displayOptions"
+          >
+        </my-video-miniature>
+      </div>
+    }
+
   </div>
+
+  @if ((moreHref() || morePath()) && videos?.length !== 0) {
+    <div class="more">
+      <my-link className="peertube-button-link primary-button" [internalLink]="morePathUrlTree()" [href]="morePath() ? undefined : moreHref()">
+        {{ getMoreLabel() }}
+      </my-link>
+    </div>
+  }
 </div>

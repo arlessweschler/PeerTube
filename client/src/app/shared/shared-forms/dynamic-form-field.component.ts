@@ -1,15 +1,50 @@
-import { Component, Input } from '@angular/core'
-import { FormGroup } from '@angular/forms'
-import { RegisterClientFormFieldOptions } from '@shared/models'
+import { Component, computed, input, ChangeDetectionStrategy } from '@angular/core'
+import { FormGroup, FormsModule, ReactiveFormsModule } from '@angular/forms'
+import { RegisterClientFormFieldOptions } from '@peertube/peertube-models'
+import { SelectRadioItem } from '@pt-types'
+import { HelpComponent } from '../shared-main/buttons/help.component'
+import { InputTextComponent } from './input-text.component'
+import { MarkdownTextareaComponent } from './markdown-textarea.component'
+import { PeertubeCheckboxComponent } from './peertube-checkbox.component'
+import { SelectRadioComponent } from './select/select-radio.component'
 
 @Component({
   selector: 'my-dynamic-form-field',
   templateUrl: './dynamic-form-field.component.html',
-  styleUrls: [ './dynamic-form-field.component.scss' ]
+  styleUrls: [ './dynamic-form-field.component.scss' ],
+  changeDetection: ChangeDetectionStrategy.Eager,
+  imports: [
+    FormsModule,
+    ReactiveFormsModule,
+    PeertubeCheckboxComponent,
+    InputTextComponent,
+    HelpComponent,
+    MarkdownTextareaComponent,
+    SelectRadioComponent
+  ]
 })
-
 export class DynamicFormFieldComponent {
-  @Input() form: FormGroup
-  @Input() formErrors: any
-  @Input() setting: RegisterClientFormFieldOptions
+  readonly form = input<FormGroup>(undefined)
+  readonly formErrors = input<any>(undefined)
+  readonly setting = input<RegisterClientFormFieldOptions>(undefined)
+
+  readonly radioItems = computed<SelectRadioItem[]>(() => {
+    return (this.setting().options ?? []).map(o => ({ id: o.value, label: o.label }))
+  })
+
+  hasDedicatedFormError () {
+    const dedicated = new Set<RegisterClientFormFieldOptions['type']>([
+      'input-checkbox',
+      'input',
+      'select',
+      'input-radio',
+      'input-textarea'
+    ])
+
+    return dedicated.has(this.setting().type)
+  }
+
+  getLabelId () {
+    return this.setting().name + '-label'
+  }
 }

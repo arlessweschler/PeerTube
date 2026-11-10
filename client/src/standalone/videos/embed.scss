@@ -1,13 +1,14 @@
-@import '_variables';
-@import '_mixins';
-@import '~video.js/dist/video-js.css';
-@import '~videojs-dock/dist/videojs-dock.css';
-
-$assets-path: '../../assets/';
-@import '../../sass/player/index';
+@use "_variables" as *;
+@use "_mixins" as *;
+@use "_css-variables" as *;
+@use "../player/build/peertube-player";
 
 [hidden] {
   display: none !important;
+}
+
+:root {
+  @include define-css-variables();
 }
 
 body {
@@ -25,7 +26,7 @@ html,
 body {
   height: 100%;
   margin: 0;
-  background-color: #000;
+  background-color: #0f0f10;
 }
 
 #video-wrapper {
@@ -37,33 +38,12 @@ body {
   width: 100%;
   height: 100%;
   overflow: hidden;
-
-  .vjs-poster {
-    background-size: 100% auto;
-  }
-
-  @media screen and (max-width: 350px) {
-    .vjs-play-control {
-      padding: 0 5px !important;
-      width: 25px !important;
-    }
-
-    .vjs-volume-control {
-      display: none !important;
-    }
-
-    .vjs-volume-panel {
-      width: 26px !important;
-    }
-
-    .vjs-peertube-link {
-      padding: 0;
-    }
-  }
 }
 
-#error-block {
+#error-block,
+#video-password-block {
   display: none;
+  user-select: none;
 
   flex-direction: column;
   align-content: center;
@@ -83,6 +63,15 @@ body {
 
 #error-content {
   font-size: 24px;
+  padding: 0 20px;
+}
+
+#error-details {
+  margin-top: 30px;
+}
+
+#error-details-content {
+  margin-top: 10px;
 }
 
 #placeholder-preview {
@@ -93,6 +82,56 @@ body {
   width: 100%;
   height: 100%;
   background-position: 50% 50%;
+  background-repeat: no-repeat;
+}
+
+.player-information {
+  width: 100%;
+  color: #fff;
+  background: rgba(0, 0, 0, 0.6);
+  padding: 20px 0;
+  position: absolute;
+  bottom: 0;
+  text-align: center;
+}
+
+#video-password-content {
+  @include margin(0, 0, 2rem);
+}
+
+#video-password-input,
+#video-password-submit {
+  line-height: 23px;
+  padding: 1rem;
+  margin: 1rem 0.5rem;
+  border: 0;
+  font-weight: $font-bold;
+  border-radius: 3px !important;
+  font-size: 18px;
+  display: inline-block;
+}
+
+#video-password-submit {
+  color: pvar(--on-primary) !important;
+  background-color: pvar(--primary) !important;
+  cursor: pointer;
+}
+
+#video-password-submit:hover {
+  color: pvar(--on-primary);
+  background-color: pvar(--primary-400);
+}
+
+#video-password-error {
+  margin-top: 10px;
+  margin-bottom: 10px;
+  height: 2rem;
+  font-weight: bolder;
+}
+
+#video-password-block svg {
+  margin-left: auto;
+  margin-right: auto;
 }
 
 @media screen and (max-width: 300px) {
@@ -104,4 +143,3 @@ body {
     font-size: 14px;
   }
 }
-

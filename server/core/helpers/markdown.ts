@@ -1,0 +1,109 @@
+import {
+  getDefaultSanitizeOptions,
+  getMailHtmlSanitizeOptions,
+  getTextOnlySanitizeOptions,
+  TEXT_WITH_HTML_RULES
+} from '@peertube/peertube-core-utils'
+import MarkdownItClass from 'markdown-it'
+import markdownItEmoji from 'markdown-it-emoji/lib/light.mjs'
+import { parse } from 'node-html-parser'
+import sanitizeHtml from 'sanitize-html'
+
+type MarkdownIt = InstanceType<typeof MarkdownItClass>
+type MarkdownItWithPlainText = MarkdownIt & { plainText: string }
+
+const defaultSanitizeOptions = getDefaultSanitizeOptions()
+const textOnlySanitizeOptions = getTextOnlySanitizeOptions()
+const hrefOnlySanitizeOptions = getMailHtmlSanitizeOptions()
+
+const markdownItForSafeHtml = new MarkdownItClass('default', { linkify: true, breaks: true, html: true })
+  .enable(TEXT_WITH_HTML_RULES)
+  .use(markdownItEmoji)
+
+const markdownItForPlainText = new MarkdownItClass('default', { linkify: false, breaks: true, html: false })
+  .use(markdownItEmoji)
+  .use(plainTextPlugin) as MarkdownItWithPlainText
+
+export const toSafeHtml = (text: string) => {
+  if (!text) return ''
+
+  // Restore line feed
+  const textWithLineFeed = text.replace(/<br.?\/?>/g, '\r\n')
+
+  // Convert possible markdown (emojis, emphasis and lists) to html
+  const html = markdownItForSafeHtml.render(textWithLineFeed)
+
+  // Convert to safe Html
+  return sanitizeHtml(html, defaultSanitizeOptions)
+}
+
+export const mdToPlainText = (text: string) => {
+  if (!text) return ''
+
+  markdownItForPlainText.render(text)
+
+  // Convert to safe Html
+  return sanitizeHtml(markdownItForPlainText.plainText, textOnlySanitizeOptions)
+}
+
+export const mdToUnescapedPlainText = (text: string) => {
+  const plainText = mdToPlainText(text)
+  if (!plainText) return ''
+
+  return parse(plainText).text
+}
+
+export const toSafeMailHtml = (text: string) => {
+  if (!text) return ''
+
+  return sanitizeHtml(text, hrefOnlySanitizeOptions)
+}
+
+// ---------------------------------------------------------------------------
+// Private
+// ---------------------------------------------------------------------------
+
+type MarkdownItState = InstanceType<MarkdownIt['core']['State']>
+type MarkdownItToken = MarkdownItState['tokens'][number]
+
+// Thanks: https://github.com/wavesheep/markdown-it-plain-text
+function plainTextPlugin (markdownIt: MarkdownIt) {
+  function plainTextRule (state: MarkdownItState) {
+    const text = scan(state.tokens)
+    ;(markdownIt as MarkdownItWithPlainText).plainText = text
+  }
+
+  function scan (tokens: MarkdownItToken[]) {
+    let lastSeparator = ''
+    let text = ''
+
+    function buildSeparator (token: MarkdownItToken) {
+      if (token.type === 'list_item_close') {
+        lastSeparator = ', '
+      }
+
+      if (token.tag === 'br' || token.type === 'paragraph_close') {
+        lastSeparator = ' '
+      }
+    }
+
+    for (const token of tokens) {
+      buildSeparator(token)
+
+      if (token.type !== 'inline') continue
+
+      for (const child of token.children) {
+        buildSeparator(child)
+
+        if (!child.content) continue
+
+        text += lastSeparator + child.content
+        lastSeparator = ''
+      }
+    }
+
+    return text
+  }
+
+  markdownIt.core.ruler.push('plainText', plainTextRule)
+}

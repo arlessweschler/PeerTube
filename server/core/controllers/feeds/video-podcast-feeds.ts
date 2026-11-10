@@ -1,0 +1,578 @@
+import { Feed } from '@peertube/feed'
+import { CustomTag, CustomXMLNS, LiveItemStatus } from '@peertube/feed/lib/typings/index.js'
+import { buildDownloadFilesUrl, getResolutionLabel, sortObjectComparator } from '@peertube/peertube-core-utils'
+import {
+  ActorImageType,
+  FeedEnclosurePreference,
+  PodcastChapters,
+  VideoFile,
+  VideoInclude,
+  VideoResolution,
+  VideoState
+} from '@peertube/peertube-models'
+import { buildUUIDv5FromURL } from '@peertube/peertube-node-utils'
+import { buildNSFWFilters } from '@server/helpers/express-utils.js'
+import { createLogger } from '@server/helpers/logger.js'
+import { CONFIG } from '@server/initializers/config.js'
+import { InternalEventEmitter } from '@server/lib/internal-event-emitter.js'
+import { Hooks } from '@server/lib/plugins/hooks.js'
+import { getVideoFileMimeType } from '@server/lib/video-file.js'
+import {
+  buildPodcastChannelGroupsCache,
+  buildPodcastPlaylistGroupsCache,
+  cacheRouteFactory,
+  videoFeedsPodcastSetCacheKey
+} from '@server/middlewares/index.js'
+import { allowReplicaReadsToController } from '@server/middlewares/replica-reads.js'
+import { VideoChapterModel } from '@server/models/video/video-chapter.js'
+import { VideoPlaylistElementModel } from '@server/models/video/video-playlist-element.js'
+import { MVideo, MVideoCaptionVideo, MVideoFull } from '@server/types/models/index.js'
+import express from 'express'
+import { extname } from 'path'
+import { MIMETYPES, ROUTE_CACHE_LIFETIME, VIDEO_CATEGORIES, WEBSERVER } from '../../initializers/constants.js'
+import {
+  asyncMiddleware,
+  setFeedPodcastChaptersContentType,
+  setFeedPodcastContentType,
+  videoFeedsPodcastChaptersValidator,
+  videoFeedsPodcastValidator
+} from '../../middlewares/index.js'
+import { VideoCaptionModel } from '../../models/video/video-caption.js'
+import { VideoModel } from '../../models/video/video.js'
+import {
+  buildFeedMetadata,
+  getCommonVideoFeedAttributes,
+  getPodcastChannelFeedUrlCustomTag,
+  getPodcastPlaylistFeedUrlCustomTag,
+  getPodcastVideoChaptersCustomTag,
+  getVideosForFeeds,
+  initFeed
+} from './shared/index.js'
+
+const logger = createLogger()
+
+const videoPodcastFeedsRouter = express.Router()
+
+// ---------------------------------------------------------------------------
+
+const { middleware: podcastCacheRouteMiddleware, instance: podcastApiCache } = cacheRouteFactory({
+  headerBlacklist: [ 'Content-Type' ]
+})
+
+for (const event of ([ 'video-created', 'video-updated', 'video-deleted', 'chapters-updated' ] as const)) {
+  InternalEventEmitter.Instance.on(event, async ({ video }) => {
+    podcastApiCache.clearGroupSafe(buildPodcastChannelGroupsCache({ channelId: video.channelId }))
+
+    try {
+      const playlistIds = await VideoPlaylistElementModel.listPlaylistIdsForVideoId(video.id)
+
+      for (const playlistId of playlistIds) {
+        podcastApiCache.clearGroupSafe(buildPodcastPlaylistGroupsCache({ playlistId }))
+      }
+    } catch (err) {
+      logger.error('Error while clearing podcast feed cache after video update', { videoId: video.id, error: err })
+    }
+  })
+}
+
+for (const event of ([ 'channel-updated', 'channel-deleted' ] as const)) {
+  InternalEventEmitter.Instance.on(event, ({ channel }) => {
+    podcastApiCache.clearGroupSafe(buildPodcastChannelGroupsCache({ channelId: channel.id }))
+  })
+}
+
+for (const event of ([ 'playlist-updated', 'playlist-deleted' ] as const)) {
+  InternalEventEmitter.Instance.on(event, ({ playlist }) => {
+    podcastApiCache.clearGroupSafe(buildPodcastPlaylistGroupsCache({ playlistId: playlist.id }))
+  })
+}
+
+for (const event of ([ 'playlist-element-created', 'playlist-element-updated', 'playlist-element-deleted' ] as const)) {
+  InternalEventEmitter.Instance.on(event, ({ playlistElement }) => {
+    podcastApiCache.clearGroupSafe(buildPodcastPlaylistGroupsCache({ playlistId: playlistElement.videoPlaylistId }))
+  })
+}
+
+// ---------------------------------------------------------------------------
+
+videoPodcastFeedsRouter.get(
+  '/podcast/videos.xml',
+  setFeedPodcastContentType,
+  videoFeedsPodcastSetCacheKey,
+  podcastCacheRouteMiddleware(ROUTE_CACHE_LIFETIME.FEEDS),
+  asyncMiddleware(videoFeedsPodcastValidator),
+  asyncMiddleware(allowReplicaReadsToController(generateVideoPodcastFeed))
+)
+
+videoPodcastFeedsRouter.get(
+  '/podcast/video-chapters.json',
+  setFeedPodcastChaptersContentType,
+  asyncMiddleware(videoFeedsPodcastChaptersValidator),
+  asyncMiddleware(allowReplicaReadsToController(getVideoPodcastChapters))
+)
+
+// ---------------------------------------------------------------------------
+
+export {
+  videoPodcastFeedsRouter
+}
+
+// ---------------------------------------------------------------------------
+
+async function getVideoPodcastChapters (req: express.Request, res: express.Response) {
+  const chapters = await VideoChapterModel.listChaptersOfVideo(res.locals.videoWithBlacklist.id)
+
+  const result: PodcastChapters = {
+    version: '1.2.0',
+    chapters: chapters.map(c => c.toPodcastJSON())
+  }
+
+  return res.json(result)
+}
+
+async function generateVideoPodcastFeed (req: express.Request, res: express.Response) {
+  const playlist = res.locals.videoPlaylistFull
+
+  if (playlist) {
+    return generatePlaylistPodcastFeed(req, res)
+  }
+
+  return generateChannelPodcastFeed(req, res)
+}
+
+async function generateChannelPodcastFeed (req: express.Request, res: express.Response) {
+  const videoChannel = res.locals.videoChannel
+
+  const { name, description, imageUrl, ownerImageUrl, email, link, ownerLink } = await buildFeedMetadata({ videoChannel })
+
+  const nsfwOptions = buildNSFWFilters()
+
+  const data = await getVideosForFeeds({
+    ...nsfwOptions,
+
+    sort: '-originallyPublishedAt',
+
+    // Prevent podcast feeds from listing videos in other instances
+    // helps prevent duplicates when they are indexed -- only the author should control them
+    isLocal: true,
+    include: VideoInclude.FILES,
+    videoChannelId: videoChannel?.id
+  })
+
+  const language = await VideoModel.guessLanguageOrCategoryOf('language', { videoChannelId: videoChannel.id })
+  const category = await VideoModel.guessLanguageOrCategoryOf('category', { videoChannelId: videoChannel.id })
+  const hasNSFW = nsfwOptions.nsfw !== false
+    ? await VideoModel.channelHasNSFWContent(videoChannel.id)
+    : false
+
+  const customTags: CustomTag[] = await Hooks.wrapObject(
+    [ getPodcastChannelFeedUrlCustomTag(videoChannel) ],
+    'filter:feed.podcast.channel.create-custom-tags.result',
+    { videoChannel }
+  )
+
+  const customXMLNS: CustomXMLNS[] = await Hooks.wrapObject(
+    [],
+    'filter:feed.podcast.rss.create-custom-xmlns.result'
+  )
+
+  const feed = await initFeed({
+    name,
+    description,
+    link,
+    isPodcast: true,
+    imageUrl,
+
+    language: language || 'en',
+    category: categoryToItunes(category),
+    nsfw: hasNSFW,
+
+    guid: buildUUIDv5FromURL(videoChannel.Actor.url),
+
+    locked: email
+      ? { isLocked: true, email } // Default to true because we have no way of offering a redirect yet
+      : undefined,
+
+    person: [ { name, href: ownerLink, img: ownerImageUrl } ],
+    author: { name: CONFIG.INSTANCE.NAME, link: WEBSERVER.URL },
+    resourceType: 'videos',
+    queryString: new URL(WEBSERVER.URL + req.url).search,
+    medium: getPodcastMedium(req.query.enclosurePreference),
+    customXMLNS,
+    customTags
+  })
+
+  await addVideosToPodcastFeed(feed, data, req.query.enclosurePreference)
+
+  // Now the feed generation is done, let's send it!
+  return res.send(feed.podcast()).end()
+}
+
+async function generatePlaylistPodcastFeed (req: express.Request, res: express.Response) {
+  const playlist = res.locals.videoPlaylistFull
+
+  const { name, description, imageUrl, ownerImageUrl, email, link, ownerLink } = await buildFeedMetadata({ videoPlaylist: playlist })
+
+  const nsfwOptions = buildNSFWFilters()
+
+  const data = await getVideosForFeeds({
+    ...nsfwOptions,
+
+    sort: '-playlistElementPosition',
+
+    // Prevent podcast feeds from listing videos in other instances
+    // helps prevent duplicates when they are indexed -- only the author should control them
+    isLocal: true,
+    include: VideoInclude.FILES,
+    videoPlaylistId: playlist.id,
+    allowUnlisted: true // Playlists should be able to list unlisted videos, otherwise they are not really usable
+  })
+
+  const language = await VideoModel.guessLanguageOrCategoryOf('language', { videoPlaylistId: playlist.id })
+  const category = await VideoModel.guessLanguageOrCategoryOf('category', { videoPlaylistId: playlist.id })
+  const hasNSFW = nsfwOptions.nsfw !== false
+    ? await VideoModel.playlistHasPublicNSFWContent(playlist.id)
+    : false
+
+  const customTags: CustomTag[] = await Hooks.wrapObject(
+    [ getPodcastPlaylistFeedUrlCustomTag(playlist) ],
+    'filter:feed.podcast.video-playlist.create-custom-tags.result',
+    { videoPlaylist: playlist }
+  )
+
+  const customXMLNS: CustomXMLNS[] = await Hooks.wrapObject(
+    [],
+    'filter:feed.podcast.rss.create-custom-xmlns.result'
+  )
+
+  const channelName = playlist.VideoChannel.getDisplayName()
+
+  const feed = await initFeed({
+    name,
+    description,
+    link,
+    isPodcast: true,
+    imageUrl,
+
+    language: language || 'en',
+    category: categoryToItunes(category),
+    nsfw: hasNSFW,
+
+    guid: buildUUIDv5FromURL(playlist.url),
+
+    locked: email
+      ? { isLocked: true, email } // Default to true because we have no way of offering a redirect yet
+      : undefined,
+
+    person: [ { name: channelName, href: ownerLink, img: ownerImageUrl } ],
+    author: { name: channelName, link: ownerLink },
+    resourceType: 'videos',
+    queryString: new URL(WEBSERVER.URL + req.url).search,
+    medium: getPodcastMedium(req.query.enclosurePreference),
+    customXMLNS,
+    customTags
+  })
+
+  await addVideosToPodcastFeed(feed, data, req.query.enclosurePreference)
+
+  return res.send(feed.podcast()).end()
+}
+
+type PodcastMedia =
+  | {
+    type: string
+    length: number
+    bitrate: number
+    sources: { uri: string, contentType?: string }[]
+    title: string
+    language?: string
+  }
+  | {
+    sources: { uri: string }[]
+    type: string
+    title: string
+  }
+
+async function generatePodcastItem (options: {
+  video: VideoModel
+  liveItem: boolean
+  media: PodcastMedia[]
+  hasChapters?: boolean
+}) {
+  const { video, liveItem, media, hasChapters = false } = options
+
+  const customTags: CustomTag[] = await Hooks.wrapObject(
+    hasChapters ? [ getPodcastVideoChaptersCustomTag(video) ] : [],
+    'filter:feed.podcast.video.create-custom-tags.result',
+    { video, liveItem }
+  )
+
+  const commonAttributes = getCommonVideoFeedAttributes(video)
+  const guid = liveItem
+    ? `${video.url}?publishedAt=${video.publishedAt.toISOString()}`
+    : video.url
+
+  const account = video.VideoChannel.Account
+  const person = {
+    name: account.getDisplayName(),
+    href: account.getClientUrl(),
+
+    img: account.Actor.hasImage(ActorImageType.AVATAR)
+      ? account.Actor.getMaxQualityImage(ActorImageType.AVATAR).getLocalFileUrl()
+      : undefined
+  }
+
+  return {
+    guid,
+    ...commonAttributes,
+
+    trackers: video.getTrackerUrls(),
+
+    person: [ person ],
+
+    media,
+
+    socialInteract: [
+      {
+        uri: video.url,
+        protocol: 'activitypub',
+        accountUrl: account.getClientUrl()
+      }
+    ],
+
+    duration: video.duration,
+
+    customTags
+  }
+}
+
+function getPodcastMedium (enclosurePreference?: FeedEnclosurePreference) {
+  return enclosurePreference === 'audio'
+    ? 'podcast'
+    : 'video'
+}
+
+async function addVideosToPodcastFeed (feed: Feed, videos: VideoModel[], enclosurePreference?: FeedEnclosurePreference) {
+  const videoIds = videos.map(v => v.id)
+  const captionsGroup = await VideoCaptionModel.listCaptionsOfMultipleVideos(videoIds)
+  const videoIdsWithChapters = await VideoChapterModel.listVideoIdsWithChapters(videoIds)
+
+  for (const video of videos) {
+    if (!video.isLive) {
+      await addVODPodcastItem({ feed, video, captionsGroup, enclosurePreference, hasChapters: videoIdsWithChapters.has(video.id) })
+    } else if (video.isLive && video.state !== VideoState.LIVE_ENDED) {
+      await addLivePodcastItem({ feed, video })
+    }
+  }
+}
+
+async function addVODPodcastItem (options: {
+  feed: Feed
+  video: VideoModel
+  captionsGroup: { [id: number]: MVideoCaptionVideo[] }
+  enclosurePreference?: FeedEnclosurePreference
+  hasChapters: boolean
+}) {
+  const { feed, video, captionsGroup, enclosurePreference, hasChapters } = options
+
+  const resolutionSortOrder = enclosurePreference === 'video'
+    ? 'desc' as const
+    : 'asc'
+
+  const webVideos = video.getFormattedWebVideoFilesJSON(true)
+    .filter(f => {
+      if (enclosurePreference === 'audio' && f.resolution.id !== VideoResolution.H_NOVIDEO) return false
+      if (enclosurePreference === 'video' && f.resolution.id === VideoResolution.H_NOVIDEO) return false
+      if (enclosurePreference === 'm3u8') return false
+
+      return true
+    })
+    .map(f => buildVODWebVideoFile(video, f))
+    .sort(sortObjectComparator('resolution', resolutionSortOrder))
+
+  const streamingPlaylistFiles = buildVODStreamingPlaylistsIfMissingWebVideoFile({ video, enclosurePreference, resolutionSortOrder })
+
+  // Order matters here, the first media URI will be the "default"
+  // So web videos are default if enabled
+  const media: PodcastMedia[] = [ ...webVideos, ...streamingPlaylistFiles ]
+  if (media.length === 0) return
+
+  const videoCaptions = buildVODCaptions(captionsGroup[video.id])
+  const item = await generatePodcastItem({ video, liveItem: false, media, hasChapters })
+
+  feed.addPodcastItem({ ...item, subTitle: videoCaptions })
+}
+
+async function addLivePodcastItem (options: {
+  feed: Feed
+  video: VideoModel
+}) {
+  const { feed, video } = options
+
+  let status: LiveItemStatus
+
+  switch (video.state) {
+    case VideoState.WAITING_FOR_LIVE:
+      status = LiveItemStatus.pending
+      break
+
+    case VideoState.PUBLISHED:
+      status = LiveItemStatus.live
+      break
+  }
+
+  const item = await generatePodcastItem({ video, liveItem: true, media: buildLiveStreamingPlaylists(video) })
+
+  feed.addPodcastLiveItem({ ...item, status, start: video.updatedAt.toISOString() })
+}
+
+// ---------------------------------------------------------------------------
+
+function buildVODWebVideoFile (video: MVideo, videoFile: VideoFile) {
+  const sources = [
+    { uri: videoFile.fileUrl },
+    { uri: videoFile.torrentUrl, contentType: 'application/x-bittorrent' }
+  ]
+
+  if (videoFile.magnetUri) {
+    sources.push({ uri: videoFile.magnetUri })
+  }
+
+  return {
+    type: getAppleMimeType(extname(videoFile.fileUrl), videoFile.resolution.id === VideoResolution.H_NOVIDEO),
+    title: videoFile.resolution.label,
+    length: videoFile.size,
+    bitrate: Math.round(videoFile.size / video.duration * 8),
+    language: video.language,
+    sources
+  }
+}
+
+function buildVODStreamingPlaylistsIfMissingWebVideoFile (options: {
+  video: MVideoFull
+  resolutionSortOrder: 'asc' | 'desc'
+  enclosurePreference?: FeedEnclosurePreference
+}) {
+  const { video, enclosurePreference, resolutionSortOrder } = options
+
+  const hls = video.getHLSPlaylist()
+  if (!hls) return []
+
+  const m3u8 = {
+    type: 'application/x-mpegURL',
+    title: 'HLS',
+    sources: [
+      { uri: hls.getMasterPlaylistUrl(video) }
+    ],
+    language: video.language
+  }
+
+  if (enclosurePreference === 'm3u8') return [ m3u8 ]
+
+  const { separatedAudioFile } = video.getMaxQualityAudioAndVideoFiles()
+
+  const files = [
+    ...hls.VideoFiles
+      .filter(videoFile => {
+        if (enclosurePreference === 'audio' && videoFile.hasVideo()) return false
+        if (enclosurePreference === 'video' && !videoFile.hasVideo()) return false
+
+        return !video.VideoFiles.some(f => f.fps === videoFile.fps && f.resolution === videoFile.resolution)
+      })
+      .sort(sortObjectComparator('resolution', resolutionSortOrder))
+      .map(videoFile => {
+        const files = [ videoFile ]
+
+        if (videoFile.resolution !== VideoResolution.H_NOVIDEO && separatedAudioFile) {
+          files.push(separatedAudioFile)
+        }
+
+        return {
+          type: getAppleMimeType(videoFile.extname, videoFile.resolution === VideoResolution.H_NOVIDEO),
+          title: getResolutionLabel(videoFile),
+          length: files.reduce((p, f) => p + f.size, 0),
+          language: video.language,
+          sources: [
+            {
+              uri: buildDownloadFilesUrl({
+                baseUrl: WEBSERVER.URL,
+                videoFiles: files.map(f => f.id),
+                videoUUID: video.uuid,
+                extension: videoFile.hasVideo()
+                  ? '.mp4'
+                  : '.m4a'
+              })
+            }
+          ]
+        }
+      })
+  ]
+
+  // We don't return m3u8 if we don't have available files
+  if (files.length === 0) return []
+
+  return [ ...files, m3u8 ]
+}
+
+function buildLiveStreamingPlaylists (video: MVideoFull) {
+  const hls = video.getHLSPlaylist()
+
+  return [
+    {
+      type: 'application/x-mpegURL',
+      title: `HLS live stream`,
+      sources: [
+        { uri: hls.getMasterPlaylistUrl(video) }
+      ],
+      language: video.language
+    }
+  ]
+}
+
+function buildVODCaptions (videoCaptions: MVideoCaptionVideo[]) {
+  return videoCaptions.map(caption => {
+    const type = MIMETYPES.VIDEO_CAPTIONS.EXT_MIMETYPE[extname(caption.filename)]
+    if (!type) return null
+
+    return {
+      url: caption.getLocalFileUrl(),
+      language: caption.language,
+      type,
+      rel: 'captions'
+    }
+  }).filter(c => c)
+}
+
+function categoryToItunes (category: number) {
+  const itunesMap: { [id in keyof typeof VIDEO_CATEGORIES]: string } = {
+    1: 'Music',
+    2: 'TV &amp; Film',
+    3: 'Leisure',
+    4: 'Arts',
+    5: 'Sports',
+    6: 'Places &amp; Travel',
+    7: 'Video Games',
+    8: 'Society &amp; Culture',
+    9: 'Comedy',
+    10: 'Fiction',
+    11: 'News',
+    12: 'Leisure',
+    13: 'Education',
+    14: 'Society &amp; Culture',
+    15: 'Technology',
+    16: 'Pets &amp; Animals',
+    17: 'Kids &amp; Family',
+    18: 'Food'
+  }
+
+  return itunesMap[category]
+}
+
+// Guidelines: https://help.apple.com/itc/podcasts_connect/#/itcb54353390
+// "The type values for the supported file formats are: audio/x-m4a, audio/mpeg, video/quicktime, video/mp4, video/x-m4v, ..."
+function getAppleMimeType (extname: string, isAudio: boolean) {
+  if (extname === '.mp4' && isAudio) return 'audio/x-m4a'
+  if (extname === '.mp3') return 'audio/mpeg'
+
+  return getVideoFileMimeType(extname, isAudio)
+}

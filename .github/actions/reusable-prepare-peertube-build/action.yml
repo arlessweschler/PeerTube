@@ -1,0 +1,31 @@
+name: "Reusable prepare PeerTube build"
+
+description: "Reusable prepare PeerTube build"
+
+inputs:
+  node-version:
+    required: true
+    description: 'NodeJS version'
+
+runs:
+  using: "composite"
+
+  steps:
+    - uses: pnpm/action-setup@fc06bc1257f339d1d5d8b3a19a8cae5388b55320 # v5.0.0
+      name: Install pnpm
+      with:
+        run_install: false
+
+    - name: Use Node.js
+      uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444 # v5.0.0
+      with:
+        node-version: ${{ inputs.node-version }}
+        cache: 'pnpm'
+
+    - name: Install dependencies
+      shell: bash
+      run: npm run install-node-dependencies
+
+    - name: Display PeerTube dependencies
+      shell: bash
+      run: ls -l node_modules/@peertube

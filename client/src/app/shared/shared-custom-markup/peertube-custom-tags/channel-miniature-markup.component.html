@@ -1,8 +1,51 @@
-<div *ngIf="channel" class="channel">
-  <my-actor-avatar [channel]="channel" size="34"></my-actor-avatar>
+@if (channel) {
+  <div class="channel">
+    <div class="channel-header">
+      <my-actor-avatar
+        class="channel-avatar" [actor]="channel" actorType="channel" [internalHref]="getVideoChannelLink()"
+        i18n-title title="See this video channel" size="86"
+      ></my-actor-avatar>
 
-  <div class="display-name">{{ channel.displayName }}</div>
-  <div class="username">{{ channel.name }}</div>
+      <div class="channel-info">
+        <h6 class="channel-name">
+          <a class="ellipsis" [routerLink]="getVideoChannelLink()" i18n-title title="See this video channel">
+            {{ channel.displayName }}
+          </a>
+        </h6>
 
-  <div class="description">{{ channel.description }}</div>
-</div>
+        <div class="channel-metadata">
+          @if (!channel.isLocal) {
+            <my-actor-host [host]="channel.host"></my-actor-host>
+          }
+
+          <div class="actor-counters">
+            @if (totalVideos !== undefined) {
+              <span class="videos-count" i18n>{totalVideos, plural, =1 {1 videos} other {{{ totalVideos }} videos}}</span>
+            }
+            <span class="followers" i18n>{channel.followersCount, plural, =1 {1 subscriber} other {{{ channel.followersCount }} subscribers}}</span>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    @if (displayDescription()) {
+      <div class="description-html ellipsis-multiline-3" [innerHTML]="descriptionHTML"></div>
+    }
+
+    @if (video && displayLatestVideo()) {
+      <div class="video">
+        @if (isSortedByPublicationDate()) {
+          <div i18n class="video-label">Latest published video</div>
+        } @else {
+          <div i18n class="video-label">Featured video</div>
+        }
+
+        <my-video-miniature
+          [video]="video" [user]="user" [displayAsRow]="false"
+          [displayVideoActions]="true" [displayOptions]="videoDisplayOptions"
+          thumbnailSizes="400px"
+        ></my-video-miniature>
+      </div>
+    }
+  </div>
+}

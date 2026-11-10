@@ -1,0 +1,29 @@
+import { ActorImage } from '../index.js'
+
+export interface About {
+  instance: {
+    name: string
+    shortDescription: string
+    description: string
+    terms: string
+
+    codeOfConduct: string
+    hardwareInformation: string
+
+    creationReason: string
+    moderationInformation: string
+    administrator: string
+    maintenanceLifetime: string
+    businessModel: string
+
+    support: {
+      text: string
+    }
+
+    languages: string[]
+    categories: number[]
+
+    banners: ActorImage[]
+    avatars: ActorImage[]
+  }
+}

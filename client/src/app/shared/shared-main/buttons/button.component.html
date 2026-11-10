@@ -1,8 +1,37 @@
-<span class="action-button" [ngClass]="getClasses()" [ngbTooltip]="getTitle()" tabindex="0">
-  <my-global-icon *ngIf="!loading" [iconName]="icon"></my-global-icon>
-  <my-small-loader [loading]="loading"></my-small-loader>
+@if (ptRouterLink() || ptQueryParams()) {
+  <a
+    class="action-button ellipsis"
+    [class]="classes" [ngbTooltip]="tooltip()" [attr.title]="title()"
+    [routerLink]="ptRouterLink()" [queryParams]="ptQueryParams()" [queryParamsHandling]="ptQueryParamsHandling()" [routerLinkActive]="ptRouterLinkActive()"
+    >
+    <ng-container *ngTemplateOutlet="content"></ng-container>
+  </a>
+} @else if (href()) {
+  <a
+    class="action-button ellipsis"
+    [class]="classes" [ngbTooltip]="tooltip()" [attr.title]="title()"
+    [href]="href()" target="_blank"
+    >
+    <ng-container *ngTemplateOutlet="content"></ng-container>
+  </a>
+} @else {
+  <button type="button" class="action-button ellipsis" [class]="classes" [disabled]="disabled()" [ngbTooltip]="tooltip()" [attr.title]="title()" [attr.form]="form()">
+    <ng-container *ngTemplateOutlet="content"></ng-container>
+  </button>
+}
 
-  <span *ngIf="label" class="button-label">{{ label }}</span>
+<ng-template #content>
+  <my-loader size="md" [ngClass]="{ displayed: loading() }" [loading]="loading()"></my-loader>
 
-  <ng-content></ng-content>
-</span>
+  @if (icon() && !loading()) {
+    <my-global-icon [iconName]="icon()"></my-global-icon>
+  }
+
+  <span class="button-label" #labelContent (cdkObserveContent)="ngOnChanges()">
+    @if (label()) {
+      {{ label() }}
+    } @else {
+      <ng-content></ng-content>
+    }
+  </span>
+</ng-template>

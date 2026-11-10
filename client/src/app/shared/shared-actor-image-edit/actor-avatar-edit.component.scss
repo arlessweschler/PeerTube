@@ -1,46 +1,57 @@
-@import '_variables';
-@import '_mixins';
+@use "_variables" as *;
+@use "_mixins" as *;
 
 .actor {
   display: flex;
+}
 
-  my-actor-avatar {
-    margin-right: 15px;
-  }
+.actor-info {
+  display: inline-flex;
+  flex-direction: column;
+}
 
-  .actor-info {
-    display: inline-flex;
-    flex-direction: column;
+.actor-info-display-name {
+  font-weight: $font-bold;
 
-    .actor-info-display-name {
-      font-size: 20px;
-      font-weight: $font-bold;
+  @include peertube-word-wrap;
+  @include font-size(1.25rem);
 
-      @media screen and (max-width: $small-view) {
-        font-size: 16px;
-      }
-    }
-
-    .actor-info-username {
-      position: relative;
-      font-size: 14px;
-      color: pvar(--greyForegroundColor);
-    }
-
-    .actor-info-followers {
-      font-size: 15px;
-      padding-bottom: .5rem;
-    }
+  @media screen and (max-width: $small-view) {
+    @include font-size(18px);
   }
 }
 
-.actor-img-edit-container {
+.actor-info-username {
   position: relative;
-  width: 0;
+  font-size: 14px;
+  color: pvar(--fg-300);
+}
+
+.actor-info-followers {
+  padding-bottom: 0.5rem;
 }
 
 .actor-img-edit-button {
-  top: 55px;
-  right: 45px;
-  border-radius: 50%;
+  padding: 8px 20px;
+
+  position: absolute;
+  bottom: 5px;
+  right: 5px;
+}
+
+.button-focus-within:focus-within {
+  box-shadow: $focus-box-shadow-form;
+}
+
+.dropdown-item {
+  @include dropdown-with-icon-item;
+
+  label {
+    font-weight: normal;
+    margin: 0;
+  }
+}
+
+.dropdown-toggle::after {
+  display: none;
 }

@@ -1,41 +1,24 @@
-<ng-select
-  [items]="availableItems"
-  [(ngModel)]="selectedItems"
+<p-multiSelect
+  [inputId]="inputId()"
+
+  [options]="availableItems()"
+  [(ngModel)]="selectedItems" [ngModelOptions]="{ standalone: true }"
   (ngModelChange)="onModelChange()"
-  [placeholder]="placeholder"
-  [clearable]="true"
-  [multiple]="true"
-  [searchable]="true"
-  [closeOnSelect]="false"
 
-  bindValue="id"
-  bindLabel="label"
+  [placeholder]="placeholder()"
 
-  notFoundText="No items found" i18n-notFoundText
+  [showClear]="showClear()"
+  [showToggleAll]="showToggleAll()"
 
-  [selectableGroup]="selectableGroup"
-  [selectableGroupAsModel]="selectableGroupAsModel"
+  optionValue="id"
 
-  groupBy="group"
-  [compareWith]="compareFn"
+  [selectedItemsLabel]="selectedItemsLabel()"
 
-  [maxSelectedItems]="maxSelectedItems"
+  [virtualScroll]="virtualScroll()"
+  [virtualScrollItemSize]="virtualScrollItemSize()"
+
+  (onPanelHide)="panelHide.emit()"
+
+  fluid="true"
 >
-
-  <ng-template ng-optgroup-tmp let-item="item" let-item$="item$" let-index="index">
-    <div class="form-group-checkbox">
-      <input id="item-{{index}}" type="checkbox" [ngModel]="item$.selected"/>
-      <span role="checkbox" [attr.aria-checked]="item$.selected"></span>
-      <span>{{ item.group }}</span>
-    </div>
-  </ng-template>
-
-  <ng-template ng-option-tmp let-item="item" let-item$="item$" let-index="index">
-    <div class="form-group-checkbox">
-      <input id="item-{{index}}" type="checkbox" [ngModel]="item$.selected"/>
-      <span role="checkbox" [attr.aria-checked]="item$.selected"></span>
-      <span>{{ item.label }}</span>
-    </div>
-  </ng-template>
-
-</ng-select>
+</p-multiSelect>

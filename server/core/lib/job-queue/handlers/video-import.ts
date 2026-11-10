@@ -1,0 +1,451 @@
+import { buildAspectRatio } from '@peertube/peertube-core-utils'
+import { ffprobePromise, getChaptersFromContainer, getVideoStreamDuration } from '@peertube/peertube-ffmpeg'
+import {
+  VideoImportPayload,
+  VideoImportPreventExceptionResult,
+  VideoImportState,
+  VideoImportTorrentPayload,
+  VideoImportTorrentPayloadType,
+  VideoImportYoutubeDLPayload,
+  VideoImportYoutubeDLPayloadType,
+  VideoState
+} from '@peertube/peertube-models'
+import { buildUUID } from '@peertube/peertube-node-utils'
+import { retryTransactionWrapper, runTransaction } from '@server/helpers/database-utils.js'
+import { YoutubeDLWrapper } from '@server/helpers/youtube-dl/index.js'
+import { CONFIG } from '@server/initializers/config.js'
+import { createVideoAutomaticTagsJob } from '@server/lib/automatic-tags/automatic-tags.js'
+import { isPostImportVideoAccepted } from '@server/lib/moderation.js'
+import { isObjectNotFoundError } from '@server/lib/object-storage/object-storage-helpers.js'
+import { downloadStagingObject, removeStagingObject } from '@server/lib/object-storage/staging.js'
+import { Hooks } from '@server/lib/plugins/hooks.js'
+import { ServerConfigManager } from '@server/lib/server-config-manager.js'
+import { createOptimizeOrMergeAudioJobs } from '@server/lib/transcoding/create-transcoding-job.js'
+import { isUserQuotaValid } from '@server/lib/user.js'
+import { autoBlacklistVideoIfNeeded } from '@server/lib/video-blacklist.js'
+import { createTranscriptionTaskIfNeeded } from '@server/lib/transcription/video-transcription.js'
+import { replaceChaptersIfNotExist } from '@server/lib/video-chapters.js'
+import { buildNewFile, storeNewWebVideoFile } from '@server/lib/video-file.js'
+import { addLocalOrRemoteStoryboardJobIfNeeded, buildMoveVideoJob } from '@server/lib/video-jobs.js'
+import { VideoPathManager } from '@server/lib/video-path-manager.js'
+import { buildNextVideoState } from '@server/lib/video-state.js'
+import { createTorrentForFileFromPath, downloadWebTorrentVideo } from '@server/lib/webtorrent.js'
+import { getYoutubeDLCookiesPathIfEnabled } from '@server/lib/youtube-dl-cookies.js'
+import { UserModel } from '@server/models/user/user.js'
+import { VideoCaptionModel } from '@server/models/video/video-caption.js'
+import { VideoInfohashModel } from '@server/models/video/video-infohash.js'
+import { MThumbnail, MUser, MUserId, MVideoFile, MVideoFull } from '@server/types/models/index.js'
+import { MVideoImport, MVideoImportDefault, MVideoImportDefaultFiles, MVideoImportVideo } from '@server/types/models/video/video-import.js'
+import { Job } from 'bullmq'
+import { FfprobeData } from 'fluent-ffmpeg'
+import { remove } from 'fs-extra/esm'
+import { stat } from 'fs/promises'
+import { join } from 'path'
+import { createLogger } from '../../../helpers/logger.js'
+import { CONSTRAINTS_FIELDS, JOB_TTL, OBJECT_STORAGE_STAGING } from '../../../initializers/constants.js'
+import { VideoFileModel } from '../../../models/video/video-file.js'
+import { VideoImportModel } from '../../../models/video/video-import.js'
+import { VideoModel } from '../../../models/video/video.js'
+import { scheduleVideoFederation } from '../../activitypub/videos/index.js'
+import { Notifier } from '../../notifier/index.js'
+import { createLocalVideoThumbnailsFromVideo } from '../../thumbnail.js'
+import { JobQueue } from '../job-queue.js'
+
+const logger = createLogger()
+
+export async function processVideoImport (job: Job): Promise<VideoImportPreventExceptionResult> {
+  const payload = job.data as VideoImportPayload
+
+  const videoImport = await getVideoImportOrDie(payload)
+
+  return logger.withContext([ videoImport.Video.uuid ], async () => {
+    if (videoImport.state === VideoImportState.CANCELLED) {
+      logger.info('Do not process import since it has been cancelled', { payload })
+      return { resultType: 'success' }
+    }
+
+    if (payload.ignoreMaxAttempts !== true && videoImport.attempts >= CONFIG.IMPORT.VIDEOS.MAX_ATTEMPTS) {
+      logger.info('Do not process import since it has reached the maximum number of attempts', { payload, attempts: videoImport.attempts })
+
+      return { resultType: 'error' }
+    }
+
+    // Reset error
+    videoImport.error = null
+    videoImport.attempts += 1
+    videoImport.state = VideoImportState.PROCESSING
+    await videoImport.save()
+
+    try {
+      if (payload.type === 'youtube-dl') await processYoutubeDLImport(job, videoImport, payload)
+      if (payload.type === 'magnet-uri' || payload.type === 'torrent-file') await processTorrentImport(job, videoImport, payload)
+
+      return { resultType: 'success' }
+    } catch (err) {
+      // Processors already handle video import state change on error
+
+      if (!payload.preventException) throw err
+
+      logger.warn('Catch error in video import to send value to parent job.', { payload, err })
+      return { resultType: 'error' }
+    }
+  })
+}
+
+// ---------------------------------------------------------------------------
+// Private
+// ---------------------------------------------------------------------------
+
+async function processTorrentImport (job: Job, videoImport: MVideoImportDefault, payload: VideoImportTorrentPayload) {
+  logger.info('Processing torrent video import in job %s.', job.id)
+
+  const user = await UserModel.loadByVideoId(videoImport.videoId)
+  if (!user) throw new Error('Video does not exist anymore')
+
+  // The torrent file is in object storage
+  const torrentPath = payload.torrentStagingKey
+    ? join(CONFIG.STORAGE.TMP_DIR, buildUUID() + '.torrent')
+    : payload.torrentPath
+
+  try {
+    await processFile({
+      downloader: async () => {
+        // In the downloader, so a staging error marks the import as failed
+        if (payload.torrentStagingKey) await downloadStagedTorrent(payload.torrentStagingKey, torrentPath)
+
+        return downloadWebTorrentVideo({ torrentPath, uri: videoImport.magnetUri }, JOB_TTL['video-import'])
+      },
+      videoImport,
+      type: payload.type,
+      generateTranscription: payload.generateTranscription,
+      user
+    })
+  } finally {
+    if (payload.torrentStagingKey) await remove(torrentPath)
+  }
+
+  // Keep it on failure, the import can be retried
+  if (payload.torrentStagingKey) {
+    await removeStagingObject(payload.torrentStagingKey)
+      .catch(err => logger.error('Cannot remove staged torrent %s of video import.', payload.torrentStagingKey, { err }))
+  }
+}
+
+async function downloadStagedTorrent (key: string, destination: string) {
+  try {
+    await downloadStagingObject({ key, destination })
+  } catch (err) {
+    if (!isObjectNotFoundError(err)) throw err
+
+    const maxAgeDays = OBJECT_STORAGE_STAGING.SUB_PREFIXES.VIDEO_IMPORTS.maxAgeMs / (1000 * 3600 * 24)
+
+    throw new Error(
+      `The torrent file of this import has been removed from object storage staging (kept ${maxAgeDays} days): create a new import`,
+      { cause: err }
+    )
+  }
+}
+
+async function processYoutubeDLImport (job: Job, videoImport: MVideoImportDefault, payload: VideoImportYoutubeDLPayload) {
+  logger.info('Processing youtubeDL video import in job %s.', job.id)
+
+  const youtubeDL = new YoutubeDLWrapper(
+    videoImport.targetUrl,
+    ServerConfigManager.Instance.getEnabledResolutions('vod'),
+    CONFIG.TRANSCODING.ALWAYS_TRANSCODE_ORIGINAL_RESOLUTION,
+    await getYoutubeDLCookiesPathIfEnabled()
+  )
+
+  const user = await UserModel.loadByVideoId(videoImport.videoId)
+  if (!user) throw new Error('Video does not exist anymore')
+
+  return processFile({
+    downloader: () => {
+      return youtubeDL.downloadVideo({ fileExt: payload.fileExt, timeout: JOB_TTL['video-import'], userLanguage: user.getLanguage() })
+    },
+    videoImport,
+    type: payload.type,
+    generateTranscription: payload.generateTranscription,
+    user
+  })
+}
+
+async function getVideoImportOrDie (payload: VideoImportPayload) {
+  const videoImport = await VideoImportModel.loadAndPopulateVideo(payload.videoImportId)
+  if (!videoImport) throw new Error('Video import not found')
+
+  if (!videoImport.Video) {
+    const err = new Error(
+      `Cannot process video import ${payload.videoImportId}: the video import or video linked to this import does not exist anymore.`
+    )
+
+    await onImportError(err, null, videoImport)
+
+    throw err
+  }
+
+  return videoImport
+}
+
+async function processFile (options: {
+  downloader: () => Promise<string>
+  videoImport: MVideoImportDefault
+  user: MUserId
+  type: VideoImportYoutubeDLPayloadType | VideoImportTorrentPayloadType
+  generateTranscription: boolean
+}) {
+  const { downloader, videoImport, user, type, generateTranscription } = options
+
+  let tmpVideoPath: string
+  let videoFile: MVideoFile
+  let rollbackNewVideoFile: () => Promise<void>
+
+  try {
+    // Download video
+    tmpVideoPath = await downloader()
+
+    // Get information about this video
+    const stats = await stat(tmpVideoPath)
+    if (!user) throw new Error('Video does not exist anymore')
+
+    const isAble = await isUserQuotaValid({ channelUserId: user.id, uploadSize: stats.size })
+    if (isAble === false) {
+      throw new Error('The user video quota is exceeded with this video to import.')
+    }
+
+    const ffprobe = await ffprobePromise(tmpVideoPath)
+    const duration = await getVideoStreamDuration(tmpVideoPath, ffprobe)
+
+    const containerChapters = await getChaptersFromContainer({
+      ffmpegInput: tmpVideoPath,
+      maxTitleLength: CONSTRAINTS_FIELDS.VIDEO_CHAPTERS.TITLE.max,
+      ffprobe
+    })
+
+    videoFile = await buildNewFile({ mode: 'web-video', ffprobe, input: { path: tmpVideoPath } })
+    videoFile.videoId = videoImport.videoId
+
+    const hookName = type === 'youtube-dl'
+      ? 'filter:api.video.post-import-url.accept.result'
+      : 'filter:api.video.post-import-torrent.accept.result'
+
+    // Check we accept this video
+    const acceptParameters = {
+      videoImport,
+      video: videoImport.Video,
+      videoFilePath: tmpVideoPath,
+      videoFile: videoFile as VideoFileModel,
+      user: videoImport.User
+    }
+    const acceptedResult = await Hooks.wrapFun(isPostImportVideoAccepted, acceptParameters, hookName)
+
+    if (acceptedResult.accepted !== true) {
+      logger.info('Refused imported video.', { acceptedResult, acceptParameters })
+
+      videoImport.state = VideoImportState.REJECTED
+      await videoImport.save()
+
+      throw new Error(acceptedResult.errorMessage)
+    }
+
+    // Video is accepted, resuming preparation
+    const videoFileLockReleaser = await VideoPathManager.Instance.lockFiles(videoImport.Video.uuid)
+
+    try {
+      const videoImportWithFiles = await refreshVideoImportFromDB(videoImport, videoFile)
+
+      const { localPath, cleanup, rollback } = await storeNewWebVideoFile({
+        video: videoImportWithFiles.Video,
+        videoFile,
+        input: { path: tmpVideoPath }
+      })
+      // If a later step fails, remove the file we just stored instead of leaving it orphaned
+      rollbackNewVideoFile = rollback
+
+      tmpVideoPath = null // This path is not used anymore
+
+      let thumbnails: MThumbnail[]
+      let torrentResult: Awaited<ReturnType<typeof createTorrentForFileFromPath>>
+
+      try {
+        thumbnails = await generateThumbnails({ videoImportWithFiles, videoFile, videoFileInput: localPath, ffprobe })
+
+        torrentResult = await createTorrentForFileFromPath(videoImportWithFiles.Video, videoFile, localPath)
+      } finally {
+        await cleanup()
+      }
+
+      const { infoHash, torrentFilename, torrentStorage } = torrentResult
+
+      const { videoImportUpdated, video } = await retryTransactionWrapper(() => {
+        return runTransaction(async t => {
+          // Refresh video
+          const video = await VideoModel.load(videoImportWithFiles.videoId, t)
+          if (!video) {
+            await VideoFileModel.removeTorrentFile(torrentFilename, torrentStorage)
+
+            throw new Error('Video linked to import ' + videoImportWithFiles.videoId + ' does not exist anymore.')
+          }
+
+          videoFile.torrentFilename = torrentFilename
+          videoFile.torrentStorage = torrentStorage
+          await videoFile.save({ transaction: t })
+
+          await VideoInfohashModel.replaceFileInfohash(videoFile.id, infoHash, t)
+
+          // Update video DB object
+          video.duration = duration
+          video.state = buildNextVideoState(video.state)
+          video.aspectRatio = buildAspectRatio({ width: videoFile.width, height: videoFile.height })
+          await video.save({ transaction: t })
+
+          if (thumbnails.length !== 0) {
+            await video.replaceAndSaveThumbnails(thumbnails, t)
+          }
+
+          await replaceChaptersIfNotExist({ video, chapters: containerChapters, transaction: t })
+
+          scheduleVideoFederation({ video, transaction: t })
+
+          // Update video import object
+          videoImportWithFiles.state = VideoImportState.SUCCESS
+          const videoImportUpdated = await videoImportWithFiles.save({ transaction: t }) as MVideoImport
+
+          logger.info('Video %s imported.', video.uuid)
+
+          // Reload the video from the database, notifications need more attributes
+          return { videoImportUpdated, video: await VideoModel.loadFull(video.uuid, t) }
+        })
+      })
+
+      await afterImportSuccess({
+        videoImport: videoImportUpdated,
+        video,
+        videoFile,
+        user: videoImport.User,
+        generateTranscription
+      })
+    } finally {
+      videoFileLockReleaser()
+    }
+  } catch (err) {
+    await rollbackNewVideoFile?.()
+    await onImportError(err, tmpVideoPath, videoImport)
+
+    throw err
+  }
+}
+
+async function refreshVideoImportFromDB (videoImport: MVideoImportDefault, videoFile: MVideoFile): Promise<MVideoImportDefaultFiles> {
+  // Refresh video, privacy may have changed
+  const video = await videoImport.Video.reload()
+  const videoWithFiles = Object.assign(video, { VideoFiles: [ videoFile ], VideoStreamingPlaylists: [] })
+
+  return Object.assign(videoImport, { Video: videoWithFiles })
+}
+
+async function generateThumbnails (options: {
+  videoImportWithFiles: MVideoImportDefaultFiles
+  videoFile: MVideoFile
+  videoFileInput: string
+  ffprobe: FfprobeData
+}) {
+  const { ffprobe, videoFile, videoFileInput, videoImportWithFiles } = options
+
+  if (videoImportWithFiles.Video.Thumbnails.length !== 0) return []
+
+  return createLocalVideoThumbnailsFromVideo({ video: videoImportWithFiles.Video, videoFile, fileInput: videoFileInput, ffprobe })
+}
+
+async function afterImportSuccess (options: {
+  videoImport: MVideoImport
+  video: MVideoFull
+  videoFile: MVideoFile
+  user: MUser
+
+  generateTranscription: boolean
+}) {
+  const { video, videoFile, videoImport, user, generateTranscription } = options
+
+  // The file now exists, so plugin auto taggers can analyze it
+  const autoBlacklistStatus = await autoBlacklistVideoIfNeeded({
+    video,
+    user,
+    holdIfAutoTagPolicy: true,
+    isRemote: false,
+    isNew: true,
+    isNewFile: true,
+    notify: false,
+    transaction: undefined
+  })
+
+  createVideoAutomaticTagsJob({
+    video,
+    moderation: autoBlacklistStatus === 'held-for-auto-tags'
+      ? 'release-hold'
+      : 'apply'
+  })
+
+  Notifier.Instance.notifyOnFinishedVideoImport({ videoImport: Object.assign(videoImport, { Video: video }), success: true })
+
+  // A video held for its automatic tags is announced by the job instead, which also notifies the moderators if it
+  // ends up confirming the block
+  if (autoBlacklistStatus === 'auto-blacklisted') {
+    const videoBlacklist = Object.assign(video.VideoBlacklist, { Video: video })
+
+    Notifier.Instance.notifyOnVideoAutoBlacklist(videoBlacklist)
+  } else if (autoBlacklistStatus === 'not-auto-blacklisted') {
+    Notifier.Instance.notifyOnNewVideoOrLiveIfNeeded(video)
+  }
+
+  // Generate the storyboard in the job queue, and don't forget to federate an update after
+  await addLocalOrRemoteStoryboardJobIfNeeded({ video, federate: true })
+
+  if (await VideoCaptionModel.hasVideoCaption(video.id) !== true && generateTranscription === true) {
+    await createTranscriptionTaskIfNeeded(video)
+  }
+
+  if (video.state === VideoState.TO_MOVE_TO_EXTERNAL_STORAGE) {
+    await JobQueue.Instance.createJob(
+      await buildMoveVideoJob({
+        type: 'move-to-object-storage',
+        video,
+        moveVideoState: {
+          previousVideoState: VideoState.TO_IMPORT
+        }
+      })
+    )
+    return
+  }
+
+  if (video.state === VideoState.TO_TRANSCODE) { // Create transcoding jobs?
+    await createOptimizeOrMergeAudioJobs({ video, videoFile, user })
+  }
+}
+
+async function onImportError (err: Error, tempVideoPath: string, videoImport: MVideoImportVideo) {
+  try {
+    if (tempVideoPath) await remove(tempVideoPath)
+  } catch (errUnlink) {
+    logger.warn('Cannot cleanup files after a video import error.', { err: errUnlink })
+  }
+
+  await runTransaction(async t => {
+    videoImport.error = err.message
+
+    if (videoImport.state !== VideoImportState.REJECTED) {
+      videoImport.state = VideoImportState.FAILED
+    }
+
+    await videoImport.save({ transaction: t })
+
+    const video = await VideoModel.load(videoImport.videoId, t)
+
+    if (video) {
+      video.state = VideoState.TO_IMPORT_FAILED
+      await video.save({ transaction: t })
+    }
+  })
+
+  Notifier.Instance.notifyOnFinishedVideoImport({ videoImport, success: false })
+}

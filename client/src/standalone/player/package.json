@@ -1,10 +1,10 @@
 {
-  "name": "@peertube/embed-api",
+  "name": "@peertube/player",
   "private": false,
-  "version": "0.0.4",
-  "description": "API to communicate with the PeerTube player embed",
+  "version": "0.0.0",
   "scripts": {
-    "test": "echo \"Error: no test specified\" && exit 1"
+    "build": "rm -rf ./build && ../../../node_modules/.bin/vite build --mode production --config ./vite.config.mjs",
+    "dev": "../../../node_modules/.bin/vite build --mode dev --watch --config ./vite.config.mjs"
   },
   "repository": {
     "type": "git",
@@ -14,15 +14,21 @@
     "peertube",
     "embed"
   ],
-  "main": "./dist/player.js",
-  "types": "./dist/player.d.ts",
+  "main": "./build/peertube-player.js",
+  "exports": {
+    ".": {
+      "types": "./src/index.ts",
+      "default": "./build/peertube-player.js"
+    }
+  },
+  "types": "./src/index.ts",
   "author": "Chocobozzz",
   "license": "AGPL-3.0",
+  "type": "module",
+  "sideEffects": true,
   "bugs": {
     "url": "https://github.com/Chocobozzz/PeerTube/issues"
   },
   "homepage": "https://github.com/Chocobozzz/PeerTube#readme",
-  "dependencies": {
-    "jschannel": "^1.0.2"
-  }
+  "dependencies": {}
 }

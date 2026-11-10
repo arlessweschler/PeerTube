@@ -1,64 +1,44 @@
-@import '_variables';
-@import '_mixins';
-@import '_actor';
-@import '_miniature';
+@use '_variables' as *;
+@use '_mixins' as *;
+@use '_account-channel-page' as *;
+@use '_miniature' as *;
 
 .root {
-  --myGlobalTopPadding: 60px;
-  --myImgMargin: 30px;
-  --myFontSize: 16px;
-  --myGreyFontSize: 16px;
+  --co-font-size: 1rem;
+  --co-secondary-font-size: 1rem;
 }
 
-.section-label {
-  @include section-label-responsive;
+my-horizontal-menu {
+  flex-grow: 1;
+
+  @include margin-right(3rem);
 }
 
-.links {
-  @include grid-videos-miniature-margins;
-
+.horizontal-menu {
   display: flex;
   justify-content: space-between;
   align-items: center;
-  max-width: $max-channels-width;
-
-  simple-search-input {
-    margin-left: auto;
-  }
+  flex-wrap: wrap;
 }
 
-my-user-moderation-dropdown,
-.badge {
-  margin-left: 10px;
-
-  position: relative;
-  top: 3px;
-}
-
-.badge {
-  font-size: 13px;
-}
-
-.copy-button {
-  border: 0;
+my-copy-button {
+  @include margin-left(3px);
 }
 
 .account-info {
-  @include grid-videos-miniature-margins(false, 15px);
-
-  display: grid;
   grid-template-columns: 1fr min-content;
   grid-template-rows: auto auto;
 
-  background-color: pvar(--submenuBackgroundColor);
-  margin-bottom: 45px;
-  padding-top: var(--myGlobalTopPadding);
-  padding-bottom: var(--myGlobalTopPadding);
-  font-size: var(--myFontSize);
+  @include margin-bottom(3rem);
+  @include font-size(1rem);
 }
 
 .account-avatar-row {
-  @include avatar-row-responsive(var(--myImgMargin), var(--myGreyFontSize));
+  @include avatar-row-responsive(2rem, var(--co-secondary-font-size));
+}
+
+.actor-display-name {
+  align-items: center;
 }
 
 .description {
@@ -68,10 +48,10 @@ my-user-moderation-dropdown,
 }
 
 .show-more {
-  @include show-more-description;
-
-  display: none;
   text-align: center;
+
+  @include show-more-description;
+  @include padding-bottom(3.75rem);
 }
 
 .buttons {
@@ -83,34 +63,25 @@ my-user-moderation-dropdown,
   justify-content: flex-end;
   align-content: flex-start;
 
-  > *:not(:last-child) {
-    margin-bottom: 15px;
+  >*:not(:last-child) {
+    @include margin-bottom(1rem);
   }
 
-  > a {
+  >a {
     white-space: nowrap;
   }
 }
 
-@media screen and (max-width: $small-view) {
-  .root {
-    --myGlobalTopPadding: 45px;
-    --myChannelImgMargin: 15px;
-  }
+.pt-badge {
+  @include margin-right(5px);
+}
 
-  .account-info {
-    display: block;
-    padding-bottom: 60px;
-  }
+@media screen and (max-width: $small-view) {
 
   .description:not(.expanded) {
-    @include fade-text(30px, pvar(--submenuBackgroundColor));
-
     max-height: 70px;
-  }
 
-  .show-more {
-    display: block;
+    @include fade-text(30px, pvar(--bg));
   }
 
   .buttons {
@@ -120,22 +91,12 @@ my-user-moderation-dropdown,
 
 @media screen and (max-width: $mobile-view) {
   .root {
-    --myGlobalTopPadding: 15px;
-    --myFontSize: 14px;
-    --myGreyFontSize: 13px;
-  }
-
-  .account-info {
-    display: block;
-    padding-bottom: 30px;
+    --co-font-size: 14px;
+    --co-secondary-font-size: 13px;
   }
 
   .links {
     margin: auto !important;
     width: min-content;
-  }
-
-  .show-more {
-    margin-bottom: 30px;
   }
 }

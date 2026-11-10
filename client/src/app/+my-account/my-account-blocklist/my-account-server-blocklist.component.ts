@@ -1,15 +1,15 @@
-import { Component } from '@angular/core'
-import { BlocklistComponentType, GenericServerBlocklistComponent } from '@app/shared/shared-moderation'
+import { Component, ChangeDetectionStrategy } from '@angular/core'
+import { BlocklistComponentType } from '@app/shared/shared-moderation/blocklist.service'
+import { GenericServerBlocklistComponent } from '../../shared/shared-moderation/generic-server-blocklist.component'
 
 @Component({
   selector: 'my-account-server-blocklist',
-  styleUrls: [ '../../shared/shared-moderation/moderation.scss', '../../shared/shared-moderation/server-blocklist.component.scss' ],
-  templateUrl: '../../shared/shared-moderation/server-blocklist.component.html'
+  template: `<my-generic-server-blocklist [mode]="mode" key="MyAccountServerBlocklistComponent" />`,
+  changeDetection: ChangeDetectionStrategy.Eager,
+  imports: [
+    GenericServerBlocklistComponent
+  ]
 })
-export class MyAccountServerBlocklistComponent extends GenericServerBlocklistComponent {
+export class MyAccountServerBlocklistComponent {
   mode = BlocklistComponentType.Account
-
-  getIdentifier () {
-    return 'MyAccountServerBlocklistComponent'
-  }
 }

@@ -1,12 +1,9 @@
-name: Test Suite
+name: Test
+
+permissions: {}
 
 on:
   push:
-    branches:
-      - develop
-      - master
-      - ci
-      - next
   pull_request:
     types: [synchronize, opened]
   schedule:
@@ -24,57 +21,85 @@ jobs:
           - 6379:6379
 
       postgres:
-        image: postgres:9.6
+        image: postgres:14
         ports:
           - 5432:5432
         env:
           POSTGRES_USER: peertube
           POSTGRES_HOST_AUTH_METHOD: trust
 
+      # Only used by external-plugins tests, that only run on schedule. A service with an empty image does not start
       ldap:
-        image: chocobozzz/docker-test-openldap
+        image: ${{ matrix.test_suite == 'external-plugins' && github.event_name == 'schedule' && 'chocobozzz/docker-test-openldap' || '' }}
         ports:
           - 10389:10389
+
+      s3:
+        image: ghcr.io/scality/cloudserver:9.3.20
+        ports:
+          - 9444:8000
+        env:
+          S3BACKEND: mem
+          REMOTE_MANAGEMENT_DISABLE: 1
+          SCALITY_ACCESS_KEY_ID: AKIAIOSFODNN7EXAMPLE
+          SCALITY_SECRET_ACCESS_KEY: wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY
+
+      # Only used by external-plugins tests, that only run on schedule
+      keycloak:
+        image: ${{ matrix.test_suite == 'external-plugins' && github.event_name == 'schedule' && 'chocobozzz/peertube-tests-keycloak' || '' }}
+        ports:
+          - 8082:8080
+        env:
+          KC_BOOTSTRAP_ADMIN_USERNAME: admin
+          KC_BOOTSTRAP_ADMIN_PASSWORD: admin
 
     strategy:
       fail-fast: false
       matrix:
-        test_suite: [ misc, api-1, api-2, api-3, api-4, cli, lint, external-plugins ]
+        # Longest suites first. API suites are balanced using scripts/ci/test-durations.txt
+        test_suite:
+          - api-live-scalability
+          - api-server
+          - api-users-stats
+          - api-check-params-search
+          - api-videos-1
+          - api-videos-2
+          - api-transcoding-1
+          - api-transcoding-2
+          - api-moderation-notifications
+          - api-federation
+          - api-object-storage
+          - transcription
+          - cli-plugin
+          - client
+          - types-package
+          - lint
+          - external-plugins
 
     env:
       PGUSER: peertube
       PGHOST: localhost
       NODE_PENDING_JOB_WAIT: 250
+      ENABLE_OBJECT_STORAGE_TESTS: true
+      # Github runner IPs are blocked by youtube
+      DISABLE_HTTP_YOUTUBE_IMPORT_TESTS: true
+      ENABLE_FFMPEG_THUMBNAIL_PIXEL_COMPARISON_TESTS: true
+      YOUTUBE_DL_DOWNLOAD_BEARER_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      YOUTUBE_DL_PROXY: ${{ secrets.YOUTUBE_DL_PROXY }}
 
     steps:
-      - uses: actions/checkout@v2
-
-      - name: Use Node.js
-        uses: actions/setup-node@v1
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
         with:
-          node-version: '12.x'
+          persist-credentials: false
 
-      - name: Setup system dependencies
-        run: |
-          sudo apt-get install postgresql-client-common redis-tools parallel
-          wget --quiet --no-check-certificate "https://download.cpy.re/ffmpeg/ffmpeg-release-4.3.1-64bit-static.tar.xz"
-          tar xf ffmpeg-release-4.3.1-64bit-static.tar.xz
-          mkdir -p $HOME/bin
-          cp ffmpeg-*/{ffmpeg,ffprobe} $HOME/bin
-          echo "$HOME/bin" >> $GITHUB_PATH
-
-      - name: Cache Node.js modules
-        uses: actions/cache@v2
+      - uses: './.github/actions/reusable-prepare-peertube-build'
         with:
-          path: |
-            **/node_modules
-          key: ${{ runner.OS }}-node-${{ hashFiles('**/yarn.lock') }}
-          restore-keys: |
-            ${{ runner.OS }}-node-
-            ${{ runner.OS }}-
+          node-version: '22.x'
+
+      - uses: './.github/actions/reusable-prepare-peertube-run'
 
       - name: Cache fixtures
-        uses: actions/cache@v2
+        uses: actions/cache@caa296126883cff596d87d8935842f9db880ef25 # v5.1.0
         with:
           path: |
             fixtures
@@ -84,32 +109,75 @@ jobs:
             ${{ runner.OS }}-fixtures-
             ${{ runner.OS }}-
 
-      - name: Install dependencies
-        run: yarn install --frozen-lockfile
+      - name: Cache PeerTube pip directory
+        uses: actions/cache@caa296126883cff596d87d8935842f9db880ef25 # v5.1.0
+        with:
+          path: |
+            ~/.cache/pip
+          key: ${{ runner.OS }}-${{ matrix.test_suite }}-pip-v1
+
+      - name: Cache Hugging Face models
+        uses: actions/cache@caa296126883cff596d87d8935842f9db880ef25 # v5.1.0
+        with:
+          path: |
+            ~/.cache/huggingface
+          key: ${{ runner.OS }}-${{ matrix.test_suite }}-hugging-face-v1
+
+      # Transcription tools take a lot of disk space, we need to cleanup before running transcription tests
+      - name: Cleanup disk space
+        if: matrix.test_suite == 'transcription' || matrix.test_suite == 'external-plugins'
+        run: |
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL
+          sudo docker image prune --all --force
+          sudo docker builder prune -a
+          df -h
 
       - name: Set env test variable (schedule)
         if: github.event_name != 'schedule'
         run: |
           echo "DISABLE_HTTP_IMPORT_TESTS=true" >> $GITHUB_ENV
 
+      # Install PG to setup a secondary database for read replica tests
+      - name: Setup PostgreSQL server binaries
+        if: matrix.test_suite == 'api-server'
+        run: |
+          # Only install binaries, without creating and starting a main cluster
+          sudo mkdir -p /etc/postgresql-common/createcluster.d
+          echo 'create_main_cluster = false' | sudo tee /etc/postgresql-common/createcluster.d/00-peertube.conf
+          sudo apt-get install -y postgresql
+          echo "/usr/lib/postgresql/$(ls /usr/lib/postgresql | sort -V | tail -n 1)/bin" >> $GITHUB_PATH
+          echo "ENABLE_DB_REPLICA_TESTS=true" >> $GITHUB_ENV
+
       - name: Run Test
         # external-plugins tests only run on schedule
         if: github.event_name == 'schedule' || matrix.test_suite != 'external-plugins'
-        run: npm run ci -- ${{ matrix.test_suite }}
+        env:
+          AKISMET_KEY: ${{ secrets.AKISMET_KEY }}
+          TEST_SUITE: ${{ matrix.test_suite }}
+        run: npm run ci -- "$TEST_SUITE"
 
       - name: Display errors
         if: ${{ always() }}
         run: |
           ( \
             test -f dist/scripts/parse-log.js && \
-            cat *-ci.log | uniq -c && \
             NODE_ENV=test node dist/scripts/parse-log.js -l error -f artifacts/*.log \
           ) || \
           echo "parse-log.js script does not exist, skipping."
 
-      - name: Upload logs
-        uses: actions/upload-artifact@v2
-        if: failure()
+      # Output of every failed attempt, including the ones of flaky test files that passed after a retry
+      - name: Display failed test attempts
+        if: ${{ always() && hashFiles('artifacts/failed-attempts/*') != '' }}
+        run: |
+          for file in artifacts/failed-attempts/*; do
+            echo "::group::$file"
+            cat "$file"
+            echo "::endgroup::"
+          done
+
+      - name: Upload logs and database
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        if: ${{ failure() || hashFiles('artifacts/failed-attempts/*') != '' }}
         with:
           name: test-storages-${{ matrix.test_suite }}
           path: artifacts

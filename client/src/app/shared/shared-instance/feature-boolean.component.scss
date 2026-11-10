@@ -1,10 +1,10 @@
-@import '_variables';
-@import '_mixins';
+@use '_variables' as *;
+@use '_mixins' as *;
 
-.glyphicon-ok {
-  color: $green;
+my-global-icon[iconName=tick] {
+  color: pvar(--green);
 }
 
-.glyphicon-remove {
-  color: $red;
+my-global-icon[iconName=cross] {
+  color: pvar(--red);
 }

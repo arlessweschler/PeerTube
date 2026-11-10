@@ -1,15 +1,19 @@
 import { Account } from '@app/shared/shared-main/account/account.model'
-import { hasUserRight } from '@shared/core-utils/users'
+import { hasUserRight, objectKeysTyped } from '@peertube/peertube-core-utils'
 import {
   ActorImage,
+  BooleanBothQuery,
+  HTMLServerConfig,
   NSFWPolicyType,
-  User as UserServerModel,
   UserAdminFlag,
+  UserAdminFlagType,
   UserNotificationSetting,
-  UserRight,
+  UserRightType,
   UserRole,
-  VideoChannel
-} from '@shared/models'
+  UserRoleType,
+  User as UserServerModel,
+  VideoAIUsageType
+} from '@peertube/peertube-models'
 
 export class User implements UserServerModel {
   id: number
@@ -18,19 +22,32 @@ export class User implements UserServerModel {
   pendingEmail: string | null
 
   emailVerified: boolean
-  nsfwPolicy: NSFWPolicyType
 
-  adminFlags?: UserAdminFlag
+  nsfwPolicy: NSFWPolicyType
+  nsfwFlagsDisplayed: number
+  nsfwFlagsHidden: number
+  nsfwFlagsWarned: number
+  nsfwFlagsBlurred: number
+
+  aiUsagesHidden: VideoAIUsageType[]
+
+  adminFlags?: UserAdminFlagType
 
   autoPlayVideo: boolean
   autoPlayNextVideo: boolean
   autoPlayNextVideoPlaylist: boolean
-  webTorrentEnabled: boolean
+
+  p2pEnabled: boolean
+
   videosHistoryEnabled: boolean
   videoLanguages: string[]
+  videoCategories: number[]
+  videoLive: BooleanBothQuery
 
-  role: UserRole
-  roleLabel: string
+  role: {
+    id: UserRoleType
+    label: string
+  }
 
   videoQuota: number
   videoQuotaDaily: number
@@ -48,76 +65,45 @@ export class User implements UserServerModel {
 
   account: Account
   notificationSettings?: UserNotificationSetting
-  videoChannels?: VideoChannel[]
+
+  videoChannels?: UserServerModel['videoChannels']
 
   blocked: boolean
   blockedReason?: string
 
   noInstanceConfigWarningModal: boolean
   noWelcomeModal: boolean
+  noAccountSetupWarningModal: boolean
 
   pluginAuth: string | null
 
   lastLoginDate: Date | null
 
+  twoFactorEnabled: boolean
+
+  language: string
+
+  newFeaturesInfoRead: number
+
   createdAt: Date
 
   constructor (hash: Partial<UserServerModel>) {
-    this.id = hash.id
-    this.username = hash.username
-    this.email = hash.email
+    const { account, ...mergeProps }: Partial<UserServerModel> = hash
 
-    this.role = hash.role
+    Object.assign(this, mergeProps)
 
-    this.videoChannels = hash.videoChannels
-
-    this.videoQuota = hash.videoQuota
-    this.videoQuotaDaily = hash.videoQuotaDaily
-    this.videoQuotaUsed = hash.videoQuotaUsed
-    this.videoQuotaUsedDaily = hash.videoQuotaUsedDaily
-    this.videosCount = hash.videosCount
-    this.abusesCount = hash.abusesCount
-    this.abusesAcceptedCount = hash.abusesAcceptedCount
-    this.abusesCreatedCount = hash.abusesCreatedCount
-    this.videoCommentsCount = hash.videoCommentsCount
-
-    this.nsfwPolicy = hash.nsfwPolicy
-    this.webTorrentEnabled = hash.webTorrentEnabled
-    this.autoPlayVideo = hash.autoPlayVideo
-    this.autoPlayNextVideo = hash.autoPlayNextVideo
-    this.autoPlayNextVideoPlaylist = hash.autoPlayNextVideoPlaylist
-    this.videosHistoryEnabled = hash.videosHistoryEnabled
-    this.videoLanguages = hash.videoLanguages
-
-    this.theme = hash.theme
-
-    this.adminFlags = hash.adminFlags
-
-    this.blocked = hash.blocked
-    this.blockedReason = hash.blockedReason
-
-    this.noInstanceConfigWarningModal = hash.noInstanceConfigWarningModal
-    this.noWelcomeModal = hash.noWelcomeModal
-
-    this.notificationSettings = hash.notificationSettings
-
-    this.createdAt = hash.createdAt
-
-    this.pluginAuth = hash.pluginAuth
-    this.lastLoginDate = hash.lastLoginDate
-
-    if (hash.account !== undefined) {
-      this.account = new Account(hash.account)
+    if (account !== undefined) {
+      this.account = new Account(account)
     }
   }
 
-  hasRight (right: UserRight) {
-    return hasUserRight(this.role, right)
+  hasRight (right: UserRightType) {
+    return hasUserRight(this.role.id, right)
   }
 
   patch (obj: UserServerModel) {
-    for (const key of Object.keys(obj)) {
-      this[key] = obj[key]
+    for (const key of objectKeysTyped(obj)) {
+      ;(this as any)[key] = obj[key]
     }
 
     if (obj.account !== undefined) {
@@ -125,12 +111,18 @@ export class User implements UserServerModel {
     }
   }
 
-  updateAccountAvatar (newAccountAvatar?: ActorImage) {
-    if (newAccountAvatar) this.account.updateAvatar(newAccountAvatar)
+  updateAccountAvatar (newAccountAvatars?: ActorImage[]) {
+    if (newAccountAvatars) this.account.updateAvatar(newAccountAvatars)
     else this.account.resetAvatar()
   }
 
-  isUploadDisabled () {
+  hasUploadDisabled () {
     return this.videoQuota === 0 || this.videoQuotaDaily === 0
+  }
+
+  isAutoBlocked (serverConfig: HTMLServerConfig) {
+    if (serverConfig.autoBlacklist.videos.ofUsers.enabled !== true) return false
+
+    return this.role.id === UserRole.USER && this.adminFlags !== UserAdminFlag.BYPASS_VIDEO_AUTO_BLACKLIST
   }
 }

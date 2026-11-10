@@ -4,13 +4,20 @@ import { BuildFormValidator } from './form-validator.model'
 export const VIDEO_CAPTION_LANGUAGE_VALIDATOR: BuildFormValidator = {
   VALIDATORS: [ Validators.required ],
   MESSAGES: {
-    'required': $localize`Video caption language is required.`
+    required: $localize`Video caption language is required.`
   }
 }
 
 export const VIDEO_CAPTION_FILE_VALIDATOR: BuildFormValidator = {
   VALIDATORS: [ Validators.required ],
   MESSAGES: {
-    'required': $localize`Video caption file is required.`
+    required: $localize`Video caption file is required.`
+  }
+}
+
+export const VIDEO_CAPTION_FILE_CONTENT_VALIDATOR: BuildFormValidator = {
+  VALIDATORS: [ Validators.required ],
+  MESSAGES: {
+    required: $localize`Caption content is required.`
   }
 }

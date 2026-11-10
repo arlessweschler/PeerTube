@@ -1,75 +1,143 @@
-<div class="video-miniature" [ngClass]="getClasses()" (mouseenter)="loadActions()">
+<div class="video-miniature" [ngClass]="getClasses()" (mouseenter)="loadActions()" (focusin)="loadActions()">
   <my-video-thumbnail
-    [video]="video" [nsfw]="isVideoBlur" [videoRouterLink]="videoRouterLink" [videoHref]="videoHref" [videoTarget]="videoTarget"
-    [displayWatchLaterPlaylist]="isWatchLaterPlaylistDisplayed()" [inWatchLaterPlaylist]="inWatchLaterPlaylist" (watchLaterClick)="onWatchLaterClick($event)"
+    ariaHidden="true"
+    [blur]="hasNSFWBlur()"
+    [video]="video()"
+    [videoRouterLink]="videoRouterLink"
+    [videoHref]="videoHref"
+    [videoTarget]="videoTarget"
+    [displayWatchLaterPlaylist]="isWatchLaterPlaylistDisplayed()"
+    [inWatchLaterPlaylist]="inWatchLaterPlaylist"
+    (watchLaterClick)="onWatchLaterClick($event)"
+    [sizes]="thumbnailSizes() || '280px'"
   >
-    <ng-container ngProjectAs="label-warning" *ngIf="displayOptions.privacyLabel && isUnlistedVideo()" i18n>Unlisted</ng-container>
-    <ng-container ngProjectAs="label-danger" *ngIf="displayOptions.privacyLabel && isPrivateVideo()" i18n>Private</ng-container>
+    <!-- Don't use use imbricated @if that seems broken with content projection (Angular 20.3) -->
+    @if (displayOptions().privacyLabel && isUnlistedVideo()) {
+      <ng-container ngProjectAs="label-warning" i18n>Unlisted</ng-container>
+    }
+    @if (displayOptions().privacyLabel && isPrivateVideo()) {
+      <ng-container ngProjectAs="label-danger" i18n>Private</ng-container>
+    }
+    @if (displayOptions().privacyLabel && isPasswordProtectedVideo()) {
+      <ng-container ngProjectAs="label-danger" i18n>Password protected</ng-container>
+    }
   </my-video-thumbnail>
 
-  <div class="video-bottom">
-    <div class="video-miniature-information">
-      <div class="d-flex video-miniature-meta">
-        <my-actor-avatar
-          *ngIf="displayOptions.avatar && displayOwnerVideoChannel()" [title]="channelLinkTitle"
-          [channel]="video.channel" [size]="actorImageSize" [internalHref]="[ '/c', video.byVideoChannel ]"
-        ></my-actor-avatar>
+  <ng-template #nsfwWarningButton>
+    @if (hasNSFWWarning()) {
+      <button type="button" class="nsfw-warning button-unstyle ms-auto ps-1" [ariaLabel]="nsfwTooltip" [ngbTooltip]="nsfwTooltip">
+        <my-global-icon iconName="eye-close"></my-global-icon>
+      </button>
+    }
+  </ng-template>
 
-        <my-actor-avatar
-          *ngIf="displayOptions.avatar && displayOwnerAccount()" [title]="channelLinkTitle"
-          [account]="video.account" [size]="actorImageSize" [internalHref]="[ '/c', video.byVideoChannel ]"
-        ></my-actor-avatar>
+  <div class="video-info">
+    @if (displayOptions().avatar || displayOptions().by) {
+      <div class="owner min-width-0">
+        @if (displayOptions().avatar) {
+          @if (displayOwnerVideoChannel()) {
+            <my-actor-avatar
+              [title]="channelLinkTitle"
+              actorType="channel"
+              [size]="actorImageSize()"
+              [actor]="video().channel"
+              [internalHref]="[ '/c', video().byVideoChannel ]"
+              [ariaHidden]="displayOptions().by"
+            ></my-actor-avatar>
+          } @else if (displayOwnerAccount()) {
+            <my-actor-avatar
+              [title]="channelLinkTitle"
+              actorType="account"
+              [size]="actorImageSize()"
+              [actor]="video().account"
+              [internalHref]="[ '/c', video().byVideoChannel ]"
+              [ariaHidden]="displayOptions().by"
+            ></my-actor-avatar>
+          }
+        }
 
-        <div class="w-100 d-flex flex-column">
-          <a *ngIf="!videoHref" tabindex="-1" class="video-miniature-name"
-            [routerLink]="videoRouterLink" [attr.title]="video.name" [ngClass]="{ 'blur-filter': isVideoBlur }"
-          >{{ video.name }}</a>
+        @if (displayOptions().by) {
+          <div class="owner-container">
+            <my-link
+              class="owner-label ellipsis"
+              [internalLink]="ownerRouterLink"
+              [href]="ownerHref"
+              [target]="ownerTarget"
+              inheritParentStyle="true"
+              [title]="getOwnerLinkTitle()"
+            >
+              @if (displayOwnerAccount()) {
+                {{ authorAccount }}
+              } @else if (displayOwnerVideoChannel()) {
+                {{ authorChannel }}
+              }
+            </my-link>
 
-          <a *ngIf="videoHref" tabindex="-1" class="video-miniature-name"
-            [href]="videoHref" [target]="videoTarget" [attr.title]="video.name" [ngClass]="{ 'blur-filter': isVideoBlur }"
-          >{{ video.name }}</a>
+            @if (!video().isLocal) {
+              <my-actor-host [host]="video().account.host"></my-actor-host>
+            }
 
-          <span class="video-miniature-created-at-views">
-            <my-date-toggle *ngIf="displayOptions.date" [date]="video.publishedAt"></my-date-toggle>
-
-            <span class="views" [title]="video.getExactNumberOfViews()">
-              <ng-container *ngIf="displayOptions.date && displayOptions.views"> • </ng-container>
-
-              <my-video-views-counter *ngIf="displayOptions.views" [video]="video"></my-video-views-counter>
-            </span>
-          </span>
-
-          <a tabindex="-1" *ngIf="displayOptions.by && displayOwnerAccount()" class="video-miniature-account" [routerLink]="[ '/c', video.byVideoChannel ]">
-            {{ video.byAccount }}
-          </a>
-          <a tabindex="-1" *ngIf="displayOptions.by && displayOwnerVideoChannel()" class="video-miniature-channel" [routerLink]="[ '/c', video.byVideoChannel ]">
-            {{ video.byVideoChannel }}
-          </a>
-
-          <div class="video-info-privacy">
-            <ng-container *ngIf="displayOptions.privacyText">{{ video.privacy.label }}</ng-container>
-            <ng-container *ngIf="displayOptions.privacyText && displayOptions.state && getStateLabel(video)"> - </ng-container>
-            <ng-container *ngIf="displayOptions.state">{{ getStateLabel(video) }}</ng-container>
+            @if (!displayAsRow()) {
+              <ng-container *ngTemplateOutlet="nsfwWarningButton"></ng-container>
+            }
           </div>
-        </div>
+        }
+      </div>
+    }
+
+    <div class="video-name-container">
+      <my-link
+        [internalLink]="videoRouterLink"
+        [href]="videoHref"
+        [target]="videoTarget"
+        inheritParentStyle="true"
+        [ariaLabel]="getVideoAriaLabel()"
+        [title]="video().name"
+        class="video-name"
+        className="ellipsis-multiline-2"
+        [attr.role]="headingLevel() ? 'heading' : null"
+        [attr.aria-level]="headingLevel()"
+      >
+        {{ video().name }}
+      </my-link>
+
+      <div class="video-actions">
+        @if (showActions) {
+          <my-video-actions-dropdown
+            [video]="video()"
+            [displayOptions]="videoActionsDisplayOptions()"
+            [ariaLabel]="getVideoActionsLabel()"
+            placement="bottom-left bottom-right left auto"
+            (videoRemoved)="onVideoRemoved()"
+            (videoBlocked)="onVideoBlocked()"
+            (videoUnblocked)="onVideoUnblocked()"
+            (muted)="onMuted()"
+          ></my-video-actions-dropdown>
+        }
       </div>
 
-      <div *ngIf="displayOptions.blacklistInfo && video.blacklisted" class="video-info-blocked">
-        <span class="blocked-label" i18n>Blocked</span>
-        <span class="blocked-reason" *ngIf="video.blockedReason">{{ video.blockedReason }}</span>
-      </div>
-
-      <div i18n *ngIf="displayOptions.nsfw && video.nsfw" class="video-info-nsfw">
-        Sensitive
-      </div>
+      @if (displayAsRow() || (!displayOptions().avatar && !displayOptions().by)) {
+        <ng-container *ngTemplateOutlet="nsfwWarningButton"></ng-container>
+      }
     </div>
 
-    <div class="video-actions">
-      <!-- FIXME: remove bottom placement when overflow is fixed in bootstrap dropdown: https://github.com/ng-bootstrap/ng-bootstrap/issues/3495 -->
-      <my-video-actions-dropdown
-        *ngIf="showActions" [video]="video" [displayOptions]="videoActionsDisplayOptions" placement="bottom-left bottom-right left auto"
-        (videoRemoved)="onVideoRemoved()" (videoBlocked)="onVideoBlocked()" (videoUnblocked)="onVideoUnblocked()" (videoAccountMuted)="onVideoAccountMuted()"
-      ></my-video-actions-dropdown>
+    <div class="date-and-views">
+      @if (displayOptions().date) {
+        <my-date-toggle [date]="video().publishedAt"></my-date-toggle>
+      }
+
+      <span class="views">
+        @if (displayOptions().date && displayOptions().views) {
+          •
+        }
+
+        @if (displayOptions().views) {
+          <my-video-views-counter [isLive]="video().isLive" [viewers]="video().viewers" [views]="video().views"></my-video-views-counter>
+        }
+      </span>
+
+      <my-video-ai-usage-badge class="ms-1" compact="true" [video]="video()"></my-video-ai-usage-badge>
+      <my-video-captions-badge class="ms-1" [video]="video()" [userVideoLanguages]="user()?.videoLanguages"></my-video-captions-badge>
     </div>
   </div>
 </div>

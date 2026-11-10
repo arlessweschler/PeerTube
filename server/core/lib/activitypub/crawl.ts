@@ -1,0 +1,66 @@
+import { ActivityPubOrderedCollection } from '@peertube/peertube-models'
+import { retryTransactionWrapper } from '@server/helpers/database-utils.js'
+import { URL } from 'url'
+import { createLogger } from '../../helpers/logger.js'
+import { ACTIVITY_PUB, WEBSERVER } from '../../initializers/constants.js'
+import { fetchAP } from './activity.js'
+
+const logger = createLogger()
+
+type HandlerFunction<T> = (items: T[]) => Promise<any>
+type CleanerFunction = (startedDate: Date) => Promise<any>
+
+export async function crawlCollectionPage<T> (
+  argUrl: string,
+  handler: HandlerFunction<T>,
+  cleaner?: CleanerFunction,
+  abortSignal?: AbortSignal
+) {
+  let url = argUrl
+
+  logger.info('Crawling ActivityPub data on %s.', url)
+
+  const startDate = new Date()
+
+  const response = await fetchAP<ActivityPubOrderedCollection<T>>(url, { signal: abortSignal })
+  const firstBody = response.body
+
+  const limit = ACTIVITY_PUB.FETCH_PAGE_LIMIT
+  let i = 0
+  let nextLink = firstBody.first
+  while (nextLink && i < limit) {
+    // Check if abort signal has been triggered
+    if (abortSignal?.aborted) {
+      throw new Error('ActivityPub crawl aborted')
+    }
+
+    i++
+
+    let body: any
+
+    if (typeof nextLink === 'string') {
+      // Don't crawl ourselves
+      const remoteHost = new URL(nextLink).host
+      if (remoteHost === WEBSERVER.HOST) break
+
+      url = nextLink
+
+      const res = await fetchAP<ActivityPubOrderedCollection<T>>(url, { signal: abortSignal })
+      body = res.body
+    } else {
+      // nextLink is already the object we want
+      body = nextLink
+    }
+
+    nextLink = body.next
+
+    if (Array.isArray(body.orderedItems)) {
+      const items = body.orderedItems
+      logger.info('Processing %i ActivityPub items for %s collection.', items.length, argUrl)
+
+      await handler(items)
+    }
+  }
+
+  if (cleaner) await retryTransactionWrapper(() => cleaner(startDate))
+}

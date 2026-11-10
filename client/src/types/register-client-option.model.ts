@@ -1,17 +1,27 @@
 import {
+  ClientDoAction,
+  ClientRouter,
+  MyUser,
   RegisterClientFormFieldOptions,
   RegisterClientHookOptions,
-  RegisterClientSettingsScript,
+  RegisterClientRouteOptions,
+  RegisterClientSettingsScriptOptions,
   RegisterClientVideoFieldOptions,
-  ServerConfig
-} from '@shared/models'
+  ServerConfig, SettingEntries
+} from '@peertube/peertube-models'
 
 export type RegisterClientOptions = {
+  router: ClientRouter
+
+  doAction: ClientDoAction
+
   registerHook: (options: RegisterClientHookOptions) => void
 
   registerVideoField: (commonOptions: RegisterClientFormFieldOptions, videoFormOptions: RegisterClientVideoFieldOptions) => void
 
-  registerSettingsScript: (options: RegisterClientSettingsScript) => void
+  registerSettingsScript: (options: RegisterClientSettingsScriptOptions) => void
+
+  registerClientRoute: (options: RegisterClientRouteOptions) => void
 
   peertubeHelpers: RegisterClientHelpers
 }
@@ -19,25 +29,34 @@ export type RegisterClientOptions = {
 export type RegisterClientHelpers = {
   getBaseStaticRoute: () => string
 
+  getBaseRouterRoute: () => string
+
+  // PeerTube >= 5.0
+  getBaseWebSocketRoute: () => string
+
+  getBasePluginClientPath: () => string
+
   isLoggedIn: () => boolean
 
   getAuthHeader: () => { 'Authorization': string } | undefined
 
-  getSettings: () => Promise<{ [ name: string ]: string }>
+  getSettings: () => Promise<SettingEntries>
+
+  getUser: () => MyUser
 
   getServerConfig: () => Promise<ServerConfig>
 
   notifier: {
-    info: (text: string, title?: string, timeout?: number) => void,
-    error: (text: string, title?: string, timeout?: number) => void,
+    info: (text: string, title?: string, timeout?: number) => void
+    error: (text: string, title?: string, timeout?: number) => void
     success: (text: string, title?: string, timeout?: number) => void
   }
 
   showModal: (input: {
-    title: string,
-    content: string,
-    close?: boolean,
-    cancel?: { value: string, action?: () => void },
+    title: string
+    content: string
+    close?: boolean
+    cancel?: { value: string, action?: () => void }
     confirm?: { value: string, action?: () => void }
   }) => void
 

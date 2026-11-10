@@ -1,67 +1,49 @@
-@import '_variables';
-@import '_mixins';
+@use "_variables" as *;
+@use "_mixins" as *;
+@use "_button-mixins" as *;
 
-@mixin responsive-label {
-  .action-button {
-    padding: 0 13px;
-  }
+@mixin reduced-padding {
+  padding: pvar(--input-y-padding) calc(#{pvar(--input-x-padding)} / 2) !important;
+}
 
+@mixin hide-label {
   .button-label {
     display: none;
   }
 }
 
 :host {
-  outline: none;
-}
-
-my-small-loader ::ng-deep .root {
   display: inline-block;
-  margin: 0 3px 0 0;
-  width: 20px;
-}
-
-a[class$=-button],
-span[class$=-button] {
-  > span {
-    margin-left: 5px;
-  }
 }
 
 .action-button {
-  @include peertube-button-link;
-  @include button-with-icon(21px);
-}
+  width: 100%; // useful for ellipsis, allow to define a max-width on host component
+  vertical-align: top; // prevent additional height to the parent because of ellipsis
 
-.orange-button {
-  @include peertube-button;
-  @include orange-button;
-}
+  my-loader.displayed {
+    display: inline-flex;
+    vertical-align: middle;
+    margin-top: -1px;
 
-.orange-button-link {
-  @include peertube-button-link;
-  @include orange-button;
-}
+    @include margin-right(0.5rem);
+  }
 
-.grey-button {
-  @include peertube-button;
-  @include grey-button;
-}
+  &:not(.rounded-icon-button) {
+    &.has-icon {
+      @include button-with-icon(24px, 0, 0);
+    }
+  }
 
-.grey-button-link {
-  @include peertube-button-link;
-  @include grey-button;
-}
+  &.label-xl {
+    font-size: 90%;
 
-// In a table, try to minimize the space taken by this button
-@media screen and (max-width: 1400px) {
-  :host-context(td) {
-    @include responsive-label;
+    @include reduced-padding();
   }
 }
 
 @media screen and (max-width: $small-view) {
   .responsive-label {
-    @include responsive-label;
+    @include hide-label();
+    @include reduced-padding();
   }
 }

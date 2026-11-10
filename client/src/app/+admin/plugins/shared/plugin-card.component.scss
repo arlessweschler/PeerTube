@@ -1,0 +1,63 @@
+@use '_variables' as *;
+@use '_mixins' as *;
+
+.plugin {
+  margin: 15px 0;
+  background-color: pvar(--bg-secondary-400);
+}
+
+.first-row {
+  display: flex;
+  align-items: center;
+  margin-bottom: 10px;
+
+  .plugin-name {
+    font-weight: $font-semibold;
+
+    @include margin-right(10px);
+  }
+
+  .plugin-version {
+    opacity: 0.7;
+  }
+
+  .plugin-icon {
+    @include margin-left(10px);
+
+    my-global-icon {
+      color: pvar(--fg-400);
+
+      &[iconName=npm] {
+        @include fill-path-svg-color(pvar(--fg-400));
+      }
+    }
+  }
+
+  .buttons {
+    width: max-content;
+
+    @include margin-left(auto);
+  }
+}
+
+.second-row {
+  display: grid;
+  grid-template-columns: 1fr auto;
+  align-items: center;
+  justify-content: space-between;
+
+  .description {
+    opacity: 0.8;
+  }
+}
+
+@media screen and (max-width: $small-view) {
+  .first-row {
+    flex-wrap: wrap;
+
+    .buttons {
+      flex-basis: 100%;
+      margin-top: 10px;
+    }
+  }
+}

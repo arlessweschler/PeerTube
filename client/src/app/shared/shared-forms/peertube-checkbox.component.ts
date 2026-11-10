@@ -1,6 +1,18 @@
-import { AfterContentInit, ChangeDetectorRef, Component, ContentChildren, forwardRef, Input, QueryList, TemplateRef } from '@angular/core'
-import { ControlValueAccessor, NG_VALUE_ACCESSOR } from '@angular/forms'
-import { PeerTubeTemplateDirective } from '@app/shared/shared-main'
+import { NgTemplateOutlet } from '@angular/common'
+import {
+  AfterContentInit,
+  booleanAttribute,
+  ChangeDetectionStrategy,
+  Component,
+  contentChildren,
+  forwardRef,
+  input,
+  model,
+  TemplateRef
+} from '@angular/core'
+import { ControlValueAccessor, FormsModule, NG_VALUE_ACCESSOR } from '@angular/forms'
+import { HelpComponent } from '../shared-main/buttons/help.component'
+import { PeerTubeTemplateDirective } from '../shared-main/common/peertube-template.directive'
 
 @Component({
   selector: 'my-peertube-checkbox',
@@ -12,47 +24,45 @@ import { PeerTubeTemplateDirective } from '@app/shared/shared-main'
       useExisting: forwardRef(() => PeertubeCheckboxComponent),
       multi: true
     }
-  ]
+  ],
+  changeDetection: ChangeDetectionStrategy.Eager,
+  imports: [ FormsModule, NgTemplateOutlet, HelpComponent ]
 })
 export class PeertubeCheckboxComponent implements ControlValueAccessor, AfterContentInit {
-  @Input() checked = false
-  @Input() inputName: string
-  @Input() labelText: string
-  @Input() labelInnerHTML: string
-  @Input() helpPlacement = 'top auto'
-  @Input() disabled = false
-  @Input() recommended = false
+  readonly checked = model(false)
+  readonly inputName = input<string>(undefined)
+  readonly labelText = input<string>(undefined)
+  readonly labelInnerHTML = input<string>(undefined)
+  readonly helpPlacement = input('top auto')
+  readonly recommended = input(false, { transform: booleanAttribute })
+  readonly small = input(false, { transform: booleanAttribute })
 
-  @ContentChildren(PeerTubeTemplateDirective) templates: QueryList<PeerTubeTemplateDirective<'label' | 'help'>>
+  disabled = false
+  describedby: string
 
-  // FIXME: https://github.com/angular/angular/issues/10816#issuecomment-307567836
-  @Input() onPushWorkaround = false
+  readonly templates = contentChildren(PeerTubeTemplateDirective)
 
   labelTemplate: TemplateRef<any>
   helpTemplate: TemplateRef<any>
 
-  constructor (private cdr: ChangeDetectorRef) { }
-
   ngAfterContentInit () {
     {
-      const t = this.templates.find(t => t.name === 'label')
+      const t = this.templates().find(t => t.name() === 'label')
       if (t) this.labelTemplate = t.template
     }
 
     {
-      const t = this.templates.find(t => t.name === 'help')
+      const t = this.templates().find(t => t.name() === 'help')
       if (t) this.helpTemplate = t.template
     }
   }
 
-  propagateChange = (_: any) => { /* empty */ }
+  propagateChange = (_: any) => {
+    // empty
+  }
 
   writeValue (checked: boolean) {
-    this.checked = checked
-
-    if (this.onPushWorkaround) {
-      this.cdr.markForCheck()
-    }
+    this.checked.set(checked)
   }
 
   registerOnChange (fn: (_: any) => void) {
@@ -64,7 +74,7 @@ export class PeertubeCheckboxComponent implements ControlValueAccessor, AfterCon
   }
 
   onModelChange () {
-    this.propagateChange(this.checked)
+    this.propagateChange(this.checked())
   }
 
   setDisabledState (isDisabled: boolean) {

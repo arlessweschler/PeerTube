@@ -1,62 +1,29 @@
-@import '_variables';
-@import '_mixins';
+@use "_variables" as *;
+@use "_mixins" as *;
 
 .avatar {
-  --avatarSize: 100%;
-  --initialFontSize: 22px;
-
-  width: var(--avatarSize);
-  height: var(--avatarSize);
-  min-width: var(--avatarSize);
-  min-height: var(--avatarSize);
+  // Defined in component
+  width: var(--co-avatar-size);
+  height: var(--co-avatar-size);
+  min-width: var(--co-avatar-size);
+  min-height: var(--co-avatar-size);
 
   &.account {
     object-fit: cover;
-    border-radius: 50%;
+    border-radius: $account-avatar-radius;
   }
 
   &.channel {
-    border-radius: 5px;
+    border-radius: $channel-avatar-radius;
+  }
+
+  &.instance {
+    border-radius: $instance-img-radius;
   }
 }
 
-.avatar-18 {
-  --avatarSize: 18px;
-  --initialFontSize: 13px;
-}
-
-.avatar-25 {
-  --avatarSize: 25px;
-}
-
-.avatar-32 {
-  --avatarSize: 32px;
-}
-
-.avatar-34 {
-  --avatarSize: 34px;
-}
-
-.avatar-36 {
-  --avatarSize: 36px;
-}
-
-.avatar-40 {
-  --avatarSize: 40px;
-}
-
-.avatar-100 {
-  --avatarSize: 100px;
-  --initialFontSize: 40px;
-}
-
-.avatar-120 {
-  --avatarSize: 120px;
-  --initialFontSize: 46px;
-}
-
-a:hover {
-  text-decoration: none;
+a {
+  @include disable-default-a-behaviour;
 }
 
 .initial {
@@ -65,7 +32,9 @@ a:hover {
   display: flex;
   align-items: center;
   justify-content: center;
-  font-size: var(--initialFontSize);
+  // Defined in component
+  font-size: var(--co-font-size);
+  line-height: var(--co-avatar-size);
 
   &.blue {
     background-color: #009FD4;

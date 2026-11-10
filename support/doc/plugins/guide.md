@@ -1,52 +1,6 @@
 # Plugins & Themes
 
-<!-- START doctoc generated TOC please keep comment here to allow auto update -->
-<!-- DON'T EDIT THIS SECTION, INSTEAD RE-RUN doctoc TO UPDATE -->
-
-
-- [Concepts](#concepts)
-  - [Hooks](#hooks)
-  - [Static files](#static-files)
-  - [CSS](#css)
-  - [Server API (only for plugins)](#server-api-only-for-plugins)
-    - [Settings](#settings)
-    - [Storage](#storage)
-    - [Update video constants](#update-video-constants)
-    - [Add custom routes](#add-custom-routes)
-    - [Add external auth methods](#add-external-auth-methods)
-    - [Add new transcoding profiles](#add-new-transcoding-profiles)
-    - [Server helpers](#server-helpers)
-  - [Client API (themes & plugins)](#client-api-themes--plugins)
-    - [Plugin static route](#plugin-static-route)
-    - [Notifier](#notifier)
-    - [Markdown Renderer](#markdown-renderer)
-    - [Auth header](#auth-header)
-    - [Custom Modal](#custom-modal)
-    - [Translate](#translate)
-    - [Get public settings](#get-public-settings)
-    - [Get server config](#get-server-config)
-    - [Add custom fields to video form](#add-custom-fields-to-video-form)
-    - [Register settings script](#register-settings-script)
-    - [HTML placeholder elements](#html-placeholder-elements)
-  - [Publishing](#publishing)
-- [Write a plugin/theme](#write-a-plugintheme)
-  - [Clone the quickstart repository](#clone-the-quickstart-repository)
-  - [Configure your repository](#configure-your-repository)
-  - [Update README](#update-readme)
-  - [Update package.json](#update-packagejson)
-  - [Write code](#write-code)
-  - [Add translations](#add-translations)
-  - [Build your plugin](#build-your-plugin)
-  - [Test your plugin/theme](#test-your-plugintheme)
-  - [Publish](#publish)
-  - [Unpublish](#unpublish)
-- [Plugin & Theme hooks/helpers API](#plugin--theme-hookshelpers-api)
-- [Tips](#tips)
-  - [Compatibility with PeerTube](#compatibility-with-peertube)
-  - [Spam/moderation plugin](#spammoderation-plugin)
-  - [Other plugin examples](#other-plugin-examples)
-
-<!-- END doctoc generated TOC please keep comment here to allow auto update -->
+[[toc]]
 
 ## Concepts
 
@@ -79,6 +33,7 @@ Example:
 
 ```js
 async function register ({
+  doAction,
   registerHook,
 
   registerSetting,
@@ -102,6 +57,20 @@ async function register ({
   registerHook({
     target: 'action:application.listening',
     handler: () => displayHelloWorld()
+  })
+}
+```
+
+Hooks prefixed by `action:api` also give access the original **express** [Request](http://expressjs.com/en/api.html#req) and [Response](http://expressjs.com/en/api.html#res):
+
+```js
+async function register ({
+  registerHook,
+  peertubeHelpers: { logger }
+}) {
+  registerHook({
+    target: 'action:api.video.updated',
+    handler: ({ req, res }) => logger.debug('original request parameters', { params: req.params })
   })
 }
 ```
@@ -138,6 +107,8 @@ function register ({ registerHook, peertubeHelpers }) {
 }
 ```
 
+See the [plugin API reference](https://docs.joinpeertube.org/api/plugins) to see the complete hooks list.
+
 ### Static files
 
 Plugins can declare static directories that PeerTube will serve (images for example)
@@ -149,7 +120,7 @@ or `/themes/{theme-name}/{theme-version}/static/` routes.
 Plugins can declare CSS files that PeerTube will automatically inject in the client.
 If you need to override existing style, you can use the `#custom-css` selector:
 
-```
+```css
 body#custom-css {
   color: red;
 }
@@ -158,6 +129,8 @@ body#custom-css {
   background-color: red;
 }
 ```
+
+See the [CSS variables section](#css-variables) to also have details on how to easily theme PeerTube.
 
 ### Server API (only for plugins)
 
@@ -176,7 +149,17 @@ function register (...) {
     label: 'Admin name',
 
     type: 'input',
-    // type: 'input' | 'input-checkbox' | 'input-password' | 'input-textarea' | 'markdown-text' | 'markdown-enhanced' | 'select' | 'html'
+    // type: 'input' | 'input-checkbox' | 'input-password' | 'input-textarea' | 'input-radio' | 'markdown-text' | 'markdown-enhanced' | 'select' | 'html'
+
+    // If type: 'select' or 'input-radio', give the available options
+    // /!\ With 'input-radio', the user cannot unselect an option: add an explicit option (like "None") if the field is optional
+    options: [
+      { label: 'Label 1', value: 'value1' },
+      { label: 'Label 2', value: 'value2' }
+    ],
+
+    // If type: 'html', set the HTML that will be injected in the page
+    html: '<strong class="...">Hello</strong><br /><br />'
 
     // Optional
     descriptionHTML: 'The purpose of this field is...',
@@ -194,7 +177,7 @@ function register (...) {
   result['admin-name]
 
   settingsManager.onSettingsChange(settings => {
-    settings['admin-name])
+    settings['admin-name']
   })
 }
 ```
@@ -211,10 +194,11 @@ function register ({
 }) {
   const value = await storageManager.getData('mykey')
   await storageManager.storeData('mykey', { subkey: 'value' })
+  await storageManager.deleteData('mykey')
 }
 ```
 
-You can also store files in the plugin data directory (`/{plugins-directory}/data/{npm-plugin-name}`) **in PeerTube >= 3.2**.
+You can also store files in the plugin data directory (`/{plugins-directory}/data/{npm-plugin-name}`).
 This directory and its content won't be deleted when your plugin is uninstalled/upgraded.
 
 ```js
@@ -232,21 +216,29 @@ function register ({
 
 #### Update video constants
 
-You can add/delete video categories, licences or languages using the appropriate managers:
+You can add/delete video categories, licences or languages using the appropriate constant managers:
 
 ```js
-function register (...) {
-  videoLanguageManager.addLanguage('al_bhed', 'Al Bhed')
-  videoLanguageManager.deleteLanguage('fr')
+function register ({
+  videoLanguageManager,
+  videoCategoryManager,
+  videoLicenceManager,
+  videoPrivacyManager,
+  playlistPrivacyManager
+}) {
+  videoLanguageManager.addConstant('al_bhed', 'Al Bhed')
+  videoLanguageManager.deleteConstant('fr')
 
-  videoCategoryManager.addCategory(42, 'Best category')
-  videoCategoryManager.deleteCategory(1) // Music
+  videoCategoryManager.addConstant(42, 'Best category')
+  videoCategoryManager.deleteConstant(1) // Music
+  videoCategoryManager.resetConstants() // Reset to initial categories
+  videoCategoryManager.getConstants() // Retrieve all category constants
 
-  videoLicenceManager.addLicence(42, 'Best licence')
-  videoLicenceManager.deleteLicence(7) // Public domain
+  videoLicenceManager.addConstant(42, 'Best licence')
+  videoLicenceManager.deleteConstant(7) // Public domain
 
-  videoPrivacyManager.deletePrivacy(2) // Remove Unlisted video privacy
-  playlistPrivacyManager.deletePlaylistPrivacy(3) // Remove Private video playlist privacy
+  videoPrivacyManager.deleteConstant(2) // Remove Unlisted video privacy
+  playlistPrivacyManager.deleteConstant(3) // Remove Private video playlist privacy
 }
 ```
 
@@ -256,13 +248,13 @@ You can create custom routes using an [express Router](https://expressjs.com/en/
 
 ```js
 function register ({
-  router
+  getRouter
 }) {
   const router = getRouter()
   router.get('/ping', (req, res) => res.json({ message: 'pong' }))
 
   // Users are automatically authenticated
-  router.get('/auth', async (res, res) => {
+  router.get('/auth', async (req, res) => {
     const user = await peertubeHelpers.user.getAuthUser(res)
 
     const isAdmin = user.role === 0
@@ -276,6 +268,15 @@ function register ({
       isUser
     })
   })
+
+  router.post('/webhook', async (req, res) => {
+    const rawBody = req.rawBody // Buffer containing the raw body
+
+    handleRawBody(rawBody)
+
+    res.status(204)
+  })
+
 }
 ```
 
@@ -283,6 +284,59 @@ The `ping` route can be accessed using:
  * `/plugins/:pluginName/:pluginVersion/router/ping`
  * Or `/plugins/:pluginName/router/ping`
 
+**PeerTube >= 9.0**
+
+To add your public pages to the instance sitemap (`/sitemaps/pages.xml`), use the `filter:sitemap.pages.list.result` server hook.
+Each entry has a `url` (absolute, or relative to the instance URL) and optional `lastmod`, `changefreq` and `priority` fields:
+
+```js
+function register ({ registerHook }) {
+  registerHook({
+    target: 'filter:sitemap.pages.list.result',
+    handler: entries => entries.concat([ { url: '/plugins/my-plugin/router/my-page' } ])
+  })
+}
+```
+
+The sitemap is cached, so changes may take up to one day to appear.
+
+
+#### Add custom WebSocket handlers
+
+**PeerTube >= 5.0**
+
+You can create custom WebSocket servers (like [ws](https://github.com/websockets/ws) for example) using `registerWebSocketRoute`:
+
+```js
+function register ({
+  registerWebSocketRoute,
+  peertubeHelpers
+}) {
+  const wss = new WebSocketServer({ noServer: true })
+
+  wss.on('connection', function connection(ws) {
+    peertubeHelpers.logger.info('WebSocket connected!')
+
+    setInterval(() => {
+      ws.send('WebSocket message sent by server');
+    }, 1000)
+  })
+
+  registerWebSocketRoute({
+    route: '/my-websocket-route',
+
+    handler: (request, socket, head) => {
+      wss.handleUpgrade(request, socket, head, ws => {
+        wss.emit('connection', ws, request)
+      })
+    }
+  })
+}
+```
+
+The `my-websocket-route` route can be accessed using:
+ * `/plugins/:pluginName/:pluginVersion/ws/my-websocket-route`
+ * Or `/plugins/:pluginName/ws/my-websocket-route`
 
 #### Add external auth methods
 
@@ -299,12 +353,13 @@ function register (...) {
     getWeight: () => 60,
 
     // Optional function called by PeerTube when the user clicked on the logout button
-    onLogout: user => {
+    // The logout request is also provided, so you can read its headers or its cookies (PeerTube >= 8.3)
+    onLogout: (user, req) => {
       console.log('User %s logged out.', user.username')
     },
 
     // Optional function called by PeerTube when the access token or refresh token are generated/refreshed
-    hookTokenValidity: ({ token, type }) => {
+    hookTokenValidity: ({ token, type, user }) => {
       if (type === 'access') return { valid: true }
       if (type === 'refresh') return { valid: false }
     },
@@ -316,7 +371,17 @@ function register (...) {
           username: 'user'
           email: 'user@example.com'
           role: 2
-          displayName: 'User display name'
+          displayName: 'User display name',
+
+          // Stable identifier of this user in your own system (e.g. LDAP `uid`/`entryUUID`)
+          // When provided, PeerTube links the local account using this id instead of relying only on the
+          // email address, which is more robust if the email changes on your side later on
+          // PeerTube >= 8.3
+          externalId: 'user-1234',
+
+          // Interface/email language of the user, must be one of PeerTube's available locales
+          // PeerTube >= 8.3
+          language: 'fr'
         }
       }
 
@@ -342,7 +407,7 @@ function register (...) {
     // Will be displayed in a button next to the login form
     authDisplayName: () => 'Auth method'
 
-    // If the user click on the auth button, PeerTube will forward the request in this function
+    // If the user click on the auth button, PeerTube will forward the request to this function
     onAuthRequest: (req, res) => {
       res.redirect('https://external-auth.example.com/auth')
     },
@@ -362,7 +427,43 @@ function register (...) {
       username: 'user'
       email: 'user@example.com'
       role: 2
-      displayName: 'User display name'
+      displayName: 'User display name',
+
+      // Stable identifier of this user at the identity provider (OIDC `sub` claim, SAML `NameID`...)
+      // When provided, PeerTube links/looks up the local account using this id instead of relying only on the
+      // email address, which is more robust across identity provider email changes and avoids account
+      // confusion from email collisions
+      // PeerTube >= 8.3
+      externalId: 'a1b2c3d4-external-provider-subject-id',
+
+      // Custom admin flags (bypass video auto moderation etc.)
+      // https://github.com/Chocobozzz/PeerTube/blob/develop/packages/models/src/users/user-flag.model.ts
+      // PeerTube >= 5.1
+      adminFlags: 0,
+      // Quota in bytes
+      // PeerTube >= 5.1
+      videoQuota: 1024 * 1024 * 1024, // 1GB
+      // PeerTube >= 5.1
+      videoQuotaDaily: -1, // Unlimited
+
+      // Interface/email language of the user, must be one of PeerTube's available locales
+      // PeerTube >= 8.3
+      language: 'fr',
+
+      // Update the user profile if it already exists
+      // Default behaviour is no update
+      // Introduced in PeerTube >= 5.1
+      userUpdater: ({ fieldName, currentValue, newValue }) => {
+        // Always use new value except for videoQuotaDaily field
+        if (fieldName === 'videoQuotaDaily') return currentValue
+
+        return newValue
+      },
+
+      // Ask PeerTube to redirect on this URL instead of classic `/login` page
+      // The URL will contain an `externalAuthToken` param that can be reused to authenticate to the PeerTube REST API
+      // Introduced in PeerTube >= 7.3
+      externalRedirectUri: 'https://mywebsite.example.com/peertube-login-cb'
     })
   })
 
@@ -472,6 +573,107 @@ async function register ({
 During live transcode input options are applied once for each target resolution.
 Plugins are responsible for detecting such situation and applying input options only once if necessary.
 
+#### Add automatic tags to videos and comments
+
+**PeerTube >= 8.3**
+
+PeerTube can automatically tags videos and comments (using watched words lists, or the core `external-link` tag).
+Admins and video owners are able to use these tags to automatically block videos or to hold comments for review.
+
+Your plugin can add its own automatic tags using `registerVideoAutoTagger` and `registerCommentAutoTagger`:
+
+```js
+async function register ({
+  registerVideoAutoTagger,
+  registerCommentAutoTagger,
+  peertubeHelpers
+}) {
+  registerCommentAutoTagger({
+    // Tags this auto tagger can assign
+    autoTagNames: [ 'spam' ],
+
+    // Only comment.text is provided
+    handler: async ({ comment }) => {
+      if (await isSpam(comment.text)) return { tags: [ 'spam' ] }
+
+      return { tags: [] }
+    }
+  })
+
+  registerVideoAutoTagger({
+    autoTagNames: [ 'short-video' ],
+
+    // Only video.id, video.name and video.description are provided
+    handler: async ({ video }) => {
+      const files = await peertubeHelpers.videos.getFiles(video.id)
+      const file = [ ...(files?.webVideo?.videoFiles || []), ...(files?.hls?.videoFiles || []) ][0]
+
+      // A live video has no file yet
+      if (!file) return { tags: [] }
+
+      // Download the file if it is stored in object storage
+      const duration = await peertubeHelpers.videos.withFile({ videoId: video.id, videoFileId: file.id }, async path => {
+        const probe = await peertubeHelpers.videos.ffprobe(path)
+
+        return probe.format.duration
+      })
+
+      return { tags: duration < 10 ? [ 'short-video' ] : [] }
+    }
+  })
+}
+```
+
+How auto taggers work:
+ * Names declared in `autoTagNames` are shown in the automatic tag policy settings, so admins (videos and comments) and video owners (comments) can select them
+ * The handler can only assign tags declared in `autoTagNames`. PeerTube ignores any other tag the handler returns
+ * Video tags are assigned to the instance. Comment tags are assigned to both the instance and the video owner
+ * Auto taggers run in a job, outside of any database transaction, so they can take time to return (for example to analyze video files or call an external service)
+ * Video auto taggers run when a local or remote video is created or updated, imported, or when its source file is replaced. A live video has no file yet when its auto taggers run
+ * Comment auto taggers run when a local or remote comment is created
+
+To remove an auto tagger, pass the same options object (the `handler` reference is used for comparison) to `unregisterVideoAutoTagger` or `unregisterCommentAutoTagger`.
+
+You can read the automatic tags of an object using `peertubeHelpers.automaticTags.getServerVideoAutomaticTags({ videoId })`, `peertubeHelpers.automaticTags.getServerCommentAutomaticTags({ commentId })` or `peertubeHelpers.automaticTags.getAccountCommentAutomaticTags({ commentId, accountId })`.
+
+#### Provide a transcriber
+
+**PeerTube >= 9.0**
+
+Your plugin can generate video subtitles with its own ASR service or tool instead of the whisper engine shipped with PeerTube, using the `filter:transcription.transcriber.result` hook:
+
+```js
+async function register ({ registerHook }) {
+  registerHook({
+    target: 'filter:transcription.transcriber.result',
+
+    // Return `result` to let PeerTube (or another plugin) handle this video
+    // Only video.id, video.uuid, video.name, video.language, video.duration, video.privacy, video.channel and video.account are provided
+    handler: (result, { video }) => {
+      return {
+        name: 'my-asr',
+
+        // workingDirectory is an empty directory removed by PeerTube after the transcription
+        transcribe: async ({ mediaFilePath, language, workingDirectory, signal }) => {
+          const { vtt, detectedLanguage } = await callMyASRService(mediaFilePath, { language, signal })
+
+          // Return undefined to let PeerTube generate the subtitles with its whisper engine
+          if (!vtt) return undefined
+
+          return { language: detectedLanguage, content: vtt }
+        }
+      }
+    }
+  })
+}
+```
+
+How plugin transcribers work:
+ * The returned `language` must be a language code supported by PeerTube (`en`, `de`...). The transcription job fails otherwise
+ * The returned `content` must be WebVTT
+ * PeerTube only installs its whisper engine when a video is not transcribed by a plugin
+ * The hook is not used when transcription is processed by remote runners
+
 #### Server helpers
 
 PeerTube provides your plugin some helpers. For example:
@@ -491,14 +693,82 @@ async function register ({
   {
     const video = await peertubeHelpers.videos.loadByUrl('...')
   }
+
+  // Update video metadata (thumbnail/preview files and the video channel are not supported)
+  {
+    await peertubeHelpers.videos.updateVideo({
+      videoId: '...',
+      attributes: {
+        name: 'New video name',
+        support: 'New support text'
+      }
+    })
+  }
+
+  // Remove a user, with their account, channels and videos
+  {
+    await peertubeHelpers.user.removeUser(userId)
+  }
+
+  // Send an email
+  {
+    await peertubeHelpers.email.createJob({
+      to: { email: 'admin@example.com', language: 'en' },
+      subject: 'Hello from my plugin',
+      text: 'Plugin body text'
+    })
+  }
 }
 ```
 
-See the [plugin API reference](https://docs.joinpeertube.org/api-plugins) to see the complete helpers list.
+See the [plugin API reference](https://docs.joinpeertube.org/api/plugins) to see the complete helpers list.
+
+#### Federation
+
+You can use some server hooks to federate plugin data to other PeerTube instances that may have installed your plugin.
+
+For example to federate additional video metadata:
+
+```js
+async function register ({ registerHook }) {
+
+  // Send plugin metadata to remote instances
+  // We also update the JSON LD context because we added a new field
+  {
+    registerHook({
+      target: 'filter:activity-pub.video.json-ld.build.result',
+      handler: async (jsonld, { video }) => {
+        return Object.assign(jsonld, { recordedAt: 'https://example.com/event' })
+      }
+    })
+
+    registerHook({
+      target: 'filter:activity-pub.activity.context.build.result',
+      handler: jsonld => {
+        return jsonld.concat([ { recordedAt: 'https://schema.org/recordedAt' } ])
+      }
+    })
+  }
+
+  // Save remote video metadata
+  {
+    for (const h of [ 'action:activity-pub.remote-video.created', 'action:activity-pub.remote-video.updated' ]) {
+      registerHook({
+        target: h,
+        handler: ({ video, videoAPObject }) => {
+          if (videoAPObject.recordedAt) {
+            // Save information about the video
+          }
+        }
+      })
+    }
+  }
+```
+
 
 ### Client API (themes & plugins)
 
-#### Plugin static route
+#### Get plugin static and router routes
 
 To get your plugin static route:
 
@@ -508,6 +778,24 @@ function register (...) {
   const imageUrl = baseStaticUrl + '/images/chocobo.png'
 }
 ```
+
+And to get your plugin router route, use `peertubeHelpers.getBaseRouterRoute()`:
+
+```js
+function register (...) {
+  registerHook({
+    target: 'action:video-watch.video.loaded',
+    handler: ({ video }) => {
+      fetch(peertubeHelpers.getBaseRouterRoute() + '/my/plugin/api', {
+        method: 'GET',
+        headers: peertubeHelpers.getAuthHeader()
+      }).then(res => res.json())
+        .then(data => console.log('Hi %s.', data))
+    }
+  })
+}
+```
+
 
 #### Notifier
 
@@ -541,7 +829,7 @@ function register (...) {
 
 **PeerTube >= 3.2**
 
-To make your own HTTP requests using the current authenticated user, use an helper to automatically set appropriate headers:
+To make your own HTTP requests using the current authenticated user, use a helper to automatically set appropriate headers:
 
 ```js
 function register (...) {
@@ -632,18 +920,37 @@ async function register ({ registerVideoField, peertubeHelpers }) {
     name: 'my-field-name,
     label: 'My added field',
     descriptionHTML: 'Optional description',
+
+    // type: 'input' | 'input-checkbox' | 'input-password' | 'input-textarea' | 'input-radio' | 'markdown-text' | 'markdown-enhanced' | 'select' | 'html'
+    // /!\ 'input-checkbox' could send "false" and "true" strings instead of boolean
     type: 'input-textarea',
+
     default: '',
+
     // Optional, to hide a field depending on the current form state
     // liveVideo is in the options object when the user is creating/updating a live
     // videoToUpdate is in the options object when the user is updating a video
     hidden: ({ formValues, videoToUpdate, liveVideo }) => {
       return formValues.pluginData['other-field'] === 'toto'
+    },
+
+    // Optional, to display an error depending on the form state
+    error: ({ formValues, value }) => {
+      if (formValues['privacy'] !== 1 && formValues['privacy'] !== 2) return { error: false }
+      if (value === true) return { error: false }
+
+      return { error: true, text: 'Should be enabled' }
     }
   }
 
+  const videoFormOptions = {
+    // Optional, to choose to put your setting in a specific tab in video form
+    // type: 'main' | 'plugin-settings'
+    tab: 'main'
+  }
+
   for (const type of [ 'upload', 'import-url', 'import-torrent', 'update', 'go-live' ]) {
-    registerVideoField(commonOptions, { type })
+    registerVideoField(commonOptions, { type, ...videoFormOptions  })
   }
 }
 ```
@@ -662,10 +969,10 @@ async function register ({
   // Store data associated to this video
   registerHook({
     target: 'action:api.video.updated',
-    handler: ({ video, body }) => {
-      if (!body.pluginData) return
+    handler: ({ video, req }) => {
+      if (!req.body.pluginData) return
 
-      const value = body.pluginData[fieldName]
+      const value = req.body.pluginData[fieldName]
       if (!value) return
 
       storageManager.storeData(fieldName + '-' + video.id, value)
@@ -705,6 +1012,13 @@ async function register ({ registerSettingsScript }) {
   })
 }
 ```
+#### Plugin selector on HTML elements
+
+PeerTube provides some selectors (using `id` HTML attribute) on important blocks so plugins can easily change their style.
+
+For example `#plugin-selector-login-form` could be used to hide the login form.
+
+See the complete list on https://docs.joinpeertube.org/api/plugins
 
 #### HTML placeholder elements
 
@@ -720,12 +1034,111 @@ async function register (...) {
 }
 ```
 
-See the complete list on https://docs.joinpeertube.org/api-plugins
+See the complete list on https://docs.joinpeertube.org/api/plugins
+
+#### CSS variables
+
+PeerTube can be easily themed using built-in CSS variables. The full list is available in [client/src/sass/include/_variables.scss](https://github.com/Chocobozzz/PeerTube/blob/develop/client/src/sass/include/_variables.scss).
+
+PeerTube creates gradients of some CSS variables so you don't have to specify all variables yourself. For example, just specify `--bg-secondary` and PeerTube will generate `--bg-secondary-450`, `--bg-secondary-400` and so on.
+
+You can take inspiration from core PeerTube themes in [client/src/sass/application.scss](https://github.com/Chocobozzz/PeerTube/blob/develop/client/src/sass/application.scss) file:
+
+::: info
+`--is-dark` CSS variable must be provided when you define a new theme
+:::
+
+```css
+:root {
+  --is-dark: 0; /* Or --is-dark: 1 if it's a dark theme */
+
+  --primary: #FD9C50;
+  --on-primary: #111;
+  --border-primary: #F2690D;
+
+  --input-bg: var(--bg-secondary-450);
+  --input-bg-in-secondary: var(--bg-secondary-500);
+
+  --fg: hsl(0 10% 96%);
+
+  --bg: hsl(0 14% 7%);
+  --bg-secondary: hsl(0 14% 22%);
+
+  --alert-primary-fg: var(--on-primary);
+  --alert-primary-bg: #cd9e7a;
+  --alert-primary-border-color: var(--primary-600);
+
+  --active-icon-color: var(--fg-450);
+  --active-icon-bg: var(--bg-secondary-600);
+}
+```
+
+#### Add/remove left menu links
+
+Left menu links can be filtered (add/remove a section or add/remove links) using the `filter:left-menu.links.create.result` client hook.
+
+#### Create client page
+
+To create a client page, register a new client route:
+
+```js
+function register ({ registerClientRoute }) {
+  registerClientRoute({
+    route: 'my-super/route',
+    title: 'Page title for this route',
+    parentRoute: '/my-account', // Optional. The full path will be /my-account/p/my-super/route.
+    menuItem: { // Optional. This will add a menu item to this route. Only supported when parentRoute is '/my-account'.
+      label: 'Sub route',
+    },
+    onMount: ({ rootEl }) => {
+      rootEl.innerHTML = 'hello'
+    }
+  })
+}
+```
+
+You can then access the page on `/p/my-super/route` (please note the additional `/p/` in the path).
+
+#### Run actions
+
+**PeerTube >= 7.1**
+
+Plugin can trigger actions in the client by calling `doAction` with a specific action.
+This can be used in combination with a hook to add custom admin actions, for instance:
+
+```js
+function register ({ registerHook, doAction }) {
+  registerHook({
+    target: 'filter:admin-video-comments-list.bulk-actions.create.result',
+    handler: async menuItems => {
+      return menuItems.concat(
+      [
+        {
+          label: 'Mark as spam',
+          description: 'Report as spam and delete user.',
+          handler: async (comments) => {
+            // Show the loader
+            doAction('application:increment-loader')
+            // Run custom function
+            await deleteCommentsAndMarkAsSpam(comments)
+            // Reload the list in order for the admin to see the updated list
+            await doAction('admin-video-comments-list:load-data')
+          },
+          isDisplayed: (users) => true,
+        }
+      ])
+    }
+  })
+}
+```
+
+See the [plugin API reference](https://docs.joinpeertube.org/api/plugins) to see the complete `doAction` list.
 
 ### Publishing
 
-PeerTube plugins and themes should be published on [NPM](https://www.npmjs.com/) so that PeerTube indexes
-take into account your plugin (after ~ 1 day). An official PeerTube index is available on https://packages.joinpeertube.org/ (it's just a REST API, so don't expect a beautiful website).
+PeerTube plugins and themes should be published on [NPM](https://www.npmjs.com/) so that PeerTube indexes take into account your plugin (after ~ 1 day). An official plugin index is available on [packages.joinpeertube.org](https://packages.joinpeertube.org/api/v1/plugins), with no interface to present packages.
+
+> The official plugin index source code is available at https://framagit.org/framasoft/peertube/plugin-index
 
 ## Write a plugin/theme
 
@@ -746,31 +1159,31 @@ Steps:
 
 If you develop a plugin, clone the `peertube-plugin-quickstart` repository:
 
-```
-$ git clone https://framagit.org/framasoft/peertube/peertube-plugin-quickstart.git peertube-plugin-mysupername
+```sh
+git clone https://framagit.org/framasoft/peertube/peertube-plugin-quickstart.git peertube-plugin-mysupername
 ```
 
 If you develop a theme, clone the `peertube-theme-quickstart` repository:
 
-```
-$ git clone https://framagit.org/framasoft/peertube/peertube-theme-quickstart.git peertube-theme-mysupername
+```sh
+git clone https://framagit.org/framasoft/peertube/peertube-theme-quickstart.git peertube-theme-mysupername
 ```
 
 ### Configure your repository
 
 Set your repository URL:
 
-```
-$ cd peertube-plugin-mysupername # or cd peertube-theme-mysupername
-$ git remote set-url origin https://your-git-repo
+```sh
+cd peertube-plugin-mysupername # or cd peertube-theme-mysupername
+git remote set-url origin https://your-git-repo
 ```
 
 ### Update README
 
 Update `README.md` file:
 
-```
-$ $EDITOR README.md
+```sh
+$EDITOR README.md
 ```
 
 ### Update package.json
@@ -808,10 +1221,64 @@ And if you don't need CSS or client script files, use an empty `array`:
 ### Write code
 
 Now you can register hooks or settings, write CSS and add static directories to your plugin or your theme :)
+It's up to you to check the code you write will be compatible with the PeerTube NodeJS version, and will be supported by web browsers.
 
-**Caution:** It's up to you to check the code you write will be compatible with the PeerTube NodeJS version,
-and will be supported by web browsers.
+**JavaScript**
+
 If you want to write modern JavaScript, please use a transpiler like [Babel](https://babeljs.io/).
+
+**Typescript**
+
+The easiest way to use __Typescript__ for both front-end and backend code is to clone [peertube-plugin-quickstart-typescript](https://github.com/JohnXLivingston/peertube-plugin-quickstart-typescript/) (also available on [framagit](https://framagit.org/Livingston/peertube-plugin-quickstart-typescript/)) instead of `peertube-plugin-quickstart`.
+Please read carefully the [README file](https://github.com/JohnXLivingston/peertube-plugin-quickstart-typescript/blob/main/README.md), as there are some other differences with `peertube-plugin-quickstart` (using SCSS instead of CSS, linting rules, ...).
+
+If you don't want to use `peertube-plugin-quickstart-typescript`, you can also manually add a dev dependency to __Peertube__ types:
+
+```
+npm install --save-dev @peertube/peertube-types
+```
+
+This package exposes *server* definition files by default:
+```ts
+import { RegisterServerOptions } from '@peertube/peertube-types.js'
+
+export async function register ({ registerHook }: RegisterServerOptions) {
+  registerHook({
+    target: 'action:application.listening',
+    handler: () => displayHelloWorld()
+  })
+}
+```
+
+But it also exposes client types and various models used in __PeerTube__:
+```ts
+import { Video } from '@peertube/peertube-types.js';
+import { RegisterClientOptions } from '@peertube/peertube-types/client.js';
+
+function register({ registerHook, peertubeHelpers }: RegisterClientOptions) {
+  registerHook({
+    target: 'action:admin-plugin-settings.init',
+    handler: ({ npmName }: { npmName: string }) => {
+      if ('peertube-plugin-transcription' !== npmName) {
+        return;
+      }
+    },
+  });
+
+  registerHook({
+    target: 'action:video-watch.video.loaded',
+    handler: ({ video }: { video: Video }) => {
+      fetch(`${peertubeHelpers.getBaseRouterRoute()}/videos/${video.uuid}/captions`, {
+        method: 'PUT',
+        headers: peertubeHelpers.getAuthHeader(),
+      }).then((res) => res.json())
+        .then((data) => console.log('Hi %s.', data));
+    },
+  });
+}
+
+export { register };
+```
 
 ### Add translations
 
@@ -828,7 +1295,7 @@ If you want to translate strings of your plugin (like labels of your registered 
 }
 ```
 
-The key should be one of the locales defined in [i18n.ts](https://github.com/Chocobozzz/PeerTube/blob/develop/shared/models/i18n/i18n.ts).
+The key should be one of the locales defined in [i18n.ts](https://github.com/Chocobozzz/PeerTube/blob/develop/packages/core-utils/src/i18n/i18n.ts).
 
 Translation files are just objects, with the english sentence as the key and the translation as the value.
 `fr.json` could contain for example:
@@ -845,20 +1312,20 @@ If you added client scripts, you'll need to build them using webpack.
 
 Install webpack:
 
-```
-$ npm install
+```sh
+npm install
 ```
 
 Add/update your files in the `clientFiles` array of `webpack.config.js`:
 
-```
-$ $EDITOR ./webpack.config.js
+```sh
+$EDITOR ./webpack.config.js
 ```
 
 Build your client files:
 
-```
-$ npm run build
+```sh
+npm run build
 ```
 
 You built files are in the `dist/` directory. Check `package.json` to correctly point to them.
@@ -866,49 +1333,56 @@ You built files are in the `dist/` directory. Check `package.json` to correctly 
 
 ### Test your plugin/theme
 
-You'll need to have a local PeerTube instance:
- * Follow the [dev prerequisites](https://github.com/Chocobozzz/PeerTube/blob/develop/.github/CONTRIBUTING.md#prerequisites)
- (to clone the repository, install dependencies and prepare the database)
- * Build PeerTube (`--light` to only build the english language):
+You need to have a local PeerTube instance with an administrator account.
+If you're using dev server on your local computer, test your plugin on `localhost:9000` using `npm run dev` because plugin CSS is not injected in Angular webserver (`localhost:3000`).
 
-```
-$ npm run build -- --light
-```
+Install [PeerTube CLI](https://docs.joinpeertube.org/maintain/tools) (can be installed on another computer/server than the PeerTube instance):
 
- * Build the CLI:
-
-```
-$ npm run setup:cli
+```bash
+npm install -g @peertube/peertube-cli
 ```
 
- * Run PeerTube (you can access to your instance on http://localhost:9000):
+Register the PeerTube instance via the CLI:
 
-```
-$ NODE_ENV=test npm start
-```
-
- * Register the instance via the CLI:
-
-```
-$ node ./dist/server/tools/peertube.js auth add -u 'http://localhost:9000' -U 'root' --password 'test'
+```sh
+peertube-cli auth add -u 'https://peertube.example.com' -U 'root' --password 'test'
 ```
 
-Then, you can install or reinstall your local plugin/theme by running:
+Then, you can install your local plugin/theme.
+The `--path` option is the local path on the PeerTube instance.
+If the PeerTube instance is running on another server/computer, you must copy your plugin directory there.
 
+```sh
+peertube-cli plugins install --path /your/absolute/plugin-or-theme/path
 ```
-$ node ./dist/server/tools/peertube.js plugins install --path /your/absolute/plugin-or-theme/path
+
+`plugins install` copies the directory into the instance plugin storage instead of linking to it,
+so rebuilding your plugin/theme afterwards does not change what the instance runs.
+To load a new build, update the plugin/theme:
+
+```bash
+peertube-cli plugins update --path /your/absolute/plugin-or-theme/path
 ```
+
+Static files and client scripts are cached by web browsers using the `version` of your `package.json`.
+If you changed them, also bump this `version` or disable the cache of your web browser.
 
 ### Publish
 
 Go in your plugin/theme directory, and run:
 
-```
-$ npm publish
+```sh
+npm publish
 ```
 
 Every time you want to publish another version of your plugin/theme, just update the `version` key from the `package.json`
 and republish it on NPM. Remember that the PeerTube index will take into account your new plugin/theme version after ~24 hours.
+
+> If you need to force your plugin update on a specific __PeerTube__ instance, you may update the latest available version manually:
+> ```sql
+> UPDATE "plugin" SET "latestVersion" = 'X.X.X' WHERE "plugin"."name" = 'plugin-shortname';
+> ```
+> You'll then be able to click the __Update plugin__ button on the plugin list.
 
 ### Unpublish
 
@@ -916,12 +1390,12 @@ If for a particular reason you don't want to maintain your plugin/theme anymore
 you can deprecate it. The plugin index will automatically remove it preventing users to find/install it from the PeerTube admin interface:
 
 ```bash
-$ npm deprecate peertube-plugin-xxx@"> 0.0.0" "explain here why you deprecate your plugin/theme"
+npm deprecate peertube-plugin-xxx@"> 0.0.0" "explain here why you deprecate your plugin/theme"
 ```
 
-## Plugin & Theme hooks/helpers API
+## Plugin & Theme hooks/actions/helpers API
 
-See the dedicated documentation: https://docs.joinpeertube.org/api-plugins
+See the dedicated documentation: https://docs.joinpeertube.org/api/plugins
 
 
 ## Tips
@@ -952,12 +1426,43 @@ This way, older PeerTube versions will still use your old plugin, and new PeerTu
 ### Spam/moderation plugin
 
 If you want to create an antispam/moderation plugin, you could use the following hooks:
- * `filter:api.video.upload.accept.result`: to accept or not local uploads
+ * `filter:api.video.upload.accept.result`: to accept or not local uploads. See [Read the uploaded video file](#read-the-uploaded-video-file) if you need the file content
  * `filter:api.video-thread.create.accept.result`: to accept or not local thread
  * `filter:api.video-comment-reply.create.accept.result`: to accept or not local replies
  * `filter:api.video-threads.list.result`: to change/hide the text of threads
- * `filter:api.video-thread-comments.list.result`: to change/hide the text of replies
+ * `filter:api.video-thread-comments.list.result`: to change/hide the text of replies. Since PeerTube 8.3 this hook only receives a truncated view of the thread, and its `total` is the number of direct replies of the root comment
+ * `filter:api.video-comment-replies.list.result`: to change/hide the text of the replies loaded after the thread (PeerTube >= 8.3)
  * `filter:video.auto-blacklist.result`: to automatically blacklist local or remote videos
+ * `filter:video.ownership-change.release-auto-blacklist.result`: to keep or release a video blocked by the instance auto blacklist policy when its ownership (or the ownership of its channel) changes (PeerTube >= 9.0). The result is `true` by default if the next owner bypasses the auto blacklist, `false` otherwise. Params are `{ video, videoBlacklist, nextOwner }`, `nextOwner` being the next owner user (use `nextOwner.hasRight()` or `nextOwner.hasAdminFlag()` to check its permissions). Manual blocks and blocks of auto tag policies are never released
+ * `filter:admin-users-list.bulk-actions.create.result`: to add bulk actions in the admin users list
+ * `filter:admin-video-comments-list.actions.create.result`: to add actions in the admin video comments list
+ * `filter:admin-video-comments-list.bulk-actions.create.result`: to add bulk actions in the admin video comments list
+ * `filter:user-moderation.actions.create.result`: to add actions in the user moderation dropdown (available in multiple views)
+ * `filter:admin-abuse-list.actions.create.result`: to add actions in the admin abuse list
+
+### Read the uploaded video file
+
+`filter:api.video.upload.accept.result` and `filter:api.video.update-file.accept.result` receive the uploaded file in the `videoFile` parameter.
+
+When object storage is enabled, resumable uploads are staged in object storage and the file is not on the local disk of the PeerTube process. Since PeerTube 9.0, `videoFile.url` is then set to a temporary URL (valid one hour) of the staged file: read it using HTTP (range requests are supported) or give it to `ffprobe`/`ffmpeg`.
+
+For compatibility, PeerTube still downloads the staged file to `videoFile.path` if a plugin uses one of these hooks. This download happens in the upload request and may time out for big files: it will be removed in PeerTube 10.0, so don't rely on `videoFile.path` when `videoFile.url` is set.
+
+```js
+registerHook({
+  target: 'filter:api.video.upload.accept.result',
+  handler: async ({ accepted }, { videoFile }) => {
+    if (!accepted) return { accepted: false }
+
+    // videoFile.url is set if the upload is staged in object storage, videoFile.path otherwise
+    const input = videoFile.url ?? videoFile.path
+
+    // ... check the file content (using ffprobe for example)
+
+    return { accepted: true }
+  }
+})
+```
 
 ### Other plugin examples
 

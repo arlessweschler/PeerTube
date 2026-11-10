@@ -1,0 +1,15 @@
+@if (getQuotaAsNumber() > 0) {
+  <div>
+    <ng-container i18n>
+      The video quota only takes into account the size of <strong>uploaded</strong> videos, not transcoded files or user export archives (which may contain video files).
+    </ng-container>
+
+    <br />
+
+    @if (isTranscodingInformationDisplayed()) {
+      <ng-container i18n>
+        Transcoding is enabled so real videos size can be at most ~ {{ computeQuotaWithTranscoding() | bytes: 0 }}.
+      </ng-container>
+    }
+  </div>
+}

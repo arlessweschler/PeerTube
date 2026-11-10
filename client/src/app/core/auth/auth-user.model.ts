@@ -1,115 +1,71 @@
-import { Observable, of } from 'rxjs'
-import { map } from 'rxjs/operators'
 import { User } from '@app/core/users/user.model'
+import { VideoChannel } from '@app/shared/shared-main/channel/video-channel.model'
+import { hasUserRight } from '@peertube/peertube-core-utils'
 import {
-  flushUserInfoFromLocalStorage,
-  getUserInfoFromLocalStorage,
-  saveUserInfoIntoLocalStorage,
-  TokenOptions,
-  Tokens
-} from '@root-helpers/users'
-import { hasUserRight } from '@shared/core-utils/users'
-import {
-  MyUser as ServerMyUserModel,
   MyUserSpecialPlaylist,
+  MyUser as ServerMyUserModel,
   User as ServerUserModel,
-  UserRight,
-  UserRole,
-  UserVideoQuota
-} from '@shared/models'
+  UserRightType,
+  UserRole
+} from '@peertube/peertube-models'
+import { OAuthUserTokens } from '@root-helpers/users'
 
 export class AuthUser extends User implements ServerMyUserModel {
-  tokens: Tokens
+  oauthTokens: OAuthUserTokens
   specialPlaylists: MyUserSpecialPlaylist[]
+  videoChannelCollaborations?: ServerMyUserModel['videoChannelCollaborations']
 
-  canSeeVideosLink = true
-
-  static load () {
-    const tokens = Tokens.load()
-    if (!tokens) return null
-
-    const userInfo = getUserInfoFromLocalStorage()
-    if (!userInfo) return null
-
-    return new AuthUser(userInfo, tokens)
-  }
-
-  static flush () {
-    flushUserInfoFromLocalStorage()
-
-    Tokens.flush()
-  }
-
-  constructor (userHash: Partial<ServerMyUserModel>, hashTokens: TokenOptions) {
+  constructor (userHash: Partial<ServerMyUserModel>, hashTokens: Partial<OAuthUserTokens>) {
     super(userHash)
 
-    this.tokens = new Tokens(hashTokens)
+    this.oauthTokens = new OAuthUserTokens(hashTokens)
     this.specialPlaylists = userHash.specialPlaylists
+    this.videoChannelCollaborations = userHash.videoChannelCollaborations
   }
 
   getAccessToken () {
-    return this.tokens.accessToken
+    return this.oauthTokens.accessToken
   }
 
   getRefreshToken () {
-    return this.tokens.refreshToken
+    return this.oauthTokens.refreshToken
   }
 
   getTokenType () {
-    return this.tokens.tokenType
+    return this.oauthTokens.tokenType
   }
 
   refreshTokens (accessToken: string, refreshToken: string) {
-    this.tokens.accessToken = accessToken
-    this.tokens.refreshToken = refreshToken
+    this.oauthTokens.accessToken = accessToken
+    this.oauthTokens.refreshToken = refreshToken
   }
 
-  hasRight (right: UserRight) {
-    return hasUserRight(this.role, right)
+  hasRight (right: UserRightType) {
+    return hasUserRight(this.role.id, right)
   }
 
-  canManage (user: ServerUserModel) {
-    const myRole = this.role
+  canManageUser (user: ServerUserModel) {
+    const myRole = this.role.id
 
     if (myRole === UserRole.ADMINISTRATOR) return true
 
     // I'm a moderator: I can only manage users
-    return user.role === UserRole.USER
+    return user.role.id === UserRole.USER
   }
 
-  save () {
-    saveUserInfoIntoLocalStorage({
-      id: this.id,
-      username: this.username,
-      email: this.email,
-      role: this.role,
-      nsfwPolicy: this.nsfwPolicy,
-      webTorrentEnabled: this.webTorrentEnabled,
-      autoPlayVideo: this.autoPlayVideo
-    })
-
-    this.tokens.save()
+  isCollaboratingToChannels () {
+    return this.videoChannelCollaborations.length !== 0
   }
 
-  computeCanSeeVideosLink (quotaObservable: Observable<UserVideoQuota>): Observable<boolean> {
-    if (!this.isUploadDisabled()) {
-      this.canSeeVideosLink = true
-      return of(this.canSeeVideosLink)
-    }
+  isEditorOfChannel (channel?: Pick<VideoChannel, 'id'>) {
+    if (!channel) return false
 
-    // Check if the user has videos
-    return quotaObservable.pipe(
-      map(({ videoQuotaUsed }) => {
-        if (videoQuotaUsed !== 0) {
-          // User already uploaded videos, so it can see the link
-          this.canSeeVideosLink = true
-        } else {
-          // No videos, no upload so the user don't need to see the videos link
-          this.canSeeVideosLink = false
-        }
+    return this.videoChannelCollaborations.some(c => c.id === channel.id)
+  }
 
-        return this.canSeeVideosLink
-      })
-    )
+  isOwnerOfChannel (channel?: Pick<VideoChannel, 'id'>) {
+    if (!channel) return true
+
+    return this.videoChannels.some(c => c.id === channel.id)
   }
 }

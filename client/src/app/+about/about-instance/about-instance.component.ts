@@ -1,96 +1,88 @@
-import { ViewportScroller } from '@angular/common'
-import { AfterViewChecked, Component, ElementRef, OnInit, ViewChild } from '@angular/core'
-import { ActivatedRoute } from '@angular/router'
-import { ContactAdminModalComponent } from '@app/+about/about-instance/contact-admin-modal.component'
-import { Notifier } from '@app/core'
-import { CustomMarkupService } from '@app/shared/shared-custom-markup'
-import { InstanceService } from '@app/shared/shared-instance'
-import { About, ServerConfig } from '@shared/models'
-import { copyToClipboard } from '../../../root-helpers/utils'
+import { ChangeDetectionStrategy, Component, ElementRef, OnInit, inject, viewChild } from '@angular/core'
+import { ActivatedRoute, RouterOutlet } from '@angular/router'
+import { AboutHTML } from '@app/shared/shared-main/instance/instance.service'
+import { HorizontalMenuComponent, HorizontalMenuEntry } from '@app/shared/shared-main/menu/horizontal-menu.component'
+import { ServerConfig, ServerStats } from '@peertube/peertube-models'
 import { ResolverData } from './about-instance.resolver'
+import { InstanceStatRulesComponent } from './instance-stat-rules.component'
 
 @Component({
   selector: 'my-about-instance',
   templateUrl: './about-instance.component.html',
-  styleUrls: [ './about-instance.component.scss' ]
+  styleUrls: [ './about-instance.component.scss' ],
+  changeDetection: ChangeDetectionStrategy.Eager,
+  imports: [
+    InstanceStatRulesComponent,
+    HorizontalMenuComponent,
+    RouterOutlet
+  ]
 })
-export class AboutInstanceComponent implements OnInit, AfterViewChecked {
-  @ViewChild('descriptionWrapper') descriptionWrapper: ElementRef<HTMLInputElement>
-  @ViewChild('contactAdminModal', { static: true }) contactAdminModal: ContactAdminModalComponent
+export class AboutInstanceComponent implements OnInit {
+  private route = inject(ActivatedRoute)
 
-  shortDescription = ''
-  descriptionContent: string
+  readonly descriptionWrapper = viewChild<ElementRef<HTMLInputElement>>('descriptionWrapper')
 
-  html = {
-    terms: '',
-    codeOfConduct: '',
-    moderationInformation: '',
-    administrator: '',
-    creationReason: '',
-    maintenanceLifetime: '',
-    businessModel: '',
-    hardwareInformation: ''
-  }
-
-  languages: string[] = []
-  categories: string[] = []
-
+  aboutHTML: AboutHTML
+  serverStats: ServerStats
   serverConfig: ServerConfig
+  menuEntries: HorizontalMenuEntry[] = []
 
-  initialized = false
+  ngOnInit () {
+    const {
+      about,
+      aboutHTML,
+      serverStats,
+      serverConfig
+    }: ResolverData = this.route.snapshot.data.instanceData
 
-  private lastScrollHash: string
-
-  constructor (
-    private viewportScroller: ViewportScroller,
-    private route: ActivatedRoute,
-    private notifier: Notifier,
-    private instanceService: InstanceService
-  ) {}
-
-  get instanceName () {
-    return this.serverConfig.instance.name
-  }
-
-  get isContactFormEnabled () {
-    return this.serverConfig.email.enabled && this.serverConfig.contactForm.enabled
-  }
-
-  get isNSFW () {
-    return this.serverConfig.instance.isNSFW
-  }
-
-  async ngOnInit () {
-    const { about, languages, categories, serverConfig }: ResolverData = this.route.snapshot.data.instanceData
-
+    this.serverStats = serverStats
     this.serverConfig = serverConfig
 
-    this.languages = languages
-    this.categories = categories
+    this.aboutHTML = aboutHTML
 
-    this.shortDescription = about.instance.shortDescription
-    this.descriptionContent = about.instance.description
+    this.menuEntries = [
+      {
+        label: $localize`General`,
+        routerLink: '/about/instance/home'
+      }
+    ]
 
-    this.html = await this.instanceService.buildHtml(about)
-
-    this.initialized = true
-  }
-
-  ngAfterViewChecked () {
-    if (this.initialized && window.location.hash && window.location.hash !== this.lastScrollHash) {
-      this.viewportScroller.scrollToAnchor(window.location.hash.replace('#', ''))
-
-      this.lastScrollHash = window.location.hash
+    if (aboutHTML.administrator || aboutHTML.creationReason || aboutHTML.maintenanceLifetime || aboutHTML.businessModel) {
+      this.menuEntries.push({
+        label: $localize`Team`,
+        routerLink: '/about/instance/team'
+      })
     }
-  }
 
-  openContactModal () {
-    return this.contactAdminModal.show()
-  }
+    if (aboutHTML.moderationInformation || aboutHTML.codeOfConduct || serverConfig.blocklist.publicLog.enabled) {
+      this.menuEntries.push({
+        label: $localize`Moderation and code of conduct`,
+        routerLink: '/about/instance/moderation'
+      })
+    }
 
-  onClickCopyLink (anchor: HTMLAnchorElement) {
-    const link = anchor.href
-    copyToClipboard(link)
-    this.notifier.success(link, $localize `Link copied`)
+    // Always displayed, we have the "features found on this instance" table on this page
+    this.menuEntries.push({
+      label: $localize`Technical information`,
+      routerLink: '/about/instance/tech'
+    })
+
+    if (about.instance.support.text) {
+      this.menuEntries.push({
+        label: $localize`Support`,
+        routerLink: '/about/instance/support',
+        // Only used to highlight the menu entry, not to display it
+        isDisplayed: () => false
+      })
+    }
+
+    if (serverConfig.email.enabled && serverConfig.contactForm.enabled) {
+      this.menuEntries.push({
+        label: $localize`Contact`,
+        routerLink: '/about/instance/contact',
+        // Only used to highlight the menu entry, not to display it
+        isDisplayed: () => false
+      })
+    }
   }
 }

@@ -1,16 +1,90 @@
-$icon-font-path: '~@neos21/bootstrap3-glyphicons/assets/fonts/';
-@import '_bootstrap';
+@use "_variables" as *;
+@use "_css-variables" as *;
+@use "_mixins" as *;
+@use "_button-mixins" as *;
+@import "./_bootstrap-variables";
+@import "bootstrap/scss/functions";
+@import "bootstrap/scss/variables";
+@import "bootstrap/scss/maps";
+@import "bootstrap/scss/mixins";
+@import "bootstrap/scss/utilities";
+@import "bootstrap/scss/root";
+@import "bootstrap/scss/reboot";
+@import "bootstrap/scss/type";
+@import "bootstrap/scss/grid";
+@import "bootstrap/scss/forms";
+@import "bootstrap/scss/buttons";
+@import "bootstrap/scss/transitions";
+@import "bootstrap/scss/dropdown";
+@import "bootstrap/scss/button-group";
+@import "bootstrap/scss/nav";
+@import "bootstrap/scss/card";
+@import "bootstrap/scss/accordion";
+@import "bootstrap/scss/alert";
+@import "bootstrap/scss/close";
+@import "bootstrap/scss/modal";
+@import "bootstrap/scss/tooltip";
+@import "bootstrap/scss/popover";
+@import "bootstrap/scss/spinners";
 
-@import '_variables';
-@import '_mixins';
+/* stylelint-disable-next-line at-rule-empty-line-before */
+@import "bootstrap/scss/helpers/clearfix";
+@import "bootstrap/scss/helpers/color-bg";
+// @import 'bootstrap/scss/helpers/colored-links';
+@import "bootstrap/scss/helpers/focus-ring";
+@import "bootstrap/scss/helpers/icon-link";
+@import "bootstrap/scss/helpers/ratio";
+@import "bootstrap/scss/helpers/position";
+@import "bootstrap/scss/helpers/stacks";
+@import "bootstrap/scss/helpers/visually-hidden";
+@import "bootstrap/scss/helpers/stretched-link";
+@import "bootstrap/scss/helpers/text-truncation";
+@import "bootstrap/scss/helpers/vr";
 
-// Thanks https://gist.github.com/alexandrevicenzi/680147013e902a4eaa5d
-.glyphicon-refresh-animate {
-  animation: spin 0.7s infinite linear;
+/* stylelint-disable-next-line at-rule-empty-line-before */
+@import "bootstrap/scss/utilities/api";
+
+body {
+  --bs-border-color-translucent: #{pvar(--input-border-color)};
+
+  --bs-body-color: #{pvar(--fg)};
+  --bs-body-bg: #{pvar(--bg)};
+
+  --bs-emphasis-color: #{pvar(--fg)};
 }
 
-.glyphicon-duplicate {
-  font-size: 70%;
+.accordion {
+  --bs-accordion-color: #{pvar(--fg)};
+  --bs-accordion-bg: #{pvar(--bg)};
+
+  --bs-accordion-btn-color: var(--bs-accordion-color);
+  --bs-accordion-btn-bg: var(--bs-accordion-bg);
+}
+
+.popover {
+  --bs-popover-bg: #{pvar(--bg-secondary-450)};
+  --bs-popover-body-color: #{pvar(--fg-300)};
+  --bs-popover-header-color: #{pvar(--fg-400)};
+
+  font-family: $main-fonts;
+}
+
+.btn {
+  --bs-btn-active-color: inherit;
+  --bs-btn-active-bg: inherit;
+  --bs-btn-active-border-color: inherit;
+}
+
+.btn-outline-primary {
+  --bs-btn-color: #{pvar(--fg)};
+  --bs-btn-border-color: #{pvar(--bg-secondary-450)};
+  --bs-btn-hover-color: #fff;
+  --bs-btn-hover-bg: #{pvar(--bg-secondary-450)};
+  --bs-btn-hover-border-color: #{pvar(--bg-secondary-450)};
+
+  --bs-btn-active-color: #{pvar(--on-primary)};
+  --bs-btn-active-bg: #{pvar(--primary)};
+  --bs-btn-active-border-color: #{pvar(--primary)};
 }
 
 .flex-auto {
@@ -18,64 +92,36 @@ $icon-font-path: '~@neos21/bootstrap3-glyphicons/assets/fonts/';
 }
 
 .c-hand {
-  cursor: pointer;
+  cursor: pointer !important;
 }
 
-@keyframes spin {
-  from {
-    transform: scale(1) rotate(0deg);
-  }
-
-  to {
-    transform: scale(1) rotate(360deg);
+.btn-group-vertical {
+  label {
+    margin-bottom: 0;
   }
 }
 
-/* rules for dropdowns excepts when in button group, to avoid impacting the dropdown-toggle */
-.dropdown {
-  z-index: z(dropdown) !important;
-}
-
-.list-overflow-menu,
-.parent-entry {
-  z-index: z(header) - 1 !important;
-}
-
-.btn-group,
-.dropdown-root,
-.action-dropdown,
-.input-group-prepend,
-.column-toggle {
-  z-index: inherit !important;
-}
-
-.btn-group > .btn:not(:first-child) {
-  border-top-left-radius: 0 !important;
-  border-bottom-left-radius: 0 !important;
-}
+// ---------------------------------------------------------------------------
+// Dropdown
+// ---------------------------------------------------------------------------
 
 .dropdown-menu {
-  z-index: z(dropdown) + 1 !important;
+  --bs-dropdown-link-hover-bg: #{pvar(--bg-secondary-400)};
+  --bs-dropdown-link-color: #{pvar(--fg)};
+  --bs-dropdown-border-color: #{pvar(--input-border-color)};
+  --bs-dropdown-header-color: #{pvar(--fg-350)};
 
-  border-radius: 3px;
-  box-shadow: 0 2px 2px 0 rgba(0, 0, 0, 0.14), 0 1px 5px 0 rgba(0, 0, 0, 0.12), 0 3px 1px -2px rgba(0, 0, 0, 0.2);
-  font-size: 15px;
+  text-align: start;
 
   .dropdown-header {
-    padding-left: 1rem;
+    @include padding-left(1rem);
   }
 
   .dropdown-item {
-    padding: 3px 15px;
-
     &.active {
-      color: pvar(--mainBackgroundColor) !important;
-      background-color: pvar(--mainHoverColor);
-      opacity: 0.9;
-    }
-
-    &:active {
-      color: pvar(--mainForegroundColor) !important;
+      color: pvar(--on-primary) !important;
+      background-color: pvar(--primary);
+      font-weight: $font-semibold;
     }
 
     &::after {
@@ -83,30 +129,47 @@ $icon-font-path: '~@neos21/bootstrap3-glyphicons/assets/fonts/';
     }
   }
 
-  button {
-    @include disable-default-a-behaviour;
-  }
-
   a {
     @include disable-default-a-behaviour;
-    color: #000 !important;
   }
 }
 
-.badge {
-  line-height: 1.1;
+.dropdown-divider {
+  margin: 0.3rem 0;
 }
+
+.disable-dropdown-caret::after {
+  display: none;
+}
+
+// ---------------------------------------------------------------------------
+// Alert
+// ---------------------------------------------------------------------------
+
+.alert {
+  p:last-child {
+    margin-bottom: 0;
+  }
+}
+
+.alert-link {
+  &:hover {
+    opacity: 0.8;
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Modal
+// ---------------------------------------------------------------------------
 
 @media screen and (min-width: #{breakpoint(md)}) {
   .modal::before {
     vertical-align: middle;
-    content: ' ';
+    content: " ";
     height: 100%;
   }
 
   .modal-dialog {
-    text-align: left;
-
     &:not(.modal-lg):not(.modal-xl) {
       min-width: 500px;
       width: 40vw;
@@ -116,51 +179,44 @@ $icon-font-path: '~@neos21/bootstrap3-glyphicons/assets/fonts/';
 }
 
 .modal {
-  text-align: center;
+  @include define-input-css-variables-in-modal;
 
   .modal-content {
-    background-color: pvar(--mainBackgroundColor);
     word-break: break-word;
   }
 
   .modal-header {
     border-bottom: 0;
     margin-bottom: 5px;
+    padding: 1.5rem $modal-inner-padding;
 
     .modal-title {
       font-size: 20px;
       font-weight: $font-semibold;
+
+      @include margin-right(auto);
     }
 
     my-global-icon {
-      @include icon(22px);
-
-      position: relative;
-      top: 5px;
-      float: right;
-
-      margin: 0;
-      padding: 0;
       opacity: 0.5;
 
-      &[iconName=cross] { /* stylelint-disable-line selector-max-compound-selectors */
-        @include icon(16px);
+      @include global-icon-size(22px);
 
-        top: -3px;
+      &:hover {
+        opacity: 0.8;
       }
     }
   }
 
   .inputs {
     margin-bottom: 0;
-    text-align: right;
+    text-align: end;
 
-    > .peertube-button:not(:first-child) {
-      margin-left: 10px;
+    > *:not(:first-child) {
+      @include margin-left(10px);
     }
   }
 }
-
 
 // On desktop browsers, make the content and header horizontally sticked to right not move when modal open and close
 .modal-open {
@@ -168,200 +224,125 @@ $icon-font-path: '~@neos21/bootstrap3-glyphicons/assets/fonts/';
   width: 100vw; // Make sure the content fits all the available width
 }
 
-// On touchscreen devices, simply overflow: hidden to avoid detached overlay on scroll
-@media (hover: none) and (pointer: coarse) {
-  .modal-open,
-  .menu-open {
-    overflow: hidden !important;
-  }
+// ---------------------------------------------------------------------------
+// Nav
+// ---------------------------------------------------------------------------
 
-  // On touchscreen devices display content overlay when opened menu
-  .menu-open {
-    .main-col {
-      &::before {
-        background-color: #000;
-        width: 100vw;
-        height: 100vh;
-        opacity: 0.75;
-        content: '';
-        display: block;
-        position: fixed;
-        z-index: z('menu') - 1;
-      }
-    }
+.nav {
+  .nav-link,
+  .unavailable-nav-link {
+    display: flex;
+    align-items: center;
+    min-height: 30px;
+    padding-top: 0;
+    padding-bottom: 0;
   }
 }
 
-// Nav customizations
-.nav .nav-link {
-  display: flex !important;
-  align-items: center;
-  height: 30px !important;
-  padding: 10px 15px !important;
-}
-
-.nav.nav-pills {
-  font-size: 16px !important;
-  font-weight: $font-semibold !important;
+.nav-tabs {
+  .nav-link,
+  .unavailable-nav-link {
+    color: pvar(--fg-100);
+    font-weight: $font-semibold;
+    border: 0;
+    border-bottom: 2px solid transparent;
+  }
 
   .nav-link {
-    opacity: 0.6 !important;
+    @include disable-default-a-behaviour;
+
+    &.active {
+      background-color: transparent !important;
+      border-bottom-color: pvar(--border-primary);
+    }
 
     &.active,
     &:hover,
     &:active,
     &:focus {
-      opacity: 1 !important;
+      opacity: 1;
+      color: pvar(--fg);
     }
   }
-
-  a {
-    @include disable-default-a-behaviour;
-
-    color: pvar(--mainForegroundColor);
-  }
 }
 
-.nav-tabs .nav-link {
-  @include disable-default-a-behaviour;
-
-  color: pvar(--mainForegroundColor);
-  font-weight: $font-semibold;
-  border: 0;
-  border-bottom: 2px solid transparent;
-  opacity: 0.6;
-
-  &.active {
-    color: pvar(--mainForegroundColor);
-    background-color: pvar(--mainBackgroundColor) !important;
-    border-bottom-color: pvar(--mainColor);
-  }
-
-  &.active,
-  &:hover,
-  &:active,
-  &:focus {
-    opacity: 1;
-  }
-}
+// ---------------------------------------------------------------------------
+// Card, collapse and accordion
+// ---------------------------------------------------------------------------
 
 .card {
-  background-color: pvar(--mainBackgroundColor);
+  background-color: pvar(--bg);
   border-color: #dee2e6;
 }
 
-.collapse-transition {
-  // Animation when we show/hide the filters
-  transition: max-height 0.3s;
-  display: block !important;
-  overflow: hidden !important;
-  max-height: 0;
+.accordion-button {
+  font-size: 18px;
 
-  &.show {
-    max-height: 1500px;
+  my-global-icon {
+    color: pvar(--secondary-icon-color);
   }
-}
 
-.dropdown-divider {
-  margin: 0.3rem 0;
-}
+  &:not(.collapsed) {
+    font-weight: $font-bold;
 
-ngb-modal-backdrop {
-  z-index: z(modal) - 1 !important;
-}
-
-ngb-modal-window {
-  z-index: z(modal) !important;
-}
-
-ngb-popover-window {
-  z-index: z(popover) !important;
-}
-
-ngb-tooltip-window {
-  z-index: z(tooltip) !important;
-}
-
-.btn-outline-secondary {
-  border-color: $input-border-color;
-
-  &:focus-within,
-  &:focus,
-  &:hover {
-    color: #fff;
-    background-color: #6c757d;
-  }
-}
-
-.btn-outline-tertiary {
-  color: pvar(--secondaryColor);
-  border-color: pvar(--secondaryColor);
-
-  &:focus-within,
-  &:focus,
-  &:hover {
-    color: pvar(--mainBackgroundColor);
-    background-color: pvar(--secondaryColor);
-  }
-}
-
-// input box-shadow on focus
-.form-control {
-  font-size: 15px;
-  color: pvar(--mainForegroundColor);
-  background-color: pvar(--inputBackgroundColor);
-  outline: none;
-
-  &:focus-within,
-  &:focus {
-    box-shadow: #{$focus-box-shadow-form} pvar(--mainColorLightest);
-
-    &.input-error {
-      box-shadow: #{$focus-box-shadow-form} #{scale-color($red, $alpha: -75%)};
+    my-global-icon {
+      color: pvar(--fg);
     }
   }
 }
 
+// ---------------------------------------------------------------------------
+// Buttons & form controls
+// ---------------------------------------------------------------------------
+
+.btn:not(.btn-sm) {
+  font-size: $button-font-size;
+}
+
 .input-group {
-  > .form-control {
-    flex: initial;
+  > .btn,
+  > .input-group-text {
+    padding-top: 4px;
+    padding-bottom: 4px;
   }
 
-  input.form-control {
-    width: unset !important;
-    flex-grow: 1;
+  > .input-group-text {
+    line-height: normal;
+    opacity: 0.9;
   }
 
-  .input-group-prepend + input {
-    border-top-left-radius: 0 !important;
-    border-bottom-left-radius: 0 !important;
+  .input-group-text > .dropdown-toggle {
+    display: flex;
   }
 }
 
-.has-feedback.has-clear {
-  position: relative;
+.input-group,
+.btn-group {
+  .last-in-group {
+    border-top-right-radius: pvar(--input-border-radius) !important;
+    border-bottom-right-radius: pvar(--input-border-radius) !important;
+  }
 
+  .first-in-group {
+    border-top-left-radius: pvar(--input-border-radius) !important;
+    border-bottom-left-radius: pvar(--input-border-radius) !important;
+  }
+}
+
+.has-clear {
   input {
-    padding-right: 1.5rem !important;
+    padding-inline-end: 30px !important;
   }
 
   .form-control-clear {
-    color: rgba(0, 0, 0, 0.4);
-    /*
-     * Enable pointer events as they have been disabled since Bootstrap 3.3
-     * See https://github.com/twbs/bootstrap/pull/14104
-     */
-    pointer-events: all;
-    display: flex;
-    justify-content: center;
-    align-items: center;
     position: absolute;
-    right: .5rem;
-    height: 95%;
-    font-size: 14px;
+    right: 0.5rem;
+    top: 0;
+    bottom: 0;
+    opacity: 0.4;
 
     &:hover {
-      color: rgba(0, 0, 0, 0.7);
+      opacity: 0.7;
       cursor: pointer;
     }
   }
@@ -371,24 +352,66 @@ ngb-tooltip-window {
   }
 }
 
-.callout {
-  padding: 1.25rem;
-  border: 1px solid #eee;
-  border-radius: .25rem;
+.text-truncate {
+  // Prevent invalid height in parent: https://stackoverflow.com/a/22425601
+  vertical-align: top;
+}
 
-  > label {
-    position: relative;
-    top: -5px;
-    left: -10px;
-    color: #6c757d !important;
+// ---------------------------------------------------------------------------
+// RTL compatibility
+// ---------------------------------------------------------------------------
+
+:root[dir="rtl"] {
+  .modal .modal-header .modal-title {
+    margin-inline-end: auto;
+    margin-right: unset;
   }
 
-  &:not(.callout-light) {
-    border-left-width: .25rem;
+  .input-group {
+    > :not(:first-child):not(.dropdown-menu):not(.valid-tooltip):not(.valid-feedback):not(.invalid-tooltip):not(.invalid-feedback) {
+      border-top-right-radius: 0;
+      border-bottom-right-radius: 0;
+
+      border-top-left-radius: var(--bs-border-radius);
+      border-bottom-left-radius: var(--bs-border-radius);
+    }
+
+    &:not(.has-validation) > :not(:last-child):not(.dropdown-toggle):not(.dropdown-menu):not(.form-floating) {
+      border-top-left-radius: 0;
+      border-bottom-left-radius: 0;
+
+      border-top-right-radius: var(--bs-border-radius);
+      border-bottom-right-radius: var(--bs-border-radius);
+    }
   }
 
-  &.callout-info {
-    border-color: pvar(--mainColorLightest);
-    border-left-color: pvar(--mainColor);
+  .btn-group {
+    > .btn:not(:last-child):not(.dropdown-toggle),
+    > .btn.dropdown-toggle-split:first-child,
+    > .btn-group:not(:last-child) > .btn {
+      border-top-right-radius: var(--bs-border-radius);
+      border-bottom-right-radius: var(--bs-border-radius);
+
+      border-start-end-radius: 0;
+      border-end-end-radius: 0;
+    }
+
+    > .btn:nth-child(n+3),
+    > :not(.btn-check) + .btn,
+    > .btn-group:not(:first-child) > .btn {
+      border-top-left-radius: var(--bs-border-radius);
+      border-bottom-left-radius: var(--bs-border-radius);
+
+      border-start-start-radius: 0 !important;
+      border-end-start-radius: 0 !important;
+    }
+
+    > :not(.btn-check:first-child) + .btn,
+    > .btn-group:not(:first-child) {
+      margin-left: 0;
+      margin-right: 0;
+
+      margin-inline-start: calc(-1 * var(--bs-border-width));
+    }
   }
 }

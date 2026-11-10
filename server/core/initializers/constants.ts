@@ -1,0 +1,1837 @@
+import { LIVE_SEGMENT_EXTENSION, randomInt } from '@peertube/peertube-core-utils'
+import {
+  AbuseState,
+  AbuseStateType,
+  ActivityPubActorType,
+  ActorImageType,
+  ActorImageType_Type,
+  ChangeOwnershipState,
+  ChangeOwnershipStateType,
+  FollowState,
+  JobType,
+  NSFWPolicyType,
+  PlayerThemeChannelSetting,
+  PlayerThemeVideoSetting,
+  RunnerJobState,
+  RunnerJobStateType,
+  StreamSyncState,
+  StreamSyncStateType,
+  UploadImageType,
+  UploadImageType_Type,
+  UserExportState,
+  UserExportStateType,
+  UserImportState,
+  UserImportStateType,
+  UserRegistrationState,
+  UserRegistrationStateType,
+  VideoAIUsage,
+  VideoAIUsageType,
+  VideoChannelActivityAction,
+  VideoChannelActivityActionType,
+  VideoChannelActivityTarget,
+  VideoChannelActivityTargetType,
+  VideoChannelCollaboratorState,
+  VideoChannelCollaboratorStateType,
+  VideoCommentPolicy,
+  VideoCommentPolicyType,
+  VideoCommercialContent,
+  VideoCommercialContentType,
+  VideoEmbedPrivacyPolicy,
+  VideoEmbedPrivacyPolicyType,
+  VideoImportState,
+  VideoImportStateType,
+  VideoLicence,
+  VideoLicenceType,
+  VideoPlaylistPrivacy,
+  VideoPlaylistPrivacyType,
+  VideoPlaylistType,
+  VideoPlaylistType_Type,
+  VideoPrivacy,
+  VideoPrivacyType,
+  VideoRateType,
+  VideoRecommendationScope,
+  VideoRecommendationScopeType,
+  VideoResolution,
+  VideoState,
+  VideoStateType
+} from '@peertube/peertube-models'
+import { isDevInstance, isTestInstance, isTestOrDevInstance, parseDurationToMs, root, sanitizeUrl } from '@peertube/peertube-node-utils'
+import { RepeatOptions } from 'bullmq'
+import { randomBytes } from 'crypto'
+import { readJsonSync } from 'fs-extra/esm'
+import invert from 'lodash-es/invert.js'
+import { join } from 'path'
+// Do not use barrels, remain constants as independent as possible
+import { availableParallelism, cpus } from 'os'
+import { CONFIG, registerConfigChangedHandler } from './config.js'
+import { buildInstanceHost, buildRemoteHttpScheme, buildRemoteWsScheme } from './config/shared-config.js'
+
+// ---------------------------------------------------------------------------
+
+export const LAST_MIGRATION_VERSION = 1200
+
+// ---------------------------------------------------------------------------
+
+export const API_VERSION = 'v1'
+export const PEERTUBE_VERSION: string = readJsonSync(join(root(), 'package.json')).version
+
+export const PAGINATION = {
+  GLOBAL: {
+    COUNT: {
+      DEFAULT: 15,
+      MAX: 100
+    }
+  },
+  OUTBOX: {
+    COUNT: {
+      MAX: 50
+    }
+  }
+}
+
+export const VIDEO_RECOMMENDATIONS = {
+  COUNT: {
+    DEFAULT: 10,
+    MAX: 30
+  },
+  EXCLUDE_VIDEO_IDS: {
+    MAX: 50
+  }
+}
+
+// Comment trees are truncated so we don't have to build/send/render a whole thread at once
+export const VIDEO_COMMENTS_TREE = {
+  DEPTH: {
+    DEFAULT: 5,
+    MAX: 10
+  },
+  REPLIES_PER_LEVEL: {
+    DEFAULT: 10,
+    MAX: 30
+  },
+  MAX_COMMENTS_PER_REQUEST: 300,
+  // A tree can make the database walk through `count * (repliesPerLevel ^ maxDepth - 1) / (repliesPerLevel - 1)`
+  // comments before we truncate it to MAX_COMMENTS_PER_REQUEST
+  MAX_SEARCHED_COMMENTS: 2_000_000
+}
+
+export const WEBSERVER = {
+  URL: '',
+  HOST: '',
+  SCHEME: '',
+  WS: '',
+  HOSTNAME: '',
+  PORT: 0,
+
+  RTMP_URL: '',
+  RTMPS_URL: '',
+
+  RTMP_BASE_LIVE_URL: '',
+  RTMPS_BASE_LIVE_URL: ''
+}
+
+// Custom tracker config keyword to specify the local tracker built-in in PeerTube
+export const LOCAL_TRACKER_URLS_KEYWORD = 'local'
+
+// Sortable columns per schema
+export const SORTABLE_COLUMNS = {
+  ADMIN_USERS: [ 'id', 'username', 'videoQuotaUsed', 'createdAt', 'lastLoginDate', 'role' ],
+  USER_SUBSCRIPTIONS: [ 'id', 'createdAt', 'channelUpdatedAt' ],
+  ACCOUNTS: [ 'createdAt' ],
+  JOBS: [ 'createdAt' ],
+  VIDEO_CHANNELS: [ 'id', 'name', 'updatedAt', 'createdAt' ],
+  VIDEO_IMPORTS: [ 'createdAt' ],
+  VIDEO_CHANNEL_SYNCS: [ 'externalChannelUrl', 'videoChannel', 'createdAt', 'lastSyncAt', 'state' ],
+
+  VIDEO_COMMENT_THREADS: [ 'createdAt', 'totalReplies' ],
+  VIDEO_COMMENTS: [ 'createdAt' ],
+
+  VIDEO_PASSWORDS: [ 'createdAt' ],
+  CHANGE_OWNERSHIP: [ 'createdAt' ],
+
+  VIDEO_RATES: [ 'createdAt' ],
+  BLACKLISTS: [ 'id', 'name', 'duration', 'views', 'likes', 'dislikes', 'uuid', 'createdAt' ],
+
+  INSTANCE_FOLLOWERS: [ 'createdAt', 'state', 'score' ],
+  INSTANCE_FOLLOWING: [ 'createdAt', 'redundancyAllowed', 'state' ],
+  ACCOUNT_FOLLOWERS: [ 'createdAt' ],
+  CHANNEL_FOLLOWERS: [ 'createdAt' ],
+
+  USER_REGISTRATIONS: [ 'createdAt', 'state' ],
+
+  AUDIT_LOGS: [ 'createdAt' ],
+
+  TOKEN_SESSIONS: [ 'createdAt' ],
+
+  RUNNERS: [ 'createdAt' ],
+  RUNNER_REGISTRATION_TOKENS: [ 'createdAt' ],
+  RUNNER_JOBS: [ 'updatedAt', 'createdAt', 'priority', 'state', 'progress' ],
+
+  VIDEOS: [
+    'name',
+    'duration',
+    'createdAt',
+    'publishedAt',
+    'originallyPublishedAt',
+    'views',
+    'likes',
+    'comments',
+    'trending',
+    'hot',
+    'best',
+    'localVideoFilesSize',
+    'match'
+  ],
+
+  // Don't forget to update peertube-search-index with the same values
+  VIDEOS_SEARCH: [ 'name', 'duration', 'createdAt', 'publishedAt', 'originallyPublishedAt', 'views', 'likes', 'match', 'hot' ],
+  VIDEO_CHANNELS_SEARCH: [ 'match', 'displayName', 'createdAt' ],
+  VIDEO_PLAYLISTS_SEARCH: [ 'match', 'displayName', 'createdAt' ],
+
+  ABUSES: [ 'id', 'createdAt', 'state' ],
+
+  ACCOUNTS_BLOCKLIST: [ 'createdAt' ],
+  SERVERS_BLOCKLIST: [ 'createdAt' ],
+  BLOCKLIST_SUBSCRIPTIONS: [ 'name', 'createdAt', 'lastSyncAt' ],
+
+  WATCHED_WORDS_LISTS: [ 'createdAt', 'updatedAt', 'listName' ],
+  WATCHED_WORDS_SUBSCRIPTIONS: [ 'name', 'createdAt', 'lastSyncAt' ],
+
+  USER_NOTIFICATIONS: [ 'createdAt', 'read' ],
+
+  VIDEO_PLAYLISTS: [ 'name', 'displayName', 'createdAt', 'updatedAt', 'videoChannelPosition' ],
+
+  PLUGINS: [ 'name', 'createdAt', 'updatedAt' ],
+
+  AVAILABLE_PLUGINS: [ 'npmName', 'popularity', 'trending' ],
+
+  VIDEO_REDUNDANCIES: [ 'name' ],
+
+  VIDEO_CHANNEL_ACTIVITIES: [ 'createdAt' ],
+
+  LIVE_SESSIONS: [ 'startDate' ]
+}
+
+// Search engines limit a sitemap file to 50,000 URLs and 50MB
+export const SITEMAP = {
+  // A video entry can reach ~12KB
+  VIDEOS_PER_PAGE: 2000,
+  ACTORS_PER_PAGE: 50000,
+
+  MAX_PAGE: 2_000_000
+}
+
+export const ROUTE_CACHE_LIFETIME = {
+  FEEDS: '15 minutes',
+  ROBOTS: '2 hours',
+  SITEMAP: '1 day',
+  SECURITYTXT: '2 hours',
+  NODEINFO: '10 minutes',
+  DNT_POLICY: '1 week',
+  ACTIVITY_PUB: {
+    VIDEOS: '1 second' // 1 second, cache concurrent requests after a broadcast for example
+  },
+  STATS: '4 hours',
+  WELL_KNOWN: '1 day'
+}
+
+// ---------------------------------------------------------------------------
+
+// Number of points we add/remove after a successful/bad request
+export const ACTOR_FOLLOW_SCORE = {
+  PENALTY: -1000,
+  BONUS: 1000,
+  BASE: 5000,
+  MAX: 10000
+}
+
+export const FOLLOW_STATES: { [id: string]: FollowState } = {
+  PENDING: 'pending',
+  ACCEPTED: 'accepted',
+  REJECTED: 'rejected'
+}
+
+export const REMOTE_SCHEME = {
+  HTTP: buildRemoteHttpScheme(),
+  WS: buildRemoteWsScheme()
+}
+
+// ---------------------------------------------------------------------------
+
+export const JOB_ATTEMPTS: { [id in JobType]: number } = {
+  'build-automatic-tags': 1,
+  'build-object-automatic-tags': 2,
+  'activitypub-http-broadcast': 1,
+  'activitypub-http-broadcast-parallel': 1,
+  'activitypub-http-unicast': 1,
+  'activitypub-http-fetcher': 2,
+  'activitypub-follow': 5,
+  'activitypub-cleaner': 1,
+  'video-file-import': 1,
+  'video-transcoding': 1,
+  'video-import': 1,
+  'email': 5,
+  'actor-keys': 3,
+  'videos-stats': 1,
+  'activitypub-refresher': 1,
+  'video-redundancy': 1,
+  'video-live-ending': 1,
+  'video-studio-edition': 1,
+  'video-duplicate': 1,
+  'video-files-lifecycle': 1,
+  'manage-video-torrent': 1,
+  'video-channel-import': 1,
+  'after-video-channel-import': 1,
+  'move-to-object-storage': 3,
+  'move-to-file-system': 3,
+  'transcoding-job-builder': 1,
+  'generate-video-storyboard': 1,
+  'notify': 1,
+  'federate-video': 1,
+  'create-user-export': 1,
+  'import-user-archive': 1,
+  'video-transcription': 2
+}
+// Excluded keys are jobs that can be configured by admins
+export const JOB_CONCURRENCY: { [id in Exclude<JobType, 'video-transcoding' | 'video-import'>]: number } = {
+  'build-automatic-tags': 1,
+  // Auto taggers can be plugins calling a slow external service
+  'build-object-automatic-tags': 5,
+  'activitypub-http-broadcast': 1,
+  'activitypub-http-broadcast-parallel': 30,
+  'activitypub-http-unicast': 30,
+  'activitypub-http-fetcher': 3,
+  'activitypub-cleaner': 1,
+  'activitypub-follow': 1,
+  'video-file-import': 1,
+  'email': 5,
+  'actor-keys': 1,
+  'videos-stats': 1,
+  'activitypub-refresher': 1,
+  'video-redundancy': 1,
+  'video-live-ending': 10,
+  'video-studio-edition': 1,
+  'video-duplicate': 3,
+  'video-files-lifecycle': 1, // Keep it to 1 so we don't delete/move many files at the same time
+  'manage-video-torrent': 1, // Keep it to 1 to prevent concurrency issues
+  'move-to-object-storage': 1,
+  'move-to-file-system': 1,
+  'video-channel-import': 1,
+  'after-video-channel-import': 1,
+  'transcoding-job-builder': 1,
+  'generate-video-storyboard': 1,
+  'notify': 5,
+  'federate-video': 3,
+  'create-user-export': 1,
+  'import-user-archive': 1,
+  'video-transcription': 1
+}
+export const JOB_TTL: { [id in JobType]: number } = {
+  'build-automatic-tags': 60000 * 60 * 24 * 7, // 7 days: plugin auto taggers can be slow and this job rebuilds every object
+  'build-object-automatic-tags': 1000 * 60 * 30, // 30 minutes
+  'activitypub-http-broadcast': 60000 * 10, // 10 minutes
+  'activitypub-http-broadcast-parallel': 60000 * 10, // 10 minutes
+  'activitypub-http-unicast': 60000 * 10, // 10 minutes
+  'activitypub-http-fetcher': 1000 * 3600 * 10, // 10 hours
+  'activitypub-follow': 60000 * 10, // 10 minutes
+  'activitypub-cleaner': 1000 * 3600, // 1 hour
+  'video-file-import': 1000 * 3600, // 1 hour
+  'video-transcoding': 1000 * 3600 * 48, // 2 days, transcoding could be long
+  'video-studio-edition': 1000 * 3600 * 10, // 10 hours
+  'video-duplicate': 1000 * 60 * 60 * 3, // 3 hours
+  'video-files-lifecycle': 1000 * 3600, // 1 hour
+  'video-import': CONFIG.IMPORT.VIDEOS.TIMEOUT,
+  'email': 60000 * 10, // 10 minutes
+  'actor-keys': 60000 * 20, // 20 minutes
+  'videos-stats': undefined, // Unlimited
+  'activitypub-refresher': 60000 * 10, // 10 minutes
+  'video-redundancy': CONFIG.REDUNDANCY.VIDEOS.TIMEOUT,
+  'video-live-ending': 1000 * 60 * 10, // 10 minutes
+  'generate-video-storyboard': 1000 * 3600 * 6, // 6 hours
+  'manage-video-torrent': 1000 * 3600 * 3, // 3 hours
+  'move-to-object-storage': 1000 * 60 * 60 * 3, // 3 hours
+  'move-to-file-system': 1000 * 60 * 60 * 3, // 3 hours
+  'video-channel-import': 1000 * 60 * 60 * 4, // 4 hours
+  'after-video-channel-import': 60000 * 5, // 5 minutes
+  'transcoding-job-builder': 60000, // 1 minute
+  'notify': 60000 * 5, // 5 minutes
+  'federate-video': 60000 * 5, // 5 minutes,
+  'create-user-export': 60000 * 60 * 24, // 24 hours
+  'import-user-archive': 60000 * 60 * 24, // 24 hours
+  'video-transcription': CONFIG.VIDEO_TRANSCRIPTION.TIMEOUT
+}
+export const REPEAT_JOBS: { [id in JobType]?: RepeatOptions } = {
+  'videos-stats': {
+    pattern: randomInt(1, 20) + ' * * * *' // Between 1-20 minutes past the hour
+  },
+  'activitypub-cleaner': {
+    pattern: '30 5 * * ' + randomInt(0, 7) // 1 time per week (random day) at 5:30 AM
+  }
+}
+export const JOB_PRIORITY = {
+  STORYBOARD: 95,
+  REQUIRED_TRANSCODING: 100,
+  OPTIONAL_TRANSCODING: 10000,
+  VIDEO_STUDIO: 150,
+  TRANSCRIPTION: 200,
+  // After the torrent creation of new videos, that have no priority
+  TORRENT_TRACKERS_UPDATE: 1000
+}
+
+export const JOB_REMOVAL_OPTIONS = {
+  COUNT: 10000, // Max jobs to store
+
+  SUCCESS: { // Success jobs
+    'DEFAULT': parseDurationToMs('2 days'),
+
+    'activitypub-http-broadcast-parallel': parseDurationToMs('10 minutes'),
+    'activitypub-http-unicast': parseDurationToMs('1 hour'),
+    'videos-stats': parseDurationToMs('3 hours'),
+    'activitypub-refresher': parseDurationToMs('10 hours')
+  },
+
+  FAILURE: { // Failed job
+    DEFAULT: parseDurationToMs('7 days')
+  }
+}
+
+export const JOB_STALLED_DETECTION = {
+  LOCK_DURATION: 30000, // BullMQ default
+  STALLED_INTERVAL: 30000 // BullMQ default
+}
+
+export const VIDEO_IMPORT_TIMEOUT = Math.floor(JOB_TTL['video-import'] * 0.9)
+export const VIDEO_REDUNDANCY_TIMEOUT = Math.floor(JOB_TTL['video-redundancy'] * 0.9)
+
+export const RUNNER_JOBS = {
+  MAX_FAILURES: 5,
+  LAST_CONTACT_UPDATE_INTERVAL: 30000,
+  SUCCESS_REQUEST_MAX_COMPLETION_WAIT: 30000,
+  // A job still in COMPLETING after that is considered lost and is errored
+  STALLED_COMPLETING_JOB_MS: 1000 * 3600 * 6 // 6 hours
+}
+
+// ---------------------------------------------------------------------------
+
+export const BROADCAST_CONCURRENCY = 30 // How many requests in parallel we do in activitypub-http-broadcast job
+
+export const INBOX_CONCURRENCY = {
+  // Views and downloads are frequent and cheap
+  VIEWS_AND_DOWNLOADS: 10,
+  // Most of the time is spent fetching remote objects, but keep it low because we can have many concurrent database access
+  OTHERS: 3
+}
+
+export const INBOX_WAITING_SYNC_THROTTLE_MS = 1000
+
+export const CRAWL_REQUEST_CONCURRENCY = 1 // How many requests in parallel to fetch remote data (likes, shares...)
+
+export const AP_CLEANER = {
+  CONCURRENCY: 10, // How many requests in parallel we do in activitypub-cleaner job
+  UNAVAILABLE_TRESHOLD: 3, // How many attempts we do before removing an unavailable remote resource
+  PERIOD: parseDurationToMs('1 week') // /!\ Has to be sync with REPEAT_JOBS
+}
+
+export const REQUEST_TIMEOUTS = {
+  DEFAULT: 7000, // 7 seconds
+  FILE: 30000, // 30 seconds
+  VIDEO_FILE: 60000, // 1 minute
+  REDUNDANCY: JOB_TTL['video-redundancy']
+}
+
+// Container runtimes send a SIGKILL if we take too long to exit (docker waits 10 seconds, kubernetes 30 seconds)
+export const SHUTDOWN_TIMEOUTS = {
+  // Time we let in flight HTTP requests complete before destroying their sockets
+  HTTP_CONNECTIONS: 2000, // 2 seconds
+  // Time we let the inbox process the activities it already received on server shutdown
+  INBOX_DRAIN: 4000, // 4 seconds
+  // Time we let the whole graceful shutdown complete before exiting anyway
+  GLOBAL: 8000 // 8 seconds
+}
+
+export const SCHEDULER_INTERVALS_MS = {
+  RUNNER_JOB_WATCH_DOG: Math.min(CONFIG.REMOTE_RUNNERS.STALLED_JOBS.VOD, CONFIG.REMOTE_RUNNERS.STALLED_JOBS.LIVE),
+  ACTOR_FOLLOW_SCORES: 60000 * 60 * 20, // 20 hours
+  REMOVE_OLD_JOBS: 60000 * 60, // 1 hour
+  UPDATE_VIDEOS: 60000, // 1 minute
+  UPDATE_TOKEN_SESSION: 60000, // 1 minute
+  YOUTUBE_DL_UPDATE: 60000 * 60 * 24, // 1 day
+  YOUTUBE_DL_COOKIES_WATCH: 60000, // 1 minute
+  GEO_IP_UPDATE: 60000 * 60 * 24, // 1 day
+  VIDEO_STATS_BUFFER_UPDATE: CONFIG.VIEWS.VIDEOS.LOCAL_BUFFER_UPDATE_INTERVAL,
+  CHECK_PLUGINS: CONFIG.PLUGINS.INDEX.CHECK_LATEST_VERSIONS_INTERVAL,
+  CHECK_PEERTUBE_VERSION: 60000 * 60 * 24, // 1 day
+  AUTO_FOLLOW_INDEX_INSTANCES: 60000 * 60 * 24, // 1 day
+  REMOVE_OLD_STATS: 60000 * 60 * 24, // 1 day
+  REMOVE_OLD_HISTORY: 60000 * 60 * 24, // 1 day
+  REMOVE_OLD_AUDIT_LOGS: 60000 * 60 * 24, // 1 day
+  REMOVE_EXPIRED_USER_EXPORTS: 1000 * 3600, // 1 hour
+  UPDATE_INBOX_STATS: 1000 * 60, // 1 minute
+  PROCESS_HEARTBEAT: 1000 * 30, // 30 seconds
+  REMOVE_DANGLING_RESUMABLE_UPLOADS: 60000 * 60, // 1 hour
+  REMOVE_DANGLING_STAGING_FILES: 60000 * 60, // 1 hour
+  CHANNEL_SYNC_CHECK_INTERVAL: CONFIG.IMPORT.VIDEO_CHANNEL_SYNCHRONIZATION.CHECK_INTERVAL,
+  BLOCKLIST_SUBSCRIPTIONS_SYNC: 60000 * 60, // 1 hour
+  WATCHED_WORDS_SUBSCRIPTIONS_SYNC: 60000 * 60, // 1 hour
+  REMOVE_OLD_USER_LOGIN_DEVICES: 60000 * 60 * 24, // 1 day
+  RUN_MIGRATION_SCRIPTS: 60000 * 60 * 12 // 12 hours
+}
+
+export const DATABASE_READ_REPLICAS = {
+  MONITOR_INTERVAL_MS: 1000,
+  ACQUIRE_TIMEOUT_MS: 2000,
+  REDIS_TIMEOUT_MS: 1000
+}
+
+export const MIGRATION_SCRIPTS = {
+  FIRST_RUN_DELAY_MS: 10000
+}
+
+// Devices not seen again after this delay are forgotten, so a login from that IP/user-agent pair will be treated as new again
+export const USER_LOGIN_DEVICE_MAX_AGE = 60000 * 60 * 24 * 365 // 1 year
+
+// ---------------------------------------------------------------------------
+
+export const CONSTRAINTS_FIELDS = {
+  USERS: {
+    NAME: { min: 1, max: 120 }, // Length
+    DESCRIPTION: { min: 3, max: 1000 }, // Length
+    USERNAME: { min: 1, max: 50 }, // Length
+    PASSWORD: { min: CONFIG.USER.PASSWORD_CONSTRAINTS.MIN_LENGTH, max: 50, maxBytes: 72 }, // Limited by bcrypt algorithm
+    VIDEO_QUOTA: { min: -1 },
+    VIDEO_QUOTA_DAILY: { min: -1 },
+    VIDEO_LANGUAGES: { max: 500 }, // Array length
+    VIDEO_CATEGORIES: { max: 500 }, // Array length
+    BLOCKED_REASON: { min: 3, max: 250 } // Length
+  },
+  ABUSES: {
+    REASON: { min: 2, max: 3000 }, // Length
+    MODERATION_COMMENT: { min: 2, max: 3000 } // Length
+  },
+  ABUSE_MESSAGES: {
+    MESSAGE: { min: 2, max: 3000 } // Length
+  },
+  USER_REGISTRATIONS: {
+    REASON_MESSAGE: { min: 2, max: 3000 }, // Length
+    MODERATOR_MESSAGE: { min: 2, max: 3000 } // Length
+  },
+  VIDEO_BLACKLIST: {
+    REASON: { min: 2, max: 300 }, // Length
+    INTERNAL_NOTE: { min: 2, max: 300 } // Length
+  },
+  VIDEO_CHANNELS: {
+    NAME: { min: 1, max: 120 }, // Length
+    DESCRIPTION: { min: 3, max: 1000 }, // Length
+    SUPPORT: { min: 3, max: 1000 }, // Length
+    EXTERNAL_CHANNEL_URL: { min: 3, max: 2000 }, // Length
+    URL: { min: 3, max: 2000 } // Length
+  },
+  VIDEO_CHANNEL_SYNCS: {
+    EXTERNAL_CHANNEL_URL: { min: 3, max: 2000 } // Length
+  },
+  VIDEO_CAPTIONS: {
+    CAPTION_FILE: {
+      EXTNAME: [ '.vtt', '.srt' ],
+      FILE_SIZE: {
+        max: 20 * 1024 * 1024 // 20MB
+      }
+    }
+  },
+  VIDEO_IMPORTS: {
+    URL: { min: 3, max: 2000 }, // Length
+    TORRENT_NAME: { min: 3, max: 255 }, // Length
+    TORRENT_FILE: {
+      EXTNAME: [ '.torrent' ],
+      FILE_SIZE: {
+        max: 1024 * 200 // 200 KB
+      }
+    }
+  },
+  VIDEOS_REDUNDANCY: {
+    URL: { min: 3, max: 2000 } // Length
+  },
+  VIDEO_RATES: {
+    URL: { min: 3, max: 2000 } // Length
+  },
+  VIDEOS: {
+    NAME: { min: 3, max: 120 }, // Length
+    LANGUAGE: { min: 1, max: 10 }, // Length
+    TRUNCATED_DESCRIPTION: { min: 3, max: 250 }, // Length
+    DESCRIPTION: { min: 3, max: 10000 }, // Length
+    NSFW_SUMMARY: { min: 3, max: 250 }, // Length
+    SUPPORT: { min: 3, max: 1000 }, // Length
+    IMAGE: {
+      EXTNAME: [ '.png', '.jpg', '.jpeg', '.webp' ],
+      FILE_SIZE: {
+        max: 8 * 1024 * 1024 // 8MB
+      }
+    },
+    EXTNAME: [] as string[],
+    INFO_HASH: { min: 10, max: 100 },
+    DURATION: { min: 0 }, // Number
+    TAGS: { min: 0, max: 5 }, // Number of total tags
+    TAG: { min: 2, max: 30 }, // Length
+    VIEWS: { min: 0 },
+    LIKES: { min: 0 },
+    DISLIKES: { min: 0 },
+    FILE_SIZE: { min: -1 },
+    PARTIAL_UPLOAD_SIZE: { max: 50 * 1024 * 1024 * 1024 }, // 50GB
+    URL: { min: 3, max: 2000 }, // Length
+    PASSWORD: { min: 2, max: 100 } // Length
+  },
+  VIDEO_SOURCE: {
+    FILENAME: { min: 1, max: 1000 } // Length
+  },
+  VIDEO_PLAYLISTS: {
+    NAME: { min: 1, max: 120 }, // Length
+    DESCRIPTION: { min: 3, max: 1000 }, // Length
+    URL: { min: 3, max: 2000 }, // Length
+    IMAGE: {
+      EXTNAME: [ '.jpg', '.jpeg' ],
+      FILE_SIZE: {
+        max: 8 * 1024 * 1024 // 8MB
+      }
+    }
+  },
+  ACTORS: {
+    PUBLIC_KEY: { min: 10, max: 5000 }, // Length
+    PRIVATE_KEY: { min: 10, max: 5000 }, // Length
+    URL: { min: 3, max: 2000 }, // Length
+    IMAGE: {
+      EXTNAME: [ '.png', '.jpeg', '.jpg', '.gif', '.webp' ],
+      FILE_SIZE: {
+        max: 8 * 1024 * 1024 // 8MB
+      }
+    }
+  },
+  LOGO: {
+    IMAGE: {
+      EXTNAME: [ '.svg', '.png', '.jpeg', '.jpg', '.gif', '.webp' ],
+      FILE_SIZE: {
+        max: 8 * 1024 * 1024 // 8MB
+      }
+    }
+  },
+  VIDEO_EVENTS: {
+    COUNT: { min: 0 }
+  },
+  VIDEO_COMMENTS: {
+    TEXT: { min: 1, max: 10000 }, // Length
+    URL: { min: 3, max: 2000 } // Length
+  },
+  VIDEO_SHARE: {
+    URL: { min: 3, max: 2000 } // Length
+  },
+  CONTACT_FORM: {
+    FROM_NAME: { min: 1, max: 120 }, // Length
+    BODY: { min: 3, max: 5000 } // Length
+  },
+  PLUGINS: {
+    NAME: { min: 1, max: 214 }, // Length
+    DESCRIPTION: { min: 1, max: 20000 } // Length
+  },
+  COMMONS: {
+    URL: { min: 5, max: 2000 } // Length
+  },
+  VIDEO_STUDIO: {
+    TASKS: { min: 1, max: 10 }, // Number of tasks
+    CUT_TIME_START: { min: 0 }, // Value
+    CUT_TIME_END: { min: 1 }, // Value
+    REMOVE_SEGMENT_TIME_START: { min: 0 }, // Value
+    REMOVE_SEGMENT_TIME_END: { min: 1 }, // Value
+    REMOVE_SEGMENTS: { min: 1, max: 10 } // Number of segments per remove-segments task
+  },
+  LOGS: {
+    CLIENT_MESSAGE: { min: 1, max: 1000 }, // Length
+    CLIENT_STACK_TRACE: { min: 1, max: 15000 }, // Length
+    CLIENT_META: { min: 1, max: 15000 }, // Length
+    CLIENT_USER_AGENT: { min: 1, max: 200 } // Length
+  },
+  RUNNERS: {
+    TOKEN: { min: 1, max: 1000 }, // Length
+    NAME: { min: 1, max: 100 }, // Length
+    DESCRIPTION: { min: 1, max: 1000 } // Length
+  },
+  RUNNER_JOBS: {
+    TOKEN: { min: 1, max: 1000 }, // Length
+    REASON: { min: 1, max: 5000 }, // Length
+    ERROR_MESSAGE: { min: 1, max: 5000 }, // Length
+    PROGRESS: { min: 0, max: 100 } // Value
+  },
+  VIDEO_CHAPTERS: {
+    TITLE: { min: 1, max: 100 } // Length
+  },
+  WATCHED_WORDS: {
+    LIST_NAME: { min: 1, max: 100 }, // Length
+    WORDS: { min: 1, max: 500 }, // Number of total words
+    WORD: { min: 1, max: 100 } // Length
+  },
+  VIDEO_VIEW: {
+    UA_INFO: { min: 1, max: 500 } // Length
+  }
+}
+
+export const VIEW_LIFETIME = {
+  VIEW: CONFIG.VIEWS.VIDEOS.VIEW_EXPIRATION,
+  VIEWER_COUNTER: 60000 * 2, // 2 minutes
+  VIEWER_STATS: 60000 * 60 // 1 hour
+}
+export const MAX_REMOTE_VIEWERS_COUNTER = 1_000_000
+
+export const STATS_LIFETIME = {
+  DOWNLOADS: 60000 * 60 // 1 hour
+}
+
+export const REMOTE_DOWNLOADS = {
+  DEDUPLICATION_LIFETIME: 60000 * 60, // 1 hour
+  RATE_LIMIT_LIFETIME: 60000 * 60, // 1 hour
+  // Max downloads of a specific video we accept from a specific instance in RATE_LIMIT_LIFETIME
+  MAX_PER_HOST_PER_VIDEO: 500
+}
+
+export const REMOTE_VIEWS = {
+  DEDUPLICATION_LIFETIME: 60000 * 60 // 1 hour
+}
+
+export const MAX_LOCAL_VIEWER_WATCH_SECTIONS = 100
+
+// Changing this requires re-indexing existing videos
+export const VIDEO_SEARCH_INDEXED_DESCRIPTION_LENGTH = 1000
+
+export let CONTACT_FORM_LIFETIME = 60000 * 60 // 1 hour
+
+export const DEFAULT_AUDIO_MERGE_RESOLUTION = VideoResolution.H_480P
+export const DEFAULT_AUDIO_MERGE_FPS = 25
+
+export const VIDEO_RATE_TYPES: { [id: string]: VideoRateType } = {
+  LIKE: 'like',
+  DISLIKE: 'dislike'
+}
+
+export const USER_IMPORT = {
+  MAX_PLAYLIST_ELEMENTS: 1000
+}
+
+export const FFMPEG_NICE = {
+  // parent process defaults to niceness = 0
+  // reminder: lower = higher priority, max value is 19, lowest is -20
+  LIVE: 5, // prioritize over VOD and THUMBNAIL
+  THUMBNAIL: 10,
+  VOD: 15
+}
+
+export const VIDEO_CATEGORIES = {
+  1: 'Music',
+  2: 'Films',
+  3: 'Vehicles',
+  4: 'Art',
+  5: 'Sports',
+  6: 'Travels',
+  7: 'Gaming',
+  8: 'People',
+  9: 'Comedy',
+  10: 'Entertainment',
+  11: 'News & Politics',
+  12: 'How To',
+  13: 'Education',
+  14: 'Activism',
+  15: 'Science & Technology',
+  16: 'Animals',
+  17: 'Kids',
+  18: 'Food'
+}
+
+// See https://creativecommons.org/licenses/?lang=en
+export const VIDEO_LICENCES: { [id in VideoLicenceType]: string } = {
+  [VideoLicence['CC-BY']]: 'Attribution',
+  [VideoLicence['CC-BY-SA']]: 'Attribution - Share Alike',
+  [VideoLicence['CC-BY-ND']]: 'Attribution - No Derivatives',
+  [VideoLicence['CC-BY-NC']]: 'Attribution - Non Commercial',
+  [VideoLicence['CC-BY-NC-SA']]: 'Attribution - Non Commercial - Share Alike',
+  [VideoLicence['CC-BY-NC-ND']]: 'Attribution - Non Commercial - No Derivatives',
+  [VideoLicence['CC0']]: 'Public Domain Dedication',
+  [VideoLicence['PDM']]: 'Free of known copyright restrictions',
+  [VideoLicence['ALL_RIGHTS_RESERVED']]: 'All Rights Reserved'
+}
+
+export const VIDEO_LANGUAGES: { [id: string]: string } = {}
+export const VIDEO_TEXT_LANGUAGES: { [id: string]: string } = {}
+
+export const VIDEO_PRIVACIES: { [id in VideoPrivacyType]: string } = {
+  [VideoPrivacy.PUBLIC]: 'Public',
+  [VideoPrivacy.UNLISTED]: 'Unlisted',
+  [VideoPrivacy.PRIVATE]: 'Private',
+  [VideoPrivacy.INTERNAL]: 'Internal',
+  [VideoPrivacy.PASSWORD_PROTECTED]: 'Password protected'
+}
+
+export const VIDEO_RECOMMENDATION_SCOPES: { [id in VideoRecommendationScopeType]: string } = {
+  [VideoRecommendationScope.ALL]: 'All videos',
+  [VideoRecommendationScope.LOCAL]: 'Videos of the same platform',
+  [VideoRecommendationScope.ACCOUNT]: 'Videos of the same account',
+  [VideoRecommendationScope.CHANNEL]: 'Videos of the same channel'
+}
+
+export const VIDEO_AI_USAGES: { [id in VideoAIUsageType]: string } = {
+  [VideoAIUsage.NOT_SPECIFIED]: 'Not specified',
+  [VideoAIUsage.NO_AI]: 'No AI-generated content',
+  [VideoAIUsage.CONTAINS_AI]: 'Contains AI-generated content',
+  [VideoAIUsage.AI_GENERATED]: 'AI-generated'
+}
+
+export const VIDEO_COMMERCIAL_CONTENTS: { [id in VideoCommercialContentType]: string } = {
+  [VideoCommercialContent.NONE]: 'None',
+  [VideoCommercialContent.PROMOTIONAL]: 'Promotional content',
+  [VideoCommercialContent.PAID_PARTNERSHIP]: 'Paid partnership'
+}
+
+export const VIDEO_STATES: { [id in VideoStateType]: string } = {
+  [VideoState.PUBLISHED]: 'Published',
+  [VideoState.TO_TRANSCODE]: 'To transcode',
+  [VideoState.TO_IMPORT]: 'To import',
+  [VideoState.WAITING_FOR_LIVE]: 'Waiting for livestream',
+  [VideoState.LIVE_ENDED]: 'Livestream ended',
+  [VideoState.TO_MOVE_TO_EXTERNAL_STORAGE]: 'To move to an external storage',
+  [VideoState.TRANSCODING_FAILED]: 'Transcoding failed',
+  [VideoState.TO_MOVE_TO_EXTERNAL_STORAGE_FAILED]: 'External storage move failed',
+  [VideoState.TO_EDIT]: 'To edit',
+  [VideoState.TO_DUPLICATE]: 'To duplicate',
+  [VideoState.TO_DUPLICATE_FAILED]: 'Duplication failed',
+  [VideoState.TO_EDIT_FAILED]: 'Studio edition failed',
+  [VideoState.TO_MOVE_TO_FILE_SYSTEM]: 'To move to file system',
+  [VideoState.TO_MOVE_TO_FILE_SYSTEM_FAILED]: 'Move to file system failed',
+  [VideoState.TO_IMPORT_FAILED]: 'Import failed'
+}
+
+export const VIDEO_IMPORT_STATES: { [id in VideoImportStateType]: string } = {
+  [VideoImportState.FAILED]: 'Failed',
+  [VideoImportState.PENDING]: 'Pending',
+  [VideoImportState.SUCCESS]: 'Success',
+  [VideoImportState.REJECTED]: 'Rejected',
+  [VideoImportState.CANCELLED]: 'Cancelled',
+  [VideoImportState.PROCESSING]: 'Processing'
+}
+
+export const STREAM_SYNC_STATE: { [id in StreamSyncStateType]: string } = {
+  [StreamSyncState.FAILED]: 'Failed',
+  [StreamSyncState.SYNCED]: 'Synchronized',
+  [StreamSyncState.PROCESSING]: 'Processing',
+  [StreamSyncState.WAITING_FIRST_RUN]: 'Waiting first run'
+}
+
+export const ABUSE_STATES: { [id in AbuseStateType]: string } = {
+  [AbuseState.PENDING]: 'Pending',
+  [AbuseState.REJECTED]: 'Rejected',
+  [AbuseState.ACCEPTED]: 'Accepted'
+}
+
+export const USER_REGISTRATION_STATES: { [id in UserRegistrationStateType]: string } = {
+  [UserRegistrationState.PENDING]: 'Pending',
+  [UserRegistrationState.REJECTED]: 'Rejected',
+  [UserRegistrationState.ACCEPTED]: 'Accepted'
+}
+
+export const VIDEO_PLAYLIST_PRIVACIES: { [id in VideoPlaylistPrivacyType]: string } = {
+  [VideoPlaylistPrivacy.PUBLIC]: 'Public',
+  [VideoPlaylistPrivacy.UNLISTED]: 'Unlisted',
+  [VideoPlaylistPrivacy.PRIVATE]: 'Private'
+}
+
+export const VIDEO_PLAYLIST_TYPES: { [id in VideoPlaylistType_Type]: string } = {
+  [VideoPlaylistType.REGULAR]: 'Regular',
+  [VideoPlaylistType.WATCH_LATER]: 'Watch later'
+}
+
+export const RUNNER_JOB_STATES: { [id in RunnerJobStateType]: string } = {
+  [RunnerJobState.PROCESSING]: 'Processing',
+  [RunnerJobState.COMPLETED]: 'Completed',
+  [RunnerJobState.COMPLETING]: 'Completing',
+  [RunnerJobState.PENDING]: 'Pending',
+  [RunnerJobState.ERRORED]: 'Errored',
+  [RunnerJobState.WAITING_FOR_PARENT_JOB]: 'Waiting for parent job to finish',
+  [RunnerJobState.CANCELLED]: 'Cancelled',
+  [RunnerJobState.PARENT_ERRORED]: 'Parent job failed',
+  [RunnerJobState.PARENT_CANCELLED]: 'Parent job cancelled'
+}
+
+export const USER_EXPORT_STATES: { [id in UserExportStateType]: string } = {
+  [UserExportState.PENDING]: 'Pending',
+  [UserExportState.PROCESSING]: 'Processing',
+  [UserExportState.COMPLETED]: 'Completed',
+  [UserExportState.ERRORED]: 'Failed'
+}
+
+export const USER_IMPORT_STATES: { [id in UserImportStateType]: string } = {
+  [UserImportState.PENDING]: 'Pending',
+  [UserImportState.PROCESSING]: 'Processing',
+  [UserImportState.COMPLETED]: 'Completed',
+  [UserImportState.ERRORED]: 'Failed'
+}
+
+export const VIDEO_COMMENTS_POLICY: { [id in VideoCommentPolicyType]: string } = {
+  [VideoCommentPolicy.DISABLED]: 'Disabled',
+  [VideoCommentPolicy.ENABLED]: 'Enabled',
+  [VideoCommentPolicy.REQUIRES_APPROVAL]: 'Requires approval'
+}
+
+export const CHANNEL_COLLABORATOR_STATE: { [id in VideoChannelCollaboratorStateType]: string } = {
+  [VideoChannelCollaboratorState.ACCEPTED]: 'Accepted',
+  [VideoChannelCollaboratorState.PENDING]: 'Pending',
+  [VideoChannelCollaboratorState.REJECTED]: 'Rejected'
+}
+
+export const VIDEO_CHANNEL_ACTIVITY_ACTIONS: { [id in VideoChannelActivityActionType]: string } = {
+  [VideoChannelActivityAction.CREATE]: 'Create',
+  [VideoChannelActivityAction.UPDATE]: 'Update',
+  [VideoChannelActivityAction.DELETE]: 'Delete',
+  [VideoChannelActivityAction.UPDATE_CAPTIONS]: 'Update captions',
+  [VideoChannelActivityAction.UPDATE_CHAPTERS]: 'Update chapters',
+  [VideoChannelActivityAction.UPDATE_PASSWORDS]: 'Update passwords',
+  [VideoChannelActivityAction.CREATE_STUDIO_TASKS]: 'Create studio tasks',
+  [VideoChannelActivityAction.UPDATE_SOURCE_FILE]: 'Update source file',
+  [VideoChannelActivityAction.UPDATE_ELEMENTS]: 'Update elements',
+  [VideoChannelActivityAction.REMOVE_CHANNEL_OWNERSHIP]: 'Remove channel ownership',
+  [VideoChannelActivityAction.CREATE_CHANNEL_OWNERSHIP]: 'Create channel ownership',
+  [VideoChannelActivityAction.SEND_OWNERSHIP_REQUEST]: 'Send ownership request',
+  [VideoChannelActivityAction.ACCEPT_OWNERSHIP_REQUEST]: 'Accept ownership request',
+  [VideoChannelActivityAction.REFUSE_OWNERSHIP_REQUEST]: 'Refuse ownership request',
+  [VideoChannelActivityAction.UPDATE_EMBED_POLICY]: 'Update embed policy',
+  [VideoChannelActivityAction.DELETE_OWNERSHIP_REQUEST]: 'Delete ownership request'
+}
+
+export const VIDEO_CHANNEL_ACTIVITY_TARGETS: { [id in VideoChannelActivityTargetType]: string } = {
+  [VideoChannelActivityTarget.CHANNEL]: 'Channel',
+  [VideoChannelActivityTarget.CHANNEL_SYNC]: 'Channel synchronization',
+  [VideoChannelActivityTarget.PLAYLIST]: 'Playlist',
+  [VideoChannelActivityTarget.VIDEO]: 'Video',
+  [VideoChannelActivityTarget.VIDEO_IMPORT]: 'Video import'
+}
+
+export const VIDEO_EMBED_PRIVACY_POLICIES: { [id in VideoEmbedPrivacyPolicyType]: string } = {
+  [VideoEmbedPrivacyPolicy.ALL_ALLOWED]: 'All allowed',
+  [VideoEmbedPrivacyPolicy.ALLOWLIST]: 'Allowlist',
+  [VideoEmbedPrivacyPolicy.REMOTE_RESTRICTIONS]: 'Remote restrictions',
+  [VideoEmbedPrivacyPolicy.DISABLED]: 'Disabled'
+}
+
+export const CHANGE_OWNERSHIP_STATES: { [id in ChangeOwnershipStateType]: string } = {
+  [ChangeOwnershipState.PENDING]: 'Pending',
+  [ChangeOwnershipState.ACCEPTED]: 'Accepted',
+  [ChangeOwnershipState.REJECTED]: 'Rejected'
+}
+
+export const MIMETYPES = {
+  AUDIO: {
+    MIMETYPE_EXT: {
+      'audio/mpeg': '.mp3',
+      'audio/mp3': '.mp3',
+
+      'application/ogg': '.ogg',
+      'audio/ogg': '.ogg',
+
+      'audio/x-ms-wma': '.wma',
+      'audio/wav': '.wav',
+      'audio/x-wav': '.wav',
+
+      'audio/x-flac': '.flac',
+      'audio/flac': '.flac',
+
+      'audio/vnd.dlna.adts': '.aac',
+      'audio/aac': '.aac',
+
+      // Keep priority for preferred mime type
+      'audio/m4a': '.m4a',
+      'audio/x-m4a': '.m4a',
+      'audio/mp4': '.m4a',
+
+      'audio/x-m4b': '.m4b',
+
+      'audio/vnd.dolby.dd-raw': '.ac3',
+      'audio/ac3': '.ac3'
+    },
+    EXT_MIMETYPE: null as { [id: string]: string }
+  },
+  VIDEO: {
+    MIMETYPE_EXT: null as { [id: string]: string | string[] },
+    MIMETYPES_REGEX: null as string,
+    EXT_MIMETYPE: null as { [id: string]: string }
+  },
+  IMAGE: {
+    MIMETYPE_EXT: {
+      'image/png': '.png',
+      'image/gif': '.gif',
+      'image/webp': '.webp',
+      'image/jpg': '.jpg',
+      'image/jpeg': '.jpg'
+    },
+    EXT_MIMETYPE: null as { [id: string]: string }
+  },
+  LOGO_IMAGE: {
+    MIMETYPE_EXT: null as { [id: string]: string },
+    EXT_MIMETYPE: null as { [id: string]: string }
+  },
+  VIDEO_CAPTIONS: {
+    MIMETYPE_EXT: {
+      'text/vtt': '.vtt',
+      'application/x-subrip': '.srt',
+      'text/plain': '.srt'
+    },
+    EXT_MIMETYPE: null as { [id: string]: string }
+  },
+  TORRENT: {
+    MIMETYPE_EXT: {
+      'application/x-bittorrent': '.torrent'
+    }
+  },
+  M3U8: {
+    MIMETYPE_EXT: {
+      'application/vnd.apple.mpegurl': '.m3u8'
+    }
+  },
+  AP_VIDEO: {
+    MIMETYPE_EXT: {
+      'video/mp4': '.mp4',
+      'video/ogg': '.ogv',
+      'video/webm': '.webm',
+      'audio/mp4': '.mp4'
+    }
+  },
+  AP_TORRENT: {
+    MIMETYPE_EXT: {
+      'application/x-bittorrent': '.torrent'
+    }
+  },
+  AP_MAGNET: {
+    MIMETYPE_EXT: {
+      'application/x-bittorrent;x-scheme-handler/magnet': '.magnet'
+    }
+  }
+}
+
+MIMETYPES.LOGO_IMAGE.MIMETYPE_EXT = {
+  ...MIMETYPES.IMAGE.MIMETYPE_EXT,
+
+  'image/svg+xml': '.svg'
+}
+
+MIMETYPES.AUDIO.EXT_MIMETYPE = invert(MIMETYPES.AUDIO.MIMETYPE_EXT)
+MIMETYPES.IMAGE.EXT_MIMETYPE = invert(MIMETYPES.IMAGE.MIMETYPE_EXT)
+MIMETYPES.LOGO_IMAGE.EXT_MIMETYPE = invert(MIMETYPES.LOGO_IMAGE.MIMETYPE_EXT)
+MIMETYPES.VIDEO_CAPTIONS.EXT_MIMETYPE = invert(MIMETYPES.VIDEO_CAPTIONS.MIMETYPE_EXT)
+
+export const BINARY_CONTENT_TYPES = new Set([
+  'binary/octet-stream',
+  'application/octet-stream',
+  'application/x-binary'
+])
+
+// ---------------------------------------------------------------------------
+
+export const OVERVIEWS = {
+  VIDEOS: {
+    SAMPLE_THRESHOLD: 6,
+    SAMPLES_COUNT: 20
+  }
+}
+
+// ---------------------------------------------------------------------------
+
+export const SERVER_ACTOR_NAME = 'peertube'
+
+export const ACTIVITY_PUB = {
+  POTENTIAL_ACCEPT_HEADERS: [
+    'application/activity+json',
+    'application/ld+json',
+    'application/ld+json; profile="https://www.w3.org/ns/activitystreams"'
+  ],
+  ACCEPT_HEADER: 'application/activity+json, application/ld+json',
+  COLLECTION_ITEMS_PER_PAGE: 10,
+  FETCH_PAGE_LIMIT: 2000,
+  MAX_RECURSION_COMMENTS: 100,
+  MAX_ACTIVITIES_PER_REQUEST: 100,
+  MAX_VIDEO_URLS: 100,
+  MAX_VIDEO_TAGS: 100,
+  MAX_PLAYLIST_ELEMENTS: 1000,
+  INBOX_CONTENT_TYPES: [ 'application/json', 'application/*+json' ],
+  CHECK_JSON_LD_SIGNATURE: {
+    // A forwarded activity can be delivered late because of retries, but it must not be replayable forever
+    MAX_AGE: 3600 * 24 * 7 * 1000, // 7 days
+    // Max body size (bytes) we accept to canonicalize for a LD signature check
+    MAX_BODY_SIZE: 256 * 1024,
+    CANONIZE_TIMEOUT: 1000 * 5 // 5 seconds
+  },
+  ACTOR_REFRESH_INTERVAL: 3600 * 24 * 1000 * 2, // 2 days
+  VIDEO_REFRESH_INTERVAL: 3600 * 24 * 1000 * 2, // 2 days
+  VIDEO_PLAYLIST_REFRESH_INTERVAL: 3600 * 24 * 1000 * 2 // 2 days
+}
+
+export const ACTIVITY_PUB_ACTOR_TYPES: { [id: string]: ActivityPubActorType } = {
+  GROUP: 'Group',
+  PERSON: 'Person',
+  APPLICATION: 'Application',
+  ORGANIZATION: 'Organization',
+  SERVICE: 'Service'
+}
+
+export const HTTP_SIGNATURE = {
+  HEADERS_TO_SIGN_WITH_PAYLOAD: [ '(request-target)', 'host', 'date', 'digest' ],
+  HEADERS_TO_SIGN_WITHOUT_PAYLOAD: [ '(request-target)', 'host', 'date' ],
+  CLOCK_SKEW_SECONDS: 1800
+}
+
+// ---------------------------------------------------------------------------
+
+export let PRIVATE_RSA_KEY_SIZE = 2048
+
+// Password encryption
+export const BCRYPT_SALT_SIZE = 10
+
+export const CRYPTO_QUEUE = {
+  CONCURRENCY: Math.max(1, availableParallelism() - 1),
+  MAX_PENDING: 20
+}
+
+export const ADMIN_MEMORABLE_PASSWORD_GENERATION_LENGTH = 20
+export const USER_PASSWORD_RESET_LIFETIME = 60000 * 60 // 60 minutes
+export const USER_PASSWORD_CREATE_LIFETIME = 60000 * 60 * 24 * 7 // 7 days
+
+export const TWO_FACTOR_AUTH_REQUEST_TOKEN_LIFETIME = 60000 * 10 // 10 minutes
+export let JWT_TOKEN_USER_EXPORT_FILE_LIFETIME: `${number} minutes` | `${number} seconds` = '15 minutes'
+
+export const EMAIL_VERIFY_LIFETIME = 60000 * 60 // 60 minutes
+export const SIGNUP_CLIENT_LIFETIME = 60000 * 60 * 24 * 30 // 30 days
+
+export const NSFW_POLICY_TYPES: { [id: string]: NSFWPolicyType } = {
+  DO_NOT_LIST: 'do_not_list',
+  WARN: 'warn',
+  BLUR: 'blur',
+  DISPLAY: 'display'
+}
+
+// ---------------------------------------------------------------------------
+
+export const USER_EXPORT_MAX_ITEMS = 1000
+export const USER_EXPORT_FILE_PREFIX = 'user-export-'
+export const USER_IMPORT_FILE_PREFIX = 'user-import-'
+
+// ---------------------------------------------------------------------------
+
+// Express static paths (router)
+export const STATIC_PATHS = {
+  // Need to keep this legacy path for previously generated torrents
+  LEGACY_WEB_VIDEOS: '/static/webseed/',
+  WEB_VIDEOS: '/static/web-videos/',
+
+  // Need to keep this legacy path for previously generated torrents
+  LEGACY_PRIVATE_WEB_VIDEOS: '/static/webseed/private/',
+  PRIVATE_WEB_VIDEOS: '/static/web-videos/private/',
+
+  REDUNDANCY: '/static/redundancy/',
+
+  STREAMING_PLAYLISTS: {
+    HLS: '/static/streaming-playlists/hls',
+    PRIVATE_HLS: '/static/streaming-playlists/hls/private/'
+  },
+
+  UPLOAD_IMAGES: '/static/uploads/images/'
+}
+export const DOWNLOAD_PATHS = {
+  TORRENTS: '/download/torrents/',
+  GENERATE_VIDEO: '/download/videos/generate/',
+  WEB_VIDEOS: '/download/web-videos/',
+  HLS_VIDEOS: '/download/streaming-playlists/hls/videos/',
+  USER_EXPORTS: '/download/user-exports/',
+  ORIGINAL_VIDEO_FILE: '/download/original-video-files/'
+}
+export const LAZY_STATIC_PATHS = {
+  THUMBNAILS: '/lazy-static/thumbnails/',
+  BANNERS: '/lazy-static/banners/',
+  AVATARS: '/lazy-static/avatars/',
+  VIDEO_CAPTIONS: '/lazy-static/video-captions/',
+  TORRENTS: '/lazy-static/torrents/',
+  STORYBOARDS: '/lazy-static/storyboards/'
+}
+export const OBJECT_STORAGE_PROXY_PATHS = {
+  // Need to keep this legacy path for previously generated torrents
+  LEGACY_PRIVATE_WEB_VIDEOS: '/object-storage-proxy/webseed/private/',
+  PRIVATE_WEB_VIDEOS: '/object-storage-proxy/web-videos/private/',
+
+  STREAMING_PLAYLISTS: {
+    PRIVATE_HLS: '/object-storage-proxy/streaming-playlists/hls/private/'
+  }
+}
+
+// Cache control
+export const STATIC_MAX_AGE = {
+  SERVER: '2h',
+  LAZY_SERVER: '1 year',
+  // Redirections to the object storage cache: short, so clients don't keep them if the objects are removed (object storage disabled...)
+  LAZY_SERVER_REDIRECT: '1 day',
+  CLIENT: '30d'
+}
+
+export const ACTOR_IMAGES_SIZE: { [key in ActorImageType_Type]: { width: number, height: number }[] } = {
+  [ActorImageType.AVATAR]: [ // 1/1 ratio
+    {
+      width: 1500,
+      height: 1500
+    },
+    {
+      width: 600,
+      height: 600
+    },
+    {
+      width: 120,
+      height: 120
+    },
+    {
+      width: 48,
+      height: 48
+    }
+  ],
+  [ActorImageType.BANNER]: [ // 6/1 ratio
+    {
+      width: 1920,
+      height: 317
+    },
+    {
+      width: 600,
+      height: 100
+    }
+  ]
+}
+export const UPLOAD_IMAGES_SIZE: { [key in UploadImageType_Type]: { width: number, height: number }[] } = {
+  [UploadImageType.INSTANCE_FAVICON]: [
+    {
+      width: 32,
+      height: 32
+    }
+  ],
+  [UploadImageType.INSTANCE_HEADER_SQUARE]: [
+    {
+      width: 48,
+      height: 48
+    }
+  ],
+  [UploadImageType.INSTANCE_HEADER_WIDE]: [
+    {
+      width: null, // Auto
+      height: 48
+    }
+  ],
+  [UploadImageType.INSTANCE_OPENGRAPH]: [
+    {
+      width: 1200,
+      height: 650
+    }
+  ]
+}
+
+export const STORYBOARD = {
+  SPRITE_MAX_SIZE: 192,
+  SPRITES_MAX_EDGE_COUNT: 11
+}
+
+export const EMBED_SIZE = {
+  width: 560,
+  height: 315
+}
+
+// Sub folders of cache directory
+// Remote files are cached in DIRECTORY, or in the object storage cache bucket under OBJECT_STORAGE_PREFIX (relative to its prefix)
+export const FILES_CACHE = {
+  AVATARS: {
+    DIRECTORY: join(CONFIG.STORAGE.CACHE_DIR, 'avatars'),
+    OBJECT_STORAGE_PREFIX: 'avatars/'
+  },
+  THUMBNAILS: {
+    DIRECTORY: join(CONFIG.STORAGE.CACHE_DIR, 'thumbnails'),
+    OBJECT_STORAGE_PREFIX: 'thumbnails/'
+  },
+  STORYBOARDS: {
+    DIRECTORY: join(CONFIG.STORAGE.CACHE_DIR, 'storyboards'),
+    OBJECT_STORAGE_PREFIX: 'storyboards/'
+  },
+  VIDEO_CAPTIONS: {
+    DIRECTORY: join(CONFIG.STORAGE.CACHE_DIR, 'video-captions'),
+    OBJECT_STORAGE_PREFIX: 'video-captions/'
+  }
+}
+
+export const LRU_CACHE = {
+  USER_TOKENS: {
+    MAX_SIZE: 1000,
+    TTL: parseDurationToMs('10 minutes')
+  },
+  VIDEO_TOKENS: {
+    MAX_SIZE: 10_000
+  },
+  FILENAME_TO_PATH_PERMANENT_FILE_CACHE: {
+    MAX_SIZE: 5000
+  },
+  LIVE_SEGMENT_SHA_REMOVED_SEGMENTS: {
+    MAX_SIZE: 1000
+  },
+  STATIC_VIDEO_FILES_RIGHTS_CHECK: {
+    MAX_SIZE: 5000,
+    TTL: parseDurationToMs('10 seconds')
+  },
+  WATCHED_WORDS_REGEX: {
+    MAX_SIZE: 100,
+    TTL: parseDurationToMs('24 hours')
+  },
+  TRACKER_IPS: {
+    MAX_SIZE: 100_000
+  },
+  MODEL_CACHE: {
+    MAX_SIZE: 10_000,
+    TTL: parseDurationToMs('1 hour') // If the process misses an invalidation
+  }
+}
+
+export const DIRECTORIES = {
+  RESUMABLE_UPLOAD: join(CONFIG.STORAGE.TMP_DIR, 'resumable-uploads'),
+
+  HLS_STREAMING_PLAYLIST: {
+    PUBLIC: join(CONFIG.STORAGE.STREAMING_PLAYLISTS_DIR, 'hls'),
+    PRIVATE: join(CONFIG.STORAGE.STREAMING_PLAYLISTS_DIR, 'hls', 'private')
+  },
+
+  WEB_VIDEOS: {
+    PUBLIC: CONFIG.STORAGE.WEB_VIDEOS_DIR,
+    PRIVATE: join(CONFIG.STORAGE.WEB_VIDEOS_DIR, 'private')
+  },
+
+  ORIGINAL_VIDEOS: CONFIG.STORAGE.ORIGINAL_VIDEO_FILES_DIR,
+
+  HLS_REDUNDANCY: join(CONFIG.STORAGE.REDUNDANCY_DIR, 'hls'),
+
+  LOCAL_PIP_DIRECTORY: join(CONFIG.STORAGE.BIN_DIR, 'pip'),
+
+  UPLOAD_IMAGES: join(CONFIG.STORAGE.UPLOADS_DIR, 'images')
+}
+
+export const VIDEO_FILE_TOKEN_LIFETIME = parseDurationToMs('8 hours')
+
+export const RESUMABLE_UPLOAD_SESSION_LIFETIME = SCHEDULER_INTERVALS_MS.REMOVE_DANGLING_RESUMABLE_UPLOADS
+
+export const OBJECT_STORAGE_STAGING = {
+  // The size of a streamed file is unknown: each part is buffered in memory, so keep them small
+  // Must be at least `MIN_PART_SIZE`
+  STREAM_PART_SIZE: 16 * 1024 * 1024, // 16MB
+
+  // Object storage rejects a multipart part smaller than this, except the last one
+  MIN_PART_SIZE: 5 * 1024 * 1024, // 5MB
+
+  // Used by FFmpeg (probe, thumbnail generation)
+  PRESIGNED_URL_EXPIRATION_SECONDS: 3600,
+
+  // Objects and incomplete multipart uploads older than `maxAgeMs` are removed by the cleaner
+  SUB_PREFIXES: {
+    RESUMABLE_UPLOADS: {
+      prefix: 'resumable-uploads/',
+      maxAgeMs: 1000 * 3600 * 24 * 30 // 30 days
+    },
+
+    USER_IMPORTS: {
+      prefix: 'user-imports/',
+      maxAgeMs: 1000 * 3600 * 24 * 30 // 30 days
+    },
+
+    VIDEO_IMPORTS: {
+      prefix: 'video-imports/',
+      maxAgeMs: 1000 * 3600 * 24 * 30 // 30 days
+    },
+
+    VIDEO_STUDIO: {
+      prefix: 'video-studio/',
+      maxAgeMs: 1000 * 3600 * 24 * 30 // 30 days
+    }
+  }
+}
+
+export const VIDEO_LIVE = {
+  EXTENSION: LIVE_SEGMENT_EXTENSION,
+  CLEANUP_DELAY: 1000 * 60 * 5, // 5 minutes
+  // Delay before aborting a session on RTMP disconnection, so we kill ffmpeg even if it still has data to process
+  ABORT_DELAY_ON_RTMP_DISCONNECT: 2000, // 2 seconds
+  // Max time we wait for ffmpeg to exit after we sent it a SIGINT, before killing it
+  FFMPEG_EXIT_TIMEOUT: 10000, // 10 seconds
+  // Time we give a remote runner to flush its last chunks after we aborted the session
+  // If this delay is too short, the last chunks of this session can land in the directory *after* we told everyone we released it
+  REMOTE_RUNNER_FLUSH_DELAY: 5000, // 5 seconds
+  // Max time a new session waits for the previous session of a permanent live to release the live directory
+  PREVIOUS_SESSION_CLEANUP_TIMEOUT: 30000, // 30 seconds
+  // Max time we wait for ffmpeg to fill the live master playlist it just created before giving up on it
+  MASTER_PLAYLIST_READ_TIMEOUT: 5000, // 5 seconds
+  SEGMENT_TIME_SECONDS: {
+    DEFAULT_LATENCY: 4, // 4 seconds
+    SMALL_LATENCY: 2 // 2 seconds
+  },
+  SEGMENTS_LIST_SIZE: 15, // 15 maximum segments in live playlist
+  REPLAY_DIRECTORY: 'replay',
+  EDGE_LIVE_DELAY_SEGMENTS_NOTIFICATION: 4,
+  MAX_SOCKET_WAITING_DATA: 1024 * 1000 * 100, // 100MB
+  RTMP: {
+    CHUNK_SIZE: 60000,
+    GOP_CACHE: true,
+    BASE_PATH: 'live'
+  }
+}
+
+export const MEMOIZE_TTL = {
+  OVERVIEWS_SAMPLE: 1000 * 3600 * 4, // 4 hours
+  INFO_HASH_EXISTS: 1000 * 60, // 1 minute
+  VIDEO_DURATION: 1000 * 10, // 10 seconds
+  LIVE_ABLE_TO_UPLOAD: 1000 * 60, // 1 minute
+  LIVE_CHECK_SOCKET_HEALTH: 1000 * 60, // 1 minute
+  GET_STATS_FOR_OPEN_TELEMETRY_METRICS: 1000 * 60, // 1 minute
+  EMBED_HTML: 1000 * 10, // 10 seconds
+  VIDEO_SEO: 1000 * 10 // 10 seconds
+}
+
+export const MEMOIZE_LENGTH = {
+  INFO_HASH_EXISTS: 200,
+  VIDEO_DURATION: 200,
+  VIDEO_SEO: 200
+}
+
+export const totalCPUs = Math.max(cpus().length, 1)
+
+export const WORKER_THREADS = {
+  IDLE_TIMEOUT: 1000 * 10, // 10 seconds
+  SIGN_JSON_LD_OBJECT: {
+    CONCURRENCY: 1,
+    MAX_THREADS: 1 // FIXME: we would want 2 threads but there is an issue with JSONLD in worker thread where CPU jumps and stays at 100%
+  },
+  BUILD_DIGEST: {
+    CONCURRENCY: 1,
+    MAX_THREADS: 1
+  },
+  CREATE_TORRENT: {
+    CONCURRENCY: 1,
+    MAX_THREADS: 1
+  }
+}
+
+export const REDUNDANCY = {
+  VIDEOS: {
+    RANDOMIZED_FACTOR: 5
+  }
+}
+
+export const ACCEPT_HEADERS = [ 'html', 'application/json' ].concat(ACTIVITY_PUB.POTENTIAL_ACCEPT_HEADERS)
+export const LANGUAGE_COOKIE_NAME = 'clientLanguage'
+export const LANGUAGE_HEADER = 'x-peertube-language'
+
+export const OTP = {
+  HEADER_NAME: 'x-peertube-otp',
+  HEADER_REQUIRED_VALUE: 'required; app'
+}
+
+export const ASSETS_PATH = {
+  DEFAULT_AUDIO_BACKGROUND: join(root(), 'dist', 'core', 'assets', 'default-audio-background.jpg'),
+  DEFAULT_LIVE_BACKGROUND: join(root(), 'dist', 'core', 'assets', 'default-live-background.jpg')
+}
+
+export const SERVER_INTERNAL_LOCALES_BASE_PATH = join(root(), 'dist', 'locales')
+
+// ---------------------------------------------------------------------------
+
+export const CUSTOM_HTML_TAG_COMMENTS = {
+  TITLE: '<!-- title tag -->',
+  DESCRIPTION: '<!-- description tag -->',
+  CUSTOM_CSS: '<!-- custom css tag -->',
+  META_TAGS: '<!-- meta tags -->',
+  SERVER_CONFIG: '<!-- server config -->',
+  SERVER_RENDERED_CONTENT: '<!-- server rendered content -->'
+}
+
+export const MAX_LOGS_OUTPUT_CHARACTERS = 10 * 1000 * 1000
+export const MAX_AUDIT_LOGS_OUTPUT = 10000
+export const LOG_FILENAME = 'peertube.log'
+
+// ---------------------------------------------------------------------------
+
+export const TRACKER_RATE_LIMITS = {
+  INTERVAL: 60000 * 5, // 5 minutes
+  ANNOUNCES_PER_IP_PER_INFOHASH: 15, // maximum announces per torrent in the interval
+  ANNOUNCES_PER_IP: 30, // maximum announces for all our torrents in the interval
+  BLOCK_IP_LIFETIME: parseDurationToMs('3 minutes')
+}
+
+// Bump when the p2p-media-loader peer protocol/infohash derivation changes in an incompatible way
+export const P2P_MEDIA_LOADER_PEER_VERSION = 2
+
+// ---------------------------------------------------------------------------
+
+export const PLUGIN_GLOBAL_CSS_FILE_NAME = 'plugins-global.css'
+export const PLUGIN_GLOBAL_CSS_PATH = join(CONFIG.STORAGE.TMP_DIR, PLUGIN_GLOBAL_CSS_FILE_NAME)
+
+export let PLUGIN_EXTERNAL_AUTH_TOKEN_LIFETIME = 1000 * 60 * 5 // 5 minutes
+
+export const DEFAULT_THEME_NAME = 'default'
+export const DEFAULT_INSTANCE_THEME_NAME = 'instance-default'
+export const DEFAULT_CHANNEL_PLAYER_SETTING_VALUE: PlayerThemeVideoSetting = 'channel-default'
+export const DEFAULT_INSTANCE_PLAYER_SETTING_VALUE: PlayerThemeVideoSetting | PlayerThemeChannelSetting = 'instance-default'
+
+// ---------------------------------------------------------------------------
+
+export const SEARCH_INDEX = {
+  ROUTES: {
+    VIDEOS: '/api/v1/search/videos',
+    VIDEO_CHANNELS: '/api/v1/search/video-channels'
+  }
+}
+
+// ---------------------------------------------------------------------------
+
+export const STATS_TIMESERIE = {
+  MAX_DAYS: 365 * 10 // Around 10 years
+}
+
+// ---------------------------------------------------------------------------
+
+export const MAX_SQL_DELETE_ITEMS = 10000
+
+// ---------------------------------------------------------------------------
+
+// Special constants for a test instance
+if (process.env.PRODUCTION_CONSTANTS !== 'true') {
+  if (isTestOrDevInstance()) {
+    PRIVATE_RSA_KEY_SIZE = 1024
+
+    STATIC_MAX_AGE.SERVER = '0'
+
+    SCHEDULER_INTERVALS_MS.REMOVE_OLD_JOBS = 10000
+    SCHEDULER_INTERVALS_MS.REMOVE_OLD_HISTORY = 5000
+    SCHEDULER_INTERVALS_MS.REMOVE_OLD_AUDIT_LOGS = 5000
+    SCHEDULER_INTERVALS_MS.UPDATE_VIDEOS = 5000
+    SCHEDULER_INTERVALS_MS.AUTO_FOLLOW_INDEX_INSTANCES = 5000
+
+    SCHEDULER_INTERVALS_MS.UPDATE_INBOX_STATS = 5000
+    SCHEDULER_INTERVALS_MS.PROCESS_HEARTBEAT = 2000
+    SCHEDULER_INTERVALS_MS.CHECK_PEERTUBE_VERSION = 2000
+    SCHEDULER_INTERVALS_MS.UPDATE_TOKEN_SESSION = 2000
+
+    MIGRATION_SCRIPTS.FIRST_RUN_DELAY_MS = 1000
+
+    REPEAT_JOBS['videos-stats'] = { every: 5000 }
+
+    REPEAT_JOBS['activitypub-cleaner'] = { every: 5000 }
+    AP_CLEANER.PERIOD = 5000
+
+    REDUNDANCY.VIDEOS.RANDOMIZED_FACTOR = 1
+
+    CONTACT_FORM_LIFETIME = 1000 // 1 second
+
+    JOB_ATTEMPTS['email'] = 1
+
+    // Tests restart servers while they process jobs
+    JOB_STALLED_DETECTION.LOCK_DURATION = 10000
+    JOB_STALLED_DETECTION.STALLED_INTERVAL = 5000
+
+    MEMOIZE_TTL.OVERVIEWS_SAMPLE = 3000
+    MEMOIZE_TTL.LIVE_ABLE_TO_UPLOAD = 3000
+    MEMOIZE_TTL.EMBED_HTML = 1
+    MEMOIZE_TTL.VIDEO_SEO = 1
+    OVERVIEWS.VIDEOS.SAMPLE_THRESHOLD = 2
+
+    PLUGIN_EXTERNAL_AUTH_TOKEN_LIFETIME = 5000
+
+    JOB_REMOVAL_OPTIONS.SUCCESS['videos-stats'] = 10000
+  }
+
+  if (isDevInstance()) {
+    SCHEDULER_INTERVALS_MS.BLOCKLIST_SUBSCRIPTIONS_SYNC = 60000
+    SCHEDULER_INTERVALS_MS.WATCHED_WORDS_SUBSCRIPTIONS_SYNC = 60000
+  } else if (isTestInstance()) {
+    SCHEDULER_INTERVALS_MS.ACTOR_FOLLOW_SCORES = 1000
+
+    ACTIVITY_PUB.COLLECTION_ITEMS_PER_PAGE = 2
+    ACTIVITY_PUB.ACTOR_REFRESH_INTERVAL = 10 * 1000 // 10 seconds
+    ACTIVITY_PUB.VIDEO_REFRESH_INTERVAL = 10 * 1000 // 10 seconds
+    ACTIVITY_PUB.VIDEO_PLAYLIST_REFRESH_INTERVAL = 10 * 1000 // 10 seconds
+
+    SITEMAP.VIDEOS_PER_PAGE = 2
+    SITEMAP.ACTORS_PER_PAGE = 2
+
+    CONSTRAINTS_FIELDS.ACTORS.IMAGE.FILE_SIZE.max = 100 * 1024 // 100KB
+    CONSTRAINTS_FIELDS.LOGO.IMAGE.FILE_SIZE.max = 100 * 1024 // 100KB
+    CONSTRAINTS_FIELDS.VIDEOS.IMAGE.FILE_SIZE.max = 400 * 1024 // 400KB
+
+    VIEW_LIFETIME.VIEWER_COUNTER = 1000 * 5 // 5 second
+    VIEW_LIFETIME.VIEWER_STATS = 1000 * 5 // 5 second
+
+    VIDEO_LIVE.CLEANUP_DELAY = getIntEnv('PEERTUBE_TEST_CONSTANTS_VIDEO_LIVE_CLEANUP_DELAY') ?? 5000
+    VIDEO_LIVE.SEGMENT_TIME_SECONDS.DEFAULT_LATENCY = 2
+    VIDEO_LIVE.SEGMENT_TIME_SECONDS.SMALL_LATENCY = 1
+    VIDEO_LIVE.EDGE_LIVE_DELAY_SEGMENTS_NOTIFICATION = 1
+
+    SCHEDULER_INTERVALS_MS.BLOCKLIST_SUBSCRIPTIONS_SYNC = 5000
+    SCHEDULER_INTERVALS_MS.WATCHED_WORDS_SUBSCRIPTIONS_SYNC = 5000
+
+    RUNNER_JOBS.LAST_CONTACT_UPDATE_INTERVAL = 2000
+
+    SCHEDULER_INTERVALS_MS.YOUTUBE_DL_COOKIES_WATCH = 2000
+
+    JWT_TOKEN_USER_EXPORT_FILE_LIFETIME = '2 seconds'
+  }
+}
+
+updateWebserverUrls()
+updateWebserverConfig()
+
+registerConfigChangedHandler(() => {
+  updateWebserverUrls()
+  updateWebserverConfig()
+})
+
+export async function loadLanguages () {
+  if (Object.keys(VIDEO_LANGUAGES).length !== 0) return
+
+  const { allLanguages, nonTextLanguages } = await buildLanguages()
+
+  Object.assign(VIDEO_LANGUAGES, allLanguages)
+
+  for (const [ code, name ] of Object.entries(allLanguages)) {
+    if (!nonTextLanguages[code]) {
+      VIDEO_TEXT_LANGUAGES[code] = name
+    }
+  }
+}
+
+// ---------------------------------------------------------------------------
+
+export const FILES_CONTENT_HASH = {
+  MANIFEST: generateContentHash()
+}
+
+// ---------------------------------------------------------------------------
+
+export const VIDEO_FILTERS = {
+  WATERMARK: {
+    SIZE_RATIO: 1 / 10,
+    HORIZONTAL_MARGIN_RATIO: 1 / 20,
+    VERTICAL_MARGIN_RATIO: 1 / 20
+  }
+}
+
+export async function buildLanguages () {
+  const { iso6393 } = await import('iso-639-3')
+
+  const languages: { [id: string]: string } = {}
+
+  const nonTextLanguages = {
+    sgn: true, // Sign languages (macro language)
+    ase: true, // American sign language
+    asq: true, // Austrian sign language
+    sdl: true, // Arabian sign language
+    bfi: true, // British sign language
+    bzs: true, // Brazilian sign language
+    csl: true, // Chinese sign language
+    cse: true, // Czech sign language
+    dsl: true, // Danish sign language
+    fsl: true, // French sign language
+    gsg: true, // German sign language
+    pks: true, // Pakistan sign language
+    jsl: true, // Japanese sign language
+    sfs: true, // South African sign language
+    swl: true, // Swedish sign language
+    rsl: true, // Russian sign language
+    fse: true, // Finnish sign language
+
+    zxx: true // No linguistic content (ISO-639-2),
+  }
+
+  const additionalLanguages = {
+    ...nonTextLanguages,
+
+    kab: true, // Kabyle
+    gcf: true, // Guadeloupean
+
+    lat: true, // Latin
+
+    epo: true, // Esperanto
+    tlh: true, // Klingon
+    jbo: true, // Lojban
+    avk: true, // Kotava
+
+    gsw: true // Swiss German (ISO-639-3)
+  }
+
+  // Only add ISO639-1 languages and some sign languages (ISO639-3)
+  iso6393
+    .filter(l => {
+      return (l.iso6391 !== undefined && l.type === 'living') ||
+        additionalLanguages[l.iso6393] === true
+    })
+    .forEach(l => {
+      languages[l.iso6391 || l.iso6393] = l.name
+    })
+
+  // Override Occitan label
+  languages['oc'] = 'Occitan'
+  languages['el'] = 'Greek'
+  languages['tok'] = 'Toki Pona'
+
+  // Override Portuguese labels
+  // Keep generic "pt" (ISO-639-1) as plain Portuguese, and use explicit BCP47 codes for regional variants
+  languages['pt-BR'] = 'Portuguese (Brazilian)'
+  languages['pt-PT'] = 'Portuguese (Portugal)'
+
+  // Override Spanish labels
+  languages['es'] = 'Spanish (Spain)'
+  languages['es-419'] = 'Spanish (Latin America)'
+
+  // Chinese languages
+  languages['zh-Hans'] = 'Simplified Chinese'
+  languages['zh-Hant'] = 'Traditional Chinese'
+
+  // Catalan languages
+  languages['ca-valencia'] = 'Valencian'
+
+  // Creole French languages
+  languages['rcf'] = 'Réunion Creole French'
+  languages['gcr'] = 'Guianese Creole French'
+
+  return { allLanguages: languages, nonTextLanguages }
+}
+
+// ---------------------------------------------------------------------------
+// Private
+// ---------------------------------------------------------------------------
+
+function buildVideoMimetypeExt () {
+  const data = {
+    // streamable formats that warrant cross-browser compatibility
+    'video/webm': '.webm',
+    // We'll add .ogg if additional extensions are enabled
+    // We could add .ogg here but since it could be an audio file,
+    // it would be confusing for users because PeerTube will refuse their file (based on the mimetype)
+    'video/ogg': [ '.ogv' ],
+    'video/mp4': '.mp4'
+  }
+
+  if (CONFIG.TRANSCODING.ENABLED) {
+    if (CONFIG.TRANSCODING.ALLOW_ADDITIONAL_EXTENSIONS) {
+      data['video/ogg'].push('.ogg')
+
+      Object.assign(data, {
+        'video/x-matroska': '.mkv',
+        'video/matroska': '.mkv',
+
+        // Developed by Apple
+        'video/quicktime': [ '.mov', '.qt', '.mqv' ], // often used as output format by editing software
+        'video/mov': '.mov', // Windows: https://github.com/Chocobozzz/PeerTube/issues/6669
+        'video/x-m4v': '.m4v',
+        'video/m4v': '.m4v',
+
+        // Developed by the Adobe Flash Platform
+        'video/x-flv': '.flv',
+        'video/x-f4v': '.f4v', // replacement for flv
+
+        // Developed by Microsoft
+        'video/x-ms-wmv': '.wmv',
+        'video/x-msvideo': '.avi',
+        'video/avi': '.avi',
+
+        // Developed by 3GPP
+        // common video formats for cell phones
+        'video/3gpp': [ '.3gp', '.3gpp' ],
+        'video/3gpp2': [ '.3g2', '.3gpp2' ],
+
+        // Developed by FFmpeg/Mplayer
+        'application/x-nut': '.nut',
+
+        // The standard video format used by many Sony and Panasonic HD camcorders.
+        // It is also used for storing high definition video on Blu-ray discs.
+        'video/mp2t': [ '.mts', '.ts' ],
+        'video/vnd.dlna.mpeg-tts': '.mts',
+
+        'video/m2ts': '.m2ts',
+
+        // Some OS recognize .ts files as text, so we need to add a specific mimetype for them
+        // See https://stackoverflow.com/questions/14230396/ts-files-always-get-recognized-as-text-vnd-trolltech-linguist-and-never-as-vide
+        'text/vnd.trolltech.linguist': '.ts',
+
+        // Old formats reliant on MPEG-1/MPEG-2
+        'video/mpv': '.mpv',
+        'video/mpeg2': '.m2v',
+        'video/mpeg': [ '.m1v', '.mpg', '.mpe', '.mpeg', '.vob' ],
+        'video/dvd': '.vob',
+
+        // Could be anything
+        'application/octet-stream': null,
+        'application/mxf': '.mxf' // often used as exchange format by editing software
+      })
+    }
+
+    if (CONFIG.TRANSCODING.ALLOW_AUDIO_FILES) {
+      Object.assign(data, MIMETYPES.AUDIO.MIMETYPE_EXT)
+    }
+  }
+
+  return data
+}
+
+function updateWebserverUrls () {
+  WEBSERVER.URL = sanitizeUrl(CONFIG.WEBSERVER.SCHEME + '://' + CONFIG.WEBSERVER.HOSTNAME + ':' + CONFIG.WEBSERVER.PORT)
+  WEBSERVER.HOST = buildInstanceHost({ hostname: CONFIG.WEBSERVER.HOSTNAME, port: CONFIG.WEBSERVER.PORT })
+  WEBSERVER.WS = CONFIG.WEBSERVER.WS
+
+  WEBSERVER.SCHEME = CONFIG.WEBSERVER.SCHEME
+  WEBSERVER.HOSTNAME = CONFIG.WEBSERVER.HOSTNAME
+  WEBSERVER.PORT = CONFIG.WEBSERVER.PORT
+
+  const rtmpHostname = CONFIG.LIVE.RTMP.PUBLIC_HOSTNAME || CONFIG.WEBSERVER.HOSTNAME
+  const rtmpsHostname = CONFIG.LIVE.RTMPS.PUBLIC_HOSTNAME || CONFIG.WEBSERVER.HOSTNAME
+
+  WEBSERVER.RTMP_URL = 'rtmp://' + rtmpHostname + ':' + CONFIG.LIVE.RTMP.PORT
+  WEBSERVER.RTMPS_URL = 'rtmps://' + rtmpsHostname + ':' + CONFIG.LIVE.RTMPS.PORT
+
+  WEBSERVER.RTMP_BASE_LIVE_URL = WEBSERVER.RTMP_URL + '/' + VIDEO_LIVE.RTMP.BASE_PATH
+  WEBSERVER.RTMPS_BASE_LIVE_URL = WEBSERVER.RTMPS_URL + '/' + VIDEO_LIVE.RTMP.BASE_PATH
+}
+
+function updateWebserverConfig () {
+  MIMETYPES.VIDEO.MIMETYPE_EXT = buildVideoMimetypeExt()
+  MIMETYPES.VIDEO.MIMETYPES_REGEX = buildMimetypesRegex(MIMETYPES.VIDEO.MIMETYPE_EXT)
+
+  MIMETYPES.VIDEO.EXT_MIMETYPE = buildVideoExtMimetype(MIMETYPES.VIDEO.MIMETYPE_EXT)
+
+  CONSTRAINTS_FIELDS.VIDEOS.EXTNAME = Object.keys(MIMETYPES.VIDEO.EXT_MIMETYPE)
+}
+
+function buildVideoExtMimetype (obj: { [id: string]: string | string[] }) {
+  const result: { [id: string]: string } = {}
+
+  for (const mimetype of Object.keys(obj)) {
+    const value = obj[mimetype]
+    if (!value) continue
+
+    const extensions = Array.isArray(value) ? value : [ value ]
+
+    for (const extension of extensions) {
+      result[extension] = mimetype
+    }
+  }
+
+  return result
+}
+
+function buildMimetypesRegex (obj: { [id: string]: string | string[] }) {
+  return Object.keys(obj)
+    .map(m => `(${m})`)
+    .join('|')
+}
+
+function generateContentHash () {
+  return randomBytes(20).toString('hex')
+}
+
+function getIntEnv (path: string) {
+  if (process.env[path]) return parseInt(process.env[path])
+
+  return undefined
+}

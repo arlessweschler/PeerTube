@@ -6,24 +6,28 @@ Please do not edit translation files directly from Git, you have to use Weblate!
 If you don't see your locale in the platform you can add it directly in the Weblate interface.
 Then, if you think there are enough translated strings, please [create an issue](https://github.com/Chocobozzz/PeerTube/issues) so we add the new locale in PeerTube!
 
+Translations are manually pulled and merged in PeerTube software and are publicly available in the next official release.
+You can get a chance to see translations before the official release by going to https://peertube2.cpy.re which is updated every night with the latest PeerTube changes.
+
 
 ## How to
 
  * Create an account: https://weblate.framasoft.org/accounts/register/
  * Validate your email and follow the link sent
- * Create your password (keep the `Current password` field empty) and setup your account
- * Go to the PeerTube page https://weblate.framasoft.org/projects/peertube/
+ * Create your password (keep the `Current password` field empty) and set up your account
+ * To translate the PeerTube web, visit the PeerTube project page: https://weblate.framasoft.org/projects/peertube/
+ * To translate the PeerTube mobile application, visit the PeerTube App project page: https://weblate.framasoft.org/projects/peertube-app/
  * Choose the file and the locale you want to translate
- 
+
 
 ## Files
 
 There are 4 files:
  * **angular**: contains client strings
- * **player**: contains player strings. 
+ * **player**: contains player strings.
  Most of the strings come from VideoJS, so you can help yourself by using [video.js JSON files](https://github.com/videojs/video.js/tree/master/lang)
- * **server**: contains server strings (privacies, licences...) and iso639 (languages) strings used by PeerTube to describe the audio language of a particular video.
- It's the reason why these strings should be translated too. There are many strings so do not hesitate to translate only main audio languages.
+ * **server**: contains server strings clients can fetch in JSON format so they don't have to translate common PeerTube strings themselves (iso639 languages, privacies, licences...)
+ * **server-internal**: contains internal server strings used in the REST API responses or emails
 
 
 ## Tips
@@ -32,11 +36,15 @@ There are 4 files:
 
 You must not translate special tags like `<x id="INTERPOLATION" ... />`.
 
-For example: 
-```<x id="INTERPOLATION" equiv-text="{{ video.publishedAt | myFromNow }}"/> - <x id="INTERPOLATION_1" equiv-text="{{ video.views | myNumberFormatter }}"/> views```
+For example:
+```
+<x id="INTERPOLATION" equiv-text="{{ video.publishedAt | myFromNow }}"/> - <x id="INTERPOLATION_1" equiv-text="{{ video.views | myNumberFormatter }}"/> views
+```
 
-should be in french 
-```<x id="INTERPOLATION" equiv-text="{{ video.publishedAt | myFromNow }}"/> - <x id="INTERPOLATION_1" equiv-text="{{ video.views | myNumberFormatter }}"/> vues```
+should be in French
+```
+<x id="INTERPOLATION" equiv-text="{{ video.publishedAt | myFromNow }}"/> - <x id="INTERPOLATION_1" equiv-text="{{ video.views | myNumberFormatter }}"/> vues
+```
 
 
 ### Singular/plural
@@ -45,8 +53,12 @@ For singular/plural translations, you must translate values inside `{` and `}`. 
 
 For example:
 
-```{VAR_PLURAL, plural, =0 {No videos} =1 {1 video} other {<x id="INTERPOLATION" equiv-text="{{ playlist.videosLength }}"/> videos} }```
+```
+{VAR_PLURAL, plural, =0 {No videos} =1 {1 video} other {<x id="INTERPOLATION" equiv-text="{{ playlist.videosLength }}"/> videos} }
+```
 
-should be in french 
+should be in French
 
-```{VAR_PLURAL, plural, =0 {Aucune vidéo} =1 {1 vidéo} other {<x id="INTERPOLATION" equiv-text="{{ playlist.videosLength }}"/> vidéos} }```
+```
+{VAR_PLURAL, plural, =0 {Aucune vidéo} =1 {1 vidéo} other {<x id="INTERPOLATION" equiv-text="{{ playlist.videosLength }}"/> vidéos} }
+```

@@ -1,0 +1,31 @@
+import { FileStorage } from '@peertube/peertube-models'
+import { retryTransactionWrapper } from '@server/helpers/database-utils.js'
+import { CONFIG } from '@server/initializers/config.js'
+import { VideoJobInfoModel } from '@server/models/video/video-job-info.js'
+import { MVideo } from '@server/types/models/index.js'
+import { JobQueue } from '../job-queue/job-queue.js'
+import { checkVideoResourcesToBeMoved } from '../move-storage/shared/move-video.js'
+import { buildMoveVideoJob } from '../video-jobs.js'
+import { moveToNextState } from '../video-state.js'
+
+export async function onTranscodingEnded (options: {
+  video: MVideo
+  moveVideoToNextState: boolean
+}) {
+  const { video, moveVideoToNextState } = options
+
+  await VideoJobInfoModel.decrease(video.uuid, 'pendingTranscode')
+
+  if (moveVideoToNextState) {
+    const changedState = await retryTransactionWrapper(() => moveToNextState({ video }))
+
+    // Still send the transcoded file to external storage if needed
+    if (!changedState && CONFIG.OBJECT_STORAGE.ENABLED) {
+      const { videoFiles, otherFiles } = await checkVideoResourcesToBeMoved(video, FileStorage.OBJECT_STORAGE)
+
+      if (videoFiles || otherFiles) {
+        await JobQueue.Instance.createJob(await buildMoveVideoJob({ type: 'move-to-object-storage', video }))
+      }
+    }
+  }
+}

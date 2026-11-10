@@ -1,10 +1,12 @@
-import { Component } from '@angular/core'
+import { Component, ChangeDetectionStrategy } from '@angular/core'
+import { AbuseListTableComponent } from '../../../shared/shared-abuse-list/abuse-list-table.component'
 
 @Component({
   selector: 'my-abuse-list',
   templateUrl: './abuse-list.component.html',
-  styleUrls: [ ]
+  styleUrls: [],
+  changeDetection: ChangeDetectionStrategy.Eager,
+  imports: [ AbuseListTableComponent ]
 })
 export class AbuseListComponent {
-
 }

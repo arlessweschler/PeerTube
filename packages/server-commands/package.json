@@ -1,0 +1,31 @@
+{
+  "name": "@peertube/peertube-server-commands",
+  "private": true,
+  "version": "0.0.0",
+  "main": "dist/index.js",
+  "files": [
+    "dist"
+  ],
+  "exports": {
+    "types": "./dist/index.d.ts",
+    "peertube:tsx": "./src/index.ts",
+    "default": "./dist/index.js"
+  },
+  "type": "module",
+  "devDependencies": {
+    "@aws-sdk/client-s3": "^3.1161.0",
+    "@types/superagent": "^8.1.11",
+    "@types/supertest": "^7.2.1",
+    "supertest": "^7.3.1"
+  },
+  "scripts": {
+    "build": "tsc",
+    "watch": "tsc -w"
+  },
+  "dependencies": {
+    "@peertube/peertube-core-utils": "workspace:*",
+    "@peertube/peertube-models": "workspace:*",
+    "@peertube/peertube-node-utils": "workspace:*",
+    "@peertube/peertube-typescript-utils": "workspace:*"
+  }
+}

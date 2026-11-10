@@ -1,0 +1,502 @@
+import { createCommand } from '@commander-js/extra-typings'
+import { awaitableAuditLog, buildStoragePruneAuditEntity, getAuditCLIActor } from '@server/lib/audit-log/index.js'
+import { promiseMap, uniqify, wait } from '@peertube/peertube-core-utils'
+import { FileStorage } from '@peertube/peertube-models'
+import { readdirNonHidden } from '@server/helpers/fs.js'
+import { DIRECTORIES, USER_EXPORT_FILE_PREFIX, USER_IMPORT_FILE_PREFIX } from '@server/initializers/constants.js'
+import { isCacheObject } from '@server/lib/object-storage/cache.js'
+import {
+  getPrunableObjectStorageLocationConflicts,
+  getPrunableObjectStorageSections,
+  PrunableObjectStorageSection
+} from '@server/lib/object-storage/config.js'
+import { BucketInfo, listKeysOfPrefix, removeObjectByFullKey } from '@server/lib/object-storage/object-storage-helpers.js'
+import { isStagingObject } from '@server/lib/object-storage/staging.js'
+import { UploadImageModel } from '@server/models/application/upload-image.js'
+import { UserExportModel } from '@server/models/user/user-export.js'
+import { UserImportModel } from '@server/models/user/user-import.js'
+import { StoryboardModel } from '@server/models/video/storyboard.js'
+import { VideoCaptionModel } from '@server/models/video/video-caption.js'
+import { VideoFileModel } from '@server/models/video/video-file.js'
+import { VideoSourceModel } from '@server/models/video/video-source.js'
+import { VideoStreamingPlaylistModel } from '@server/models/video/video-streaming-playlist.js'
+import { remove } from 'fs-extra/esm'
+import { stat } from 'fs/promises'
+import { basename, dirname, join } from 'path'
+import { getUUIDFromFilename } from '../core/helpers/utils.js'
+import { CONFIG } from '../core/initializers/config.js'
+import { initDatabaseModels } from '../core/initializers/database.js'
+import { ActorImageModel } from '../core/models/actor/actor-image.js'
+import { VideoRedundancyModel } from '../core/models/redundancy/video-redundancy.js'
+import { ThumbnailModel } from '../core/models/video/thumbnail.js'
+import { VideoModel } from '../core/models/video/video.js'
+import { askConfirmation } from './shared/common.js'
+
+const program = createCommand()
+  .description('Remove unused local objects (video files, captions, user exports...) from object storage or file system')
+  .option('--offline', 'Confirm PeerTube instance is stopped, so this script can prune more directories')
+  .option('-y, --yes', 'Auto confirm files deletion')
+  .parse(process.argv)
+
+const options = program.opts()
+
+run()
+  .then(() => process.exit(0))
+  .catch(err => {
+    console.error(err)
+    process.exit(-1)
+  })
+
+async function run () {
+  await initDatabaseModels(true)
+
+  await new FSPruner().prune()
+
+  console.log('\n')
+
+  await new ObjectStoragePruner().prune()
+}
+
+// ---------------------------------------------------------------------------
+// Object storage
+// ---------------------------------------------------------------------------
+
+class ObjectStoragePruner {
+  async prune () {
+    if (!CONFIG.OBJECT_STORAGE.ENABLED) return
+
+    const conflicts = getPrunableObjectStorageLocationConflicts()
+    if (conflicts.length !== 0) {
+      throw new Error(
+        'Cannot prune object storage because some sections would delete the files of each other:\n' +
+          conflicts.map(c => ` - ${c}`).join('\n') +
+          '\nSet different bucket prefixes for these sections.'
+      )
+    }
+
+    console.log('Pruning object storage.')
+
+    const pathsToDeletePass1 = await this.buildKeysToDelete()
+    await wait(1000)
+    const pathsToDeletePass2 = await this.buildKeysToDelete()
+
+    // Intersect paths to delete to prevent deleting transient files
+    const pathsToDelete = pathsToDeletePass1.filter(({ bucket, key }) =>
+      pathsToDeletePass2.some(({ bucket: b, key: k }) => b === bucket && k === key)
+    )
+
+    if (pathsToDelete.length === 0) {
+      console.log('No unknown object storage files to delete.')
+      return
+    }
+
+    const formattedKeysToDelete = pathsToDelete.map(({ bucket, key }) => ` In bucket ${bucket}: ${key}`).join('\n')
+    console.log(`${pathsToDelete.length} unknown files from object storage can be deleted:\n${formattedKeysToDelete}\n`)
+
+    const res = await askPruneConfirmation(options.yes)
+    if (res !== true) {
+      console.log('Exiting without deleting object storage files.')
+      return
+    }
+
+    console.log('Deleting object storage files...\n')
+
+    for (const { bucket, key } of pathsToDelete) {
+      await removeObjectByFullKey(key, { BUCKET_NAME: bucket })
+    }
+
+    console.log(`${pathsToDelete.length} object storage files deleted.`)
+
+    await awaitableAuditLog.delete(
+      getAuditCLIActor(),
+      () => buildStoragePruneAuditEntity({ storage: 'object-storage', deletedFiles: pathsToDelete.length })
+    )
+  }
+
+  private async buildKeysToDelete () {
+    const existFactories: { [name in PrunableObjectStorageSection]: () => (key: string) => Promise<boolean> | boolean } = {
+      web_videos: () => this.doesWebVideoFileExistFactory(),
+      streaming_playlists: () => this.doesStreamingPlaylistFileExistFactory(),
+      original_video_files: () => this.doesOriginalFileExistFactory(),
+      user_exports: () => this.doesUserExportFileExistFactory(),
+      captions: () => this.doesCaptionFileExistFactory(),
+      avatars: () => this.doesActorImageFileExistFactory(),
+      thumbnails: () => this.doesThumbnailFileExistFactory(),
+      storyboards: () => this.doesStoryboardFileExistFactory(),
+      torrents: () => this.doesTorrentObjectExistFactory(),
+      uploads: () => this.doesUploadImageFileExistFactory(),
+      redundancy: () => this.doesRedundancyObjectExistFactory()
+    }
+
+    const keysToDelete: { bucket: string, key: string }[] = []
+
+    for (const { name, bucketInfo } of getPrunableObjectStorageSections()) {
+      keysToDelete.push(...await this.findKeysToDeleteInBucket(bucketInfo, existFactories[name]()))
+    }
+
+    return keysToDelete
+  }
+
+  private async findKeysToDeleteInBucket (
+    config: BucketInfo,
+    existFun: (file: string) => Promise<boolean> | boolean
+  ) {
+    const keysToDelete: { bucket: string, key: string }[] = []
+
+    try {
+      const keys = await listKeysOfPrefix('', config)
+
+      await promiseMap(keys, async key => {
+        // The staging and cache buckets can be shared with this section, and their files are not local files
+        if (isStagingObject({ bucketName: config.BUCKET_NAME, fullKey: key })) return
+        if (isCacheObject({ bucketName: config.BUCKET_NAME, fullKey: key })) return
+
+        if (await existFun(key) !== true) {
+          keysToDelete.push({ bucket: config.BUCKET_NAME, key })
+        }
+      }, { concurrency: 20 })
+
+      return keysToDelete
+    } catch (err) {
+      const prefixMessage = config.PREFIX
+        ? ` and prefix ${config.PREFIX}`
+        : ''
+
+      console.error('Cannot find keys to delete in bucket ' + config.BUCKET_NAME + prefixMessage, { err })
+
+      return []
+    }
+  }
+
+  private doesWebVideoFileExistFactory () {
+    return (key: string) => {
+      const filename = this.sanitizeKey(key, CONFIG.OBJECT_STORAGE.WEB_VIDEOS)
+
+      return VideoFileModel.doesOwnedWebVideoFileExist(filename, FileStorage.OBJECT_STORAGE)
+    }
+  }
+
+  private doesStreamingPlaylistFileExistFactory () {
+    return (key: string) => {
+      const sanitizedKey = this.sanitizeKey(key, CONFIG.OBJECT_STORAGE.STREAMING_PLAYLISTS)
+      const uuid = dirname(sanitizedKey).replace(/^hls\//, '')
+
+      return VideoStreamingPlaylistModel.doesOwnedVideoUUIDExist(uuid, FileStorage.OBJECT_STORAGE)
+    }
+  }
+
+  private doesOriginalFileExistFactory () {
+    return (key: string) => {
+      const filename = this.sanitizeKey(key, CONFIG.OBJECT_STORAGE.ORIGINAL_VIDEO_FILES)
+
+      return VideoSourceModel.doesOwnedFileExist(filename, FileStorage.OBJECT_STORAGE)
+    }
+  }
+
+  private doesUserExportFileExistFactory () {
+    return (key: string) => {
+      const filename = this.sanitizeKey(key, CONFIG.OBJECT_STORAGE.USER_EXPORTS)
+
+      return UserExportModel.doesOwnedFileExist(filename, FileStorage.OBJECT_STORAGE)
+    }
+  }
+
+  private doesCaptionFileExistFactory () {
+    return (key: string) => {
+      const filename = this.sanitizeKey(key, CONFIG.OBJECT_STORAGE.CAPTIONS)
+
+      return VideoCaptionModel.doesOwnedFileExist(filename, FileStorage.OBJECT_STORAGE)
+    }
+  }
+
+  private doesActorImageFileExistFactory () {
+    return (key: string) => {
+      const filename = this.sanitizeKey(key, CONFIG.OBJECT_STORAGE.ACTOR_IMAGES)
+
+      return ActorImageModel.doesOwnedFileExist(filename, FileStorage.OBJECT_STORAGE)
+    }
+  }
+
+  private doesThumbnailFileExistFactory () {
+    return (key: string) => {
+      const filename = this.sanitizeKey(key, CONFIG.OBJECT_STORAGE.THUMBNAILS)
+
+      return ThumbnailModel.doesOwnedFileExist(filename, FileStorage.OBJECT_STORAGE)
+    }
+  }
+
+  private doesStoryboardFileExistFactory () {
+    return (key: string) => {
+      const filename = this.sanitizeKey(key, CONFIG.OBJECT_STORAGE.STORYBOARDS)
+
+      return StoryboardModel.doesOwnedFileExist(filename, FileStorage.OBJECT_STORAGE)
+    }
+  }
+
+  private doesTorrentObjectExistFactory () {
+    return (key: string) => {
+      const filename = this.sanitizeKey(key, CONFIG.OBJECT_STORAGE.TORRENTS)
+
+      return VideoFileModel.doesOwnedTorrentFileExist(filename, FileStorage.OBJECT_STORAGE)
+    }
+  }
+
+  private doesUploadImageFileExistFactory () {
+    return (key: string) => {
+      const filename = this.sanitizeKey(key, CONFIG.OBJECT_STORAGE.UPLOADS)
+
+      return UploadImageModel.doesOwnedFileExist(filename, FileStorage.OBJECT_STORAGE)
+    }
+  }
+
+  private doesRedundancyObjectExistFactory () {
+    const videoUUIDsPromise = VideoRedundancyModel.listVideoUUIDOfDuplicated(FileStorage.OBJECT_STORAGE)
+
+    return async (key: string) => {
+      const sanitizedKey = this.sanitizeKey(key, CONFIG.OBJECT_STORAGE.REDUNDANCY)
+      const uuid = dirname(sanitizedKey).replace(/^hls\//, '')
+
+      const videoUUIDs = await videoUUIDsPromise
+
+      return videoUUIDs.has(uuid)
+    }
+  }
+
+  private sanitizeKey (key: string, config: { PREFIX: string }) {
+    return key.replace(new RegExp(`^${config.PREFIX}`), '')
+  }
+}
+
+// ---------------------------------------------------------------------------
+// FS
+// ---------------------------------------------------------------------------
+
+class FSPruner {
+  async prune () {
+    const dirs = Object.values(CONFIG.STORAGE)
+
+    if (uniqify(dirs).length !== dirs.length) {
+      console.error('Cannot prune storage because you put multiple storage keys in the same directory.')
+      process.exit(0)
+    }
+
+    console.log('Pruning filesystem storage.')
+
+    console.log('Detecting files to remove, it can take a while...')
+
+    const pathsToDeletePass1 = await this.buildFilesToDelete()
+    await wait(1000)
+    const pathsToDeletePass2Set = new Set(await this.buildFilesToDelete())
+
+    // Intersect paths to delete to prevent deleting transient files
+    const pathsToDelete = pathsToDeletePass1.filter(path => pathsToDeletePass2Set.has(path))
+
+    if (pathsToDelete.length === 0) {
+      console.log('No unknown filesystem files to delete.')
+      return
+    }
+
+    const formattedKeysToDelete = pathsToDelete.map(p => ` ${p}`).join('\n')
+    console.log(`${pathsToDelete.length} unknown files from filesystem can be deleted:\n${formattedKeysToDelete}\n`)
+
+    const res = await askPruneConfirmation(options.yes)
+    if (res !== true) {
+      console.log('Exiting without deleting filesystem files.')
+      return
+    }
+
+    console.log('Deleting filesystem files...\n')
+
+    for (const path of pathsToDelete) {
+      await remove(path)
+    }
+
+    console.log(`${pathsToDelete.length} filesystem files deleted.`)
+
+    await awaitableAuditLog.delete(
+      getAuditCLIActor(),
+      () => buildStoragePruneAuditEntity({ storage: 'file-system', deletedFiles: pathsToDelete.length })
+    )
+  }
+
+  private async buildFilesToDelete () {
+    let filesToDelete: string[] = [
+      ...(await this.findFilesToDeleteInDir(DIRECTORIES.WEB_VIDEOS.PUBLIC, this.doesWebVideoFileExistFactory())),
+      ...(await this.findFilesToDeleteInDir(DIRECTORIES.WEB_VIDEOS.PRIVATE, this.doesWebVideoFileExistFactory())),
+
+      ...(await this.findFilesToDeleteInDir(DIRECTORIES.HLS_STREAMING_PLAYLIST.PRIVATE, this.doesHLSPlaylistExistFactory())),
+      ...(await this.findFilesToDeleteInDir(DIRECTORIES.HLS_STREAMING_PLAYLIST.PUBLIC, this.doesHLSPlaylistExistFactory())),
+
+      ...(await this.findFilesToDeleteInDir(DIRECTORIES.ORIGINAL_VIDEOS, this.doesOriginalVideoExistFactory())),
+
+      ...(await this.findFilesToDeleteInDir(CONFIG.STORAGE.TORRENTS_DIR, this.doesTorrentFileExistFactory())),
+
+      ...(await this.findFilesToDeleteInDir(CONFIG.STORAGE.REDUNDANCY_DIR, this.doesRedundancyExistFactory())),
+
+      ...(await this.findFilesToDeleteInDir(CONFIG.STORAGE.THUMBNAILS_DIR, this.doesThumbnailExistFactory())),
+
+      ...(await this.findFilesToDeleteInDir(CONFIG.STORAGE.CAPTIONS_DIR, this.doesCaptionExistFactory())),
+
+      ...(await this.findFilesToDeleteInDir(CONFIG.STORAGE.STORYBOARDS_DIR, this.doesStoryboardExistFactory())),
+
+      ...(await this.findFilesToDeleteInDir(CONFIG.STORAGE.ACTOR_IMAGES_DIR, this.doesActorImageExistFactory())),
+
+      ...(await this.findFilesToDeleteInDir(DIRECTORIES.UPLOAD_IMAGES, this.doesUploadImageExistFactory()))
+    ]
+
+    if (options.offline === true) {
+      filesToDelete = filesToDelete.concat(
+        await this.findFilesToDeleteInDir(CONFIG.STORAGE.TMP_PERSISTENT_DIR, this.doesUserExportOrImportExistFactory())
+      )
+    }
+
+    return filesToDelete
+  }
+
+  private async findFilesToDeleteInDir (directory: string, existFun: (file: string) => Promise<boolean> | boolean) {
+    const pathsToDelete: string[] = []
+    // Hidden files are metadata the filesystem put there (.nfs* handles...), not files PeerTube manages
+    const files = await readdirNonHidden(directory)
+
+    await promiseMap(files, async file => {
+      const filePath = join(directory, file)
+
+      if (await existFun(filePath) !== true) {
+        pathsToDelete.push(filePath)
+      }
+    }, { concurrency: 20 })
+
+    return pathsToDelete
+  }
+
+  private doesWebVideoFileExistFactory () {
+    return (filePath: string) => {
+      // Don't delete private directory
+      if (filePath === DIRECTORIES.WEB_VIDEOS.PRIVATE) return true
+
+      return VideoFileModel.doesOwnedWebVideoFileExist(basename(filePath), FileStorage.FILE_SYSTEM)
+    }
+  }
+
+  private doesHLSPlaylistExistFactory () {
+    return (hlsPath: string) => {
+      // Don't delete private directory
+      if (hlsPath === DIRECTORIES.HLS_STREAMING_PLAYLIST.PRIVATE) return true
+
+      return VideoStreamingPlaylistModel.doesOwnedVideoUUIDExist(basename(hlsPath), FileStorage.FILE_SYSTEM)
+    }
+  }
+
+  private doesOriginalVideoExistFactory () {
+    return (filePath: string) => {
+      return VideoSourceModel.doesOwnedFileExist(basename(filePath), FileStorage.FILE_SYSTEM)
+    }
+  }
+
+  private doesTorrentFileExistFactory () {
+    return (filePath: string) => VideoFileModel.doesOwnedTorrentFileExist(basename(filePath), FileStorage.FILE_SYSTEM)
+  }
+
+  private doesThumbnailExistFactory () {
+    return async (filePath: string) => {
+      const thumbnail = await ThumbnailModel.loadByFilename(basename(filePath))
+      if (!thumbnail) return false
+      if (thumbnail.isLocal() === false) return false
+      if (thumbnail.storage !== FileStorage.FILE_SYSTEM) return false
+
+      return true
+    }
+  }
+
+  private doesActorImageExistFactory () {
+    return async (filePath: string) => {
+      const image = await ActorImageModel.loadByFilename(basename(filePath))
+      if (!image) return false
+      if (image.isLocal() === false) return false
+      if (image.storage !== FileStorage.FILE_SYSTEM) return false
+
+      return true
+    }
+  }
+
+  private doesStoryboardExistFactory () {
+    return async (filePath: string) => {
+      const storyboard = await StoryboardModel.loadByFilename(basename(filePath))
+      if (!storyboard) return false
+      if (storyboard.isLocal() === false) return false
+      if (storyboard.storage !== FileStorage.FILE_SYSTEM) return false
+
+      return true
+    }
+  }
+
+  private doesCaptionExistFactory () {
+    return async (filePath: string) => {
+      const caption = await VideoCaptionModel.loadByFilename(basename(filePath))
+      if (!caption) return false
+      if (caption.isLocal() === false) return false
+      if (caption.storage !== FileStorage.FILE_SYSTEM) return false
+
+      return true
+    }
+  }
+
+  private doesUploadImageExistFactory () {
+    return async (filePath: string) => {
+      const image = await UploadImageModel.loadByFilename(basename(filePath))
+      if (!image) return false
+      if (image.isLocal() === false) return false
+      if (image.storage !== FileStorage.FILE_SYSTEM) return false
+
+      return true
+    }
+  }
+
+  private doesRedundancyExistFactory () {
+    return async (filePath: string) => {
+      const isPlaylist = (await stat(filePath)).isDirectory()
+
+      if (isPlaylist) {
+        // Don't delete HLS redundancy directory
+        if (filePath === DIRECTORIES.HLS_REDUNDANCY) return true
+
+        const uuid = getUUIDFromFilename(filePath)
+        const video = await VideoModel.loadWithFiles(uuid)
+        if (!video) return false
+
+        const p = video.getHLSPlaylist()
+        if (!p) return false
+
+        const redundancy = await VideoRedundancyModel.loadLocalByStreamingPlaylistId(p.id)
+        return redundancy?.storage === FileStorage.FILE_SYSTEM
+      }
+
+      // WebTorrent support redundancy has been removed from PeerTube
+      return false
+    }
+  }
+
+  private doesUserExportOrImportExistFactory () {
+    return async (filePath: string) => {
+      const filename = basename(filePath)
+
+      // Only detect user exports and imports, since we're in the persistent tmp directory
+      // We don't want to delete other files that could be in this directory for other reasons
+      if (!filename.startsWith(USER_EXPORT_FILE_PREFIX) && !filename.startsWith(USER_IMPORT_FILE_PREFIX)) return true
+
+      if (await UserExportModel.doesOwnedFileExist(filename, FileStorage.FILE_SYSTEM)) return true
+      if (await UserImportModel.doesOwnedFileExist(filename)) return true
+
+      return false
+    }
+  }
+}
+
+async function askPruneConfirmation (yes?: boolean) {
+  if (yes === true) return true
+
+  return askConfirmation(
+    'These unknown files can be deleted, but please check your backups first (bugs happen). ' +
+      'Can we delete these files?'
+  )
+}

@@ -1,0 +1,19 @@
+{
+  "extends": "./tsconfig.json",
+  "compilerOptions": {
+    "outDir": "../packages/types-generator/dist-tmp/server",
+    "tsBuildInfoFile": "../packages/types-generator/dist-tmp/server/.tsbuildinfo",
+    "stripInternal": true,
+    "removeComments": false,
+    "emitDeclarationOnly": true
+  },
+  "references": [
+    { "path": "../packages/core-utils" },
+    { "path": "../packages/ffmpeg" },
+    { "path": "../packages/models" },
+    { "path": "../packages/node-utils" },
+    { "path": "../packages/server-commands" },
+    { "path": "../packages/typescript-utils" },
+    { "path": "../packages/transcription" }
+  ]
+}

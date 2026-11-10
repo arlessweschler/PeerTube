@@ -1,59 +1,61 @@
-@import '_variables';
-@import '_mixins';
-@import '_miniature';
+@use "_variables" as *;
+@use "_mixins" as *;
+@use "_miniature" as *;
 
 $thumbnail-width: 130px;
 $thumbnail-height: 72px;
 
+.video {
+  --co-miniature-width: #{$thumbnail-width}; // Keep it sync with "sizes" attribute of my-video-thumbnail in the template
+  --co-miniature-height: #{$thumbnail-height};
+}
+
+my-timestamp-input {
+  width: 100px;
+}
+
 my-video-thumbnail {
-  @include thumbnail-size-component($thumbnail-width, $thumbnail-height);
+  @include thumbnail-size-component(var(--co-miniature-width), var(--co-miniature-height));
 }
 
 .fake-thumbnail {
-  width: $thumbnail-width;
-  height: $thumbnail-height;
+  width: var(--co-miniature-width);
+  height: var(--co-miniature-height);
   background-color: #ececec;
 }
 
 my-video-thumbnail,
 .fake-thumbnail {
   display: flex; // Avoids an issue with line-height that adds space below the element
-  margin-right: 10px;
+
+  @include margin-right(10px);
+}
+
+.nsfw-warning {
+  my-global-icon {
+    @include global-icon-size(18px);
+  }
 }
 
 .video {
   display: grid;
   grid-template-columns: 1fr auto;
-  background-color: pvar(--mainBackgroundColor);
+  align-items: center;
+  background-color: pvar(--bg);
   padding: 10px;
   border-bottom: 1px solid $separator-border-color;
-
-  .more {
-    display: flex;
-  }
-
-  &:hover {
-    background-color: rgba(0, 0, 0, 0.05);
-
-    .more {
-      opacity: 1;
-    }
-  }
-
-  @media not all and (hover: hover) and (pointer: fine) {
-    .more {
-      opacity: 1 !important;
-    }
-  }
 
   &.playing {
     background-color: rgba(0, 0, 0, 0.02);
   }
 
   a {
-    @include disable-default-a-behaviour;
+    color: pvar(--fg);
 
-    color: pvar(--mainForegroundColor);
+    @include disable-default-a-behaviour;
+  }
+
+  > a {
     display: flex;
     min-width: 0;
     align-items: center;
@@ -61,83 +63,110 @@ my-video-thumbnail,
 
     .position {
       font-weight: $font-semibold;
-      margin-right: 10px;
-      color: pvar(--greyForegroundColor);
+      color: pvar(--fg-300);
       min-width: 25px;
 
       my-global-icon {
-        @include apply-svg-color(pvar(--greyForegroundColor));
-
-        width: 17px;
         position: relative;
         left: -2px;
+        color: pvar(--fg-300);
+
+        @include global-icon-size(17px);
       }
     }
-
-    .video-info {
-      display: flex;
-      flex-direction: column;
-      align-self: flex-start;
-      min-width: 0;
-
-      a {
-        width: auto;
-      }
-
-      .video-info-account,
-      .video-info-timestamp {
-        color: pvar(--greyForegroundColor);
-      }
-    }
-  }
-
-  .video-info-name {
-    @include ellipsis;
-
-    font-size: 18px;
-    font-weight: $font-semibold;
-    display: inline-block;
-  }
-
-  .more,
-  my-edit-button {
-    justify-self: flex-end;
-    margin-left: auto;
-    cursor: pointer;
-    min-width: 24px;
   }
 
   .more {
+    cursor: pointer;
+    min-width: 24px;
+
+    @include margin-left(auto);
+  }
+
+  .more-button {
     opacity: 0;
 
-    &.show {
-      opacity: 1;
+    &::after {
+      border: 0;
     }
 
-    .icon-more {
-      @include apply-svg-color(pvar(--greyForegroundColor));
+    my-global-icon {
+      color: pvar(--fg-300);
+    }
+  }
 
-      display: flex;
+  &:hover,
+  &:focus {
+    background-color: rgba(0, 0, 0, 0.05);
+  }
 
-      &::after {
-        border: 0;
-      }
+  &:hover,
+  &:focus-within,
+  .show {
+    .more-button {
+      opacity: 1;
+    }
+  }
+
+  @media not all and (hover: hover) and (pointer: fine) {
+    .more-button {
+      opacity: 1 !important;
     }
   }
 }
 
+.video-info-name {
+  font-size: 18px;
+  font-weight: $font-semibold;
+
+  @include peertube-word-wrap(false);
+}
+
+.video-info {
+  display: flex;
+  flex-direction: column;
+  align-self: flex-start;
+  min-width: 0;
+
+  .video-info-header {
+    display: flex;
+    align-items: baseline;
+
+    a {
+      width: auto;
+    }
+
+    .pt-badge {
+      margin: 0 5px;
+      white-space: nowrap;
+    }
+  }
+
+  .video-info-owner,
+  .video-info-timestamp {
+    color: pvar(--fg-300);
+  }
+}
+
+.video-info-owner,
+.video-info-timestamp,
+.date-and-views {
+  font-size: 14px;
+}
+
 .dropdown-menu {
-
   .dropdown-item {
-    @include dropdown-with-icon-item;
-
     cursor: pointer;
+
+    @include dropdown-with-icon-item;
   }
 
   .timestamp-options {
     padding-top: 0;
-    padding-left: 35px;
+    margin-top: 5px;
     margin-bottom: 15px;
+
+    @include padding-left(35px);
 
     > div {
       display: flex;
@@ -146,14 +175,7 @@ my-video-thumbnail,
     }
 
     my-peertube-checkbox {
-      margin-right: 5px;
-    }
-
-    input {
-      @include peertube-button;
-      @include orange-button;
-
-      margin-top: 10px;
+      @include margin-right(5px);
     }
   }
 }
@@ -163,7 +185,7 @@ my-video-thumbnail,
     my-edit-button {
       display: none;
 
-      + .more {
+      + .more-button {
         display: inline-flex;
       }
     }
@@ -184,7 +206,7 @@ my-video-thumbnail,
       }
     }
 
-    my-edit-button + .more {
+    my-edit-button + .more-button {
       display: none;
     }
   }
@@ -205,37 +227,10 @@ my-video-thumbnail,
 }
 
 @media screen and (min-width: $small-view) {
-  :host-context(.expanded) {
-    @include more-dropdown-control();
-  }
-}
-
-@media screen and (max-width: $small-view) {
-  :host-context(.expanded) {
-    @include edit-button-control();
-  }
+  @include more-dropdown-control();
+  @include edit-button-control();
 }
 
 @media screen and (max-width: $mobile-view) {
-  :host-context(.expanded) {
-    @include edit-button-in-mobile-view();
-  }
-}
-
-@media screen and (min-width: #{$small-view + $menu-width}) {
-  :host-context(.main-col:not(.expanded)) {
-    @include more-dropdown-control();
-  }
-}
-
-@media screen and (max-width: #{$small-view + $menu-width}) {
-  :host-context(.main-col:not(.expanded)) {
-    @include edit-button-control();
-  }
-}
-
-@media screen and (max-width: #{$mobile-view + $menu-width}) {
-  :host-context(.main-col:not(.expanded)) {
-    @include edit-button-in-mobile-view();
-  }
+  @include edit-button-in-mobile-view();
 }

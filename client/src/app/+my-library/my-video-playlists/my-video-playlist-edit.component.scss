@@ -1,36 +1,27 @@
-@import '_variables';
-@import '_mixins';
+@use "_variables" as *;
+@use "_mixins" as *;
+@use "_form-mixins" as *;
 
-label {
-  font-weight: $font-regular;
-  font-size: 100%;
-}
-
-.video-playlist-title {
-  @include settings-big-title;
-}
-
-input[type=text] {
+input[type="text"] {
   @include peertube-input-text(340px);
-
-  display: block;
-}
-
-textarea {
-  @include peertube-textarea(500px, 150px);
-
-  display: block;
 }
 
 .peertube-select-container {
-  @include peertube-select-container(340px);
+  @include responsive-width(340px);
 }
 
-input[type=submit] {
-  @include peertube-button;
-  @include orange-button;
+my-select-channel-user,
+my-select-options {
+  display: block;
+  max-width: 340px;
 }
 
-.breadcrumb {
-  @include breadcrumb;
+.content-col {
+  max-width: 500px;
+}
+
+my-image-input {
+  // Keep it sync with image size requested by the component
+  width: 223px;
+  height: 122px;
 }

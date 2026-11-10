@@ -1,5 +1,5 @@
-import { Video } from '@app/shared/shared-main'
-import { VideoPlaylistElement as ServerVideoPlaylistElement, VideoPlaylistElementType } from '@shared/models'
+import { Video } from '@app/shared/shared-main/video/video.model'
+import { VideoPlaylistElement as ServerVideoPlaylistElement, VideoPlaylistElementType_Type } from '@peertube/peertube-models'
 
 export class VideoPlaylistElement implements ServerVideoPlaylistElement {
   id: number
@@ -7,11 +7,11 @@ export class VideoPlaylistElement implements ServerVideoPlaylistElement {
   startTimestamp: number
   stopTimestamp: number
 
-  type: VideoPlaylistElementType
+  type: VideoPlaylistElementType_Type
 
   video?: Video
 
-  constructor (hash: ServerVideoPlaylistElement, translations: {}) {
+  constructor (hash: ServerVideoPlaylistElement, translations: { [ id: string ]: string } = {}) {
     this.id = hash.id
     this.position = hash.position
     this.startTimestamp = hash.startTimestamp

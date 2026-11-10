@@ -1,0 +1,697 @@
+import { forceNumber } from '@peertube/peertube-core-utils'
+import {
+  ActivityPubActor,
+  ActivityUrlObject,
+  VIDEO_CHANNEL_STATS_DAYS_DEFAULT,
+  VideoChannel,
+  VideoChannelSummary,
+  VideoPrivacy
+} from '@peertube/peertube-models'
+import { AttributesOnly } from '@peertube/peertube-typescript-utils'
+import { CONFIG } from '@server/initializers/config.js'
+import { getLocalActorPlayerSettingsActivityPubUrl } from '@server/lib/activitypub/url.js'
+import { InternalEventEmitter } from '@server/lib/internal-event-emitter.js'
+import { MAccountIdHost } from '@server/types/models/index.js'
+import { FindOptions, Includeable, literal, Op, QueryTypes, Transaction, WhereOptions } from 'sequelize'
+import {
+  AfterCreate,
+  AfterDestroy,
+  AfterUpdate,
+  AllowNull,
+  BeforeDestroy,
+  BelongsTo,
+  Column,
+  CreatedAt,
+  DataType,
+  Default,
+  DefaultScope,
+  ForeignKey,
+  HasMany,
+  HasOne,
+  Is,
+  Scopes,
+  Table,
+  UpdatedAt
+} from 'sequelize-typescript'
+import {
+  isVideoChannelDescriptionValid,
+  isVideoChannelDisplayNameValid,
+  isVideoChannelPublicEmailValid,
+  isVideoChannelSupportValid
+} from '../../helpers/custom-validators/video-channels.js'
+import { CONSTRAINTS_FIELDS, WEBSERVER } from '../../initializers/constants.js'
+import { sendDeleteActor } from '../../lib/activitypub/send/index.js'
+import {
+  MChannelAP,
+  MChannelBannerAccountDefault,
+  MChannelDefault,
+  MChannelFormattable,
+  MChannelHost,
+  MChannelIdHost,
+  MChannelSummaryFormattable,
+  type MChannel
+} from '../../types/models/video/index.js'
+import { AccountModel, ScopeNames as AccountModelScopeNames } from '../account/account.js'
+import { ActorImageModel } from '../actor/actor-image.js'
+import { ActorModel, actorSummaryAttributes } from '../actor/actor.js'
+import { ServerModel, serverSummaryAttributes } from '../server/server.js'
+import { buildSQLAttributes, buildTrigramSearchIndex, SequelizeModel, setAsUpdated, throwIfNotValid } from '../shared/index.js'
+import { ListVideoChannelsOptions, VideoChannelListQueryBuilder } from './sql/channel/video-channel-list-query-builder.js'
+import { VideoChannelCollaboratorModel } from './video-channel-collaborator.js'
+import { VideoPlaylistModel } from './video-playlist.js'
+import { VideoModel } from './video.js'
+
+const channelSummaryAttributes = [ 'id', 'name', 'description' ] as const satisfies (keyof AttributesOnly<AccountModel>)[]
+
+export enum ScopeNames {
+  SUMMARY = 'SUMMARY',
+  WITH_ACCOUNT = 'WITH_ACCOUNT',
+  WITH_ACTOR = 'WITH_ACTOR',
+  WITH_ACTOR_BANNER = 'WITH_ACTOR_BANNER',
+  WITH_VIDEOS = 'WITH_VIDEOS'
+}
+
+export type SummaryOptions = {
+  actorRequired?: boolean // Default: true
+  withAccount?: boolean // Default: false
+  withAccountBlockerIds?: number[]
+}
+
+@DefaultScope(() => ({
+  include: [
+    {
+      model: ActorModel,
+      required: true
+    }
+  ]
+}))
+@Scopes(() => ({
+  [ScopeNames.SUMMARY]: (options: SummaryOptions = {}) => {
+    const include: Includeable[] = [
+      {
+        attributes: actorSummaryAttributes,
+        model: ActorModel.unscoped(),
+        required: options.actorRequired ?? true,
+        include: [
+          {
+            attributes: serverSummaryAttributes,
+            model: ServerModel.unscoped(),
+            required: false
+          },
+          {
+            model: ActorImageModel,
+            as: 'Avatars',
+            required: false
+          }
+        ]
+      }
+    ]
+
+    const base: FindOptions = {
+      attributes: channelSummaryAttributes
+    }
+
+    if (options.withAccount === true) {
+      include.push({
+        model: AccountModel.scope({
+          method: [ AccountModelScopeNames.SUMMARY, { withAccountBlockerIds: options.withAccountBlockerIds } ]
+        }),
+        required: true
+      })
+    }
+
+    base.include = include
+
+    return base
+  },
+  [ScopeNames.WITH_ACCOUNT]: {
+    include: [
+      {
+        model: AccountModel,
+        required: true
+      }
+    ]
+  },
+  [ScopeNames.WITH_ACTOR]: {
+    include: [
+      ActorModel
+    ]
+  },
+  [ScopeNames.WITH_ACTOR_BANNER]: {
+    include: [
+      {
+        model: ActorModel,
+        include: [
+          {
+            model: ActorImageModel,
+            required: false,
+            as: 'Banners'
+          }
+        ]
+      }
+    ]
+  },
+  [ScopeNames.WITH_VIDEOS]: {
+    include: [
+      VideoModel
+    ]
+  }
+}))
+@Table({
+  tableName: 'videoChannel',
+  indexes: [
+    buildTrigramSearchIndex('video_channel_name_trigram', 'name'),
+
+    {
+      fields: [ 'accountId' ]
+    }
+  ]
+})
+export class VideoChannelModel extends SequelizeModel<VideoChannelModel> {
+  @AllowNull(false)
+  @Is('VideoChannelName', value => throwIfNotValid(value, isVideoChannelDisplayNameValid, 'name'))
+  @Column
+  declare name: string
+
+  @AllowNull(true)
+  @Default(null)
+  @Is('VideoChannelDescription', value => throwIfNotValid(value, isVideoChannelDescriptionValid, 'description', true))
+  @Column(DataType.STRING(CONSTRAINTS_FIELDS.VIDEO_CHANNELS.DESCRIPTION.max))
+  declare description: string
+
+  @AllowNull(true)
+  @Default(null)
+  @Is('VideoChannelSupport', value => throwIfNotValid(value, isVideoChannelSupportValid, 'support', true))
+  @Column(DataType.STRING(CONSTRAINTS_FIELDS.VIDEO_CHANNELS.SUPPORT.max))
+  declare support: string
+
+  @AllowNull(true)
+  @Default(null)
+  @Is('VideoChannelPublicEmail', value => throwIfNotValid(value, isVideoChannelPublicEmailValid, 'publicEmail', true))
+  @Column(DataType.STRING(400))
+  declare publicEmail: string
+
+  @CreatedAt
+  declare createdAt: Date
+
+  @UpdatedAt
+  declare updatedAt: Date
+
+  @ForeignKey(() => AccountModel)
+  @Column
+  declare accountId: number
+
+  @BelongsTo(() => AccountModel, {
+    foreignKey: {
+      allowNull: false
+    }
+  })
+  declare Account: Awaited<AccountModel>
+
+  @HasMany(() => VideoModel, {
+    foreignKey: {
+      name: 'channelId',
+      allowNull: false
+    },
+    onDelete: 'CASCADE',
+    hooks: true
+  })
+  declare Videos: Awaited<VideoModel>[]
+
+  @HasMany(() => VideoPlaylistModel, {
+    foreignKey: {
+      allowNull: true
+    },
+    onDelete: 'CASCADE',
+    hooks: true
+  })
+  declare VideoPlaylists: Awaited<VideoPlaylistModel>[]
+
+  @HasMany(() => VideoChannelCollaboratorModel, {
+    foreignKey: 'channelId',
+    onDelete: 'CASCADE'
+  })
+  declare VideoChannelCollaborators: Awaited<VideoChannelCollaboratorModel>[]
+
+  @HasOne(() => ActorModel, {
+    foreignKey: {
+      allowNull: true
+    },
+    onDelete: 'cascade',
+    hooks: true
+  })
+  declare Actor: Awaited<ActorModel>
+
+  @AfterCreate
+  static notifyCreate (channel: MChannel) {
+    InternalEventEmitter.Instance.emit('channel-created', { channel })
+  }
+
+  @AfterUpdate
+  static notifyUpdate (channel: MChannel) {
+    InternalEventEmitter.Instance.emit('channel-updated', { channel })
+  }
+
+  @AfterDestroy
+  static notifyDestroy (channel: MChannel) {
+    InternalEventEmitter.Instance.emit('channel-deleted', { channel })
+  }
+
+  @BeforeDestroy
+  static async sendDeleteIfOwned (instance: VideoChannelModel, options) {
+    if (!instance.Actor) {
+      instance.Actor = await instance.$get('Actor', { transaction: options.transaction })
+    }
+
+    if (instance.Actor.isLocal()) {
+      return sendDeleteActor(instance.Actor, options.transaction)
+    }
+
+    return undefined
+  }
+
+  // ---------------------------------------------------------------------------
+
+  static getSQLAttributes (tableName: string, aliasPrefix = '') {
+    return buildSQLAttributes({
+      model: this,
+      tableName,
+      aliasPrefix
+    })
+  }
+
+  static getSQLSummaryAttributes (tableName: string, aliasPrefix = '') {
+    return buildSQLAttributes({
+      model: this,
+      tableName,
+      aliasPrefix,
+      includeAttributes: channelSummaryAttributes
+    })
+  }
+
+  // ---------------------------------------------------------------------------
+
+  static countByAccount (accountId: number) {
+    const query = {
+      where: {
+        accountId
+      }
+    }
+
+    return VideoChannelModel.unscoped().count(query)
+  }
+
+  static async getStats () {
+    function getLocalVideoChannelStats (days?: number) {
+      const options = {
+        type: QueryTypes.SELECT as QueryTypes.SELECT,
+        raw: true
+      }
+
+      const videoJoin = days
+        ? `INNER JOIN "video" AS "Videos" ON "VideoChannelModel"."id" = "Videos"."channelId" ` +
+          `AND ("Videos"."publishedAt" > Now() - interval '${days}d')`
+        : ''
+
+      const query = `
+      SELECT COUNT(DISTINCT("VideoChannelModel"."id")) AS "count"
+      FROM "videoChannel" AS "VideoChannelModel"
+      ${videoJoin}
+      INNER JOIN "account" AS "Account" ON "VideoChannelModel"."accountId" = "Account"."id"
+      INNER JOIN "actor" AS "Account->Actor" ON "Account"."id" = "Account->Actor"."accountId"
+        AND "Account->Actor"."serverId" IS NULL`
+
+      return VideoChannelModel.sequelize.query<{ count: string }>(query, options)
+        .then(r => parseInt(r[0].count, 10))
+    }
+
+    const totalLocalVideoChannels = await getLocalVideoChannelStats()
+    const totalLocalDailyActiveVideoChannels = await getLocalVideoChannelStats(1)
+    const totalLocalWeeklyActiveVideoChannels = await getLocalVideoChannelStats(7)
+    const totalLocalMonthlyActiveVideoChannels = await getLocalVideoChannelStats(30)
+    const totalLocalHalfYearActiveVideoChannels = await getLocalVideoChannelStats(180)
+
+    return {
+      totalLocalVideoChannels,
+      totalLocalDailyActiveVideoChannels,
+      totalLocalWeeklyActiveVideoChannels,
+      totalLocalMonthlyActiveVideoChannels,
+      totalLocalHalfYearActiveVideoChannels
+    }
+  }
+
+  static async getChannelQuota (channelId: number) {
+    const webVideoFiles = 'SELECT "videoFile"."size" AS "size", "video"."id" AS "videoId" FROM "videoFile" ' +
+      'INNER JOIN "video" ON "videoFile"."videoId" = "video"."id" ' +
+      'AND "video"."isLive" = false AND "video"."channelId" = $channelId'
+
+    const hlsFiles = 'SELECT "videoFile"."size" AS "size", "video"."id" AS "videoId" FROM "videoFile" ' +
+      'INNER JOIN "videoStreamingPlaylist" ON "videoFile"."videoStreamingPlaylistId" = "videoStreamingPlaylist".id ' +
+      'INNER JOIN "video" ON "videoStreamingPlaylist"."videoId" = "video"."id" ' +
+      'AND "video"."isLive" = false AND "video"."channelId" = $channelId'
+
+    const sql = 'SELECT COALESCE(SUM("size"), 0) AS "total" ' +
+      'FROM (' +
+      `SELECT MAX("t1"."size") AS "size" FROM (${webVideoFiles} UNION ${hlsFiles}) t1 ` +
+      'GROUP BY "t1"."videoId"' +
+      ') t2'
+
+    const queryOptions = {
+      bind: { channelId },
+      type: QueryTypes.SELECT as QueryTypes.SELECT
+    }
+
+    const [ { total } ] = await VideoChannelModel.sequelize.query<{ total: string }>(sql, queryOptions)
+    if (!total) return 0
+
+    return parseInt(total, 10)
+  }
+
+  // ---------------------------------------------------------------------------
+
+  static listLocalsForSitemap (idRange: { min: number, max: number }): Promise<MChannelHost[]> {
+    return VideoChannelModel
+      .unscoped()
+      .findAll({
+        ...this.buildLocalsForSitemapQuery({ actorAttributes: [ 'preferredUsername', 'serverId' ], idRange }),
+
+        attributes: [ 'updatedAt' ],
+        order: [ [ 'id', 'ASC' ] ]
+      })
+  }
+
+  static async listLocalSitemapPages (idsPerPage: number): Promise<{ page: number, lastUpdatedAt: Date }[]> {
+    const rows = await VideoChannelModel
+      .unscoped()
+      .findAll<any>({
+        ...this.buildLocalsForSitemapQuery({ actorAttributes: [] }),
+
+        attributes: [
+          [ literal(`("VideoChannelModel"."id" - 1) / ${forceNumber(idsPerPage)} + 1`), 'page' ],
+          [ literal('MAX("VideoChannelModel"."updatedAt")'), 'lastUpdatedAt' ]
+        ],
+        group: 'page',
+        order: [ literal('"page" ASC') ],
+        raw: true
+      })
+
+    return rows.map(r => ({ page: forceNumber(r.page), lastUpdatedAt: new Date(r.lastUpdatedAt) }))
+  }
+
+  private static buildLocalsForSitemapQuery (options: {
+    actorAttributes: string[]
+    idRange?: { min: number, max: number }
+  }) {
+    const and: WhereOptions[] = [
+      literal(`EXISTS (SELECT 1 FROM "video" WHERE "privacy" = ${VideoPrivacy.PUBLIC} AND "channelId" = "VideoChannelModel"."id")`)
+    ]
+
+    if (options.idRange) {
+      and.push({ id: { [Op.between]: [ options.idRange.min, options.idRange.max ] } })
+    }
+
+    return {
+      include: [
+        {
+          attributes: options.actorAttributes,
+          model: ActorModel.unscoped(),
+          where: {
+            serverId: null
+          }
+        }
+      ],
+      where: {
+        [Op.and]: and
+      }
+    }
+  }
+
+  // ---------------------------------------------------------------------------
+
+  static listForApi (options: ListVideoChannelsOptions) {
+    return Promise.all([
+      new VideoChannelListQueryBuilder(VideoChannelModel.sequelize, options).list<VideoChannelModel>() as Promise<MChannelFormattable[]>,
+      new VideoChannelListQueryBuilder(VideoChannelModel.sequelize, options).count()
+    ]).then(([ rows, count ]) => {
+      return { total: count, data: rows }
+    })
+  }
+
+  static listByAccountForAPI (
+    options: Pick<ListVideoChannelsOptions, 'accountId' | 'includeCollaborations' | 'search' | 'start' | 'count' | 'sort'> & {
+      withStats?: boolean
+      statsDays?: number
+    }
+  ) {
+    const listOptions = options.withStats
+      ? { ...options, statsDaysPrior: options.statsDays ?? VIDEO_CHANNEL_STATS_DAYS_DEFAULT }
+      : options
+
+    return this.listForApi(listOptions)
+  }
+
+  // ---------------------------------------------------------------------------
+
+  static listAllOwnedByAccount (accountId: number): Promise<MChannelDefault[]> {
+    const query = {
+      limit: CONFIG.VIDEO_CHANNELS.MAX_PER_USER,
+      include: [
+        {
+          attributes: [],
+          model: AccountModel.unscoped(),
+          where: {
+            id: accountId
+          },
+          required: true
+        }
+      ]
+    }
+
+    return VideoChannelModel.findAll(query)
+  }
+
+  // ---------------------------------------------------------------------------
+
+  static load (id: number, transaction?: Transaction): Promise<MChannel> {
+    return VideoChannelModel.unscoped().findByPk(id, { transaction })
+  }
+
+  static loadAndPopulateAccount (id: number, transaction?: Transaction): Promise<MChannelBannerAccountDefault> {
+    return VideoChannelModel.unscoped()
+      .scope([ ScopeNames.WITH_ACTOR_BANNER, ScopeNames.WITH_ACCOUNT ])
+      .findByPk(id, { transaction })
+  }
+
+  static loadByUrlAndPopulateAccount (url: string): Promise<MChannelBannerAccountDefault> {
+    const query = {
+      include: [
+        {
+          model: ActorModel,
+          required: true,
+          where: {
+            url
+          },
+          include: [
+            {
+              model: ActorImageModel,
+              required: false,
+              as: 'Banners'
+            }
+          ]
+        }
+      ]
+    }
+
+    return VideoChannelModel
+      .scope([ ScopeNames.WITH_ACCOUNT ])
+      .findOne(query)
+  }
+
+  static loadByHandleAndPopulateAccount (handle: string) {
+    const [ name, host ] = handle.split('@')
+
+    if (!host || host === WEBSERVER.HOST) return VideoChannelModel.loadLocalByNameAndPopulateAccount(name)
+
+    return VideoChannelModel.loadByNameAndHostAndPopulateAccount(name, host)
+  }
+
+  static loadLocalByNameAndPopulateAccount (name: string): Promise<MChannelBannerAccountDefault> {
+    const query = {
+      include: [
+        {
+          model: ActorModel,
+          required: true,
+          where: {
+            [Op.and]: [
+              ActorModel.wherePreferredUsername(name, 'Actor.preferredUsername'),
+              { serverId: null }
+            ]
+          },
+          include: [
+            {
+              model: ActorImageModel,
+              required: false,
+              as: 'Banners'
+            }
+          ]
+        }
+      ]
+    }
+
+    return VideoChannelModel.unscoped()
+      .scope([ ScopeNames.WITH_ACCOUNT ])
+      .findOne(query)
+  }
+
+  static loadByNameAndHostAndPopulateAccount (name: string, host: string): Promise<MChannelBannerAccountDefault> {
+    const query = {
+      include: [
+        {
+          model: ActorModel,
+          required: true,
+          where: ActorModel.wherePreferredUsername(name, 'Actor.preferredUsername'),
+          include: [
+            {
+              model: ServerModel,
+              required: true,
+              where: { host }
+            },
+            {
+              model: ActorImageModel,
+              required: false,
+              as: 'Banners'
+            }
+          ]
+        }
+      ]
+    }
+
+    return VideoChannelModel.unscoped()
+      .scope([ ScopeNames.WITH_ACCOUNT ])
+      .findOne(query)
+  }
+
+  // ---------------------------------------------------------------------------
+
+  toFormattedSummaryJSON (this: MChannelSummaryFormattable): VideoChannelSummary {
+    const actor = this.Actor.toFormattedSummaryJSON()
+
+    return {
+      id: this.id,
+      name: actor.name,
+      displayName: this.getDisplayName(),
+      url: actor.url,
+      host: actor.host,
+      avatars: actor.avatars
+    }
+  }
+
+  toFormattedJSON (this: MChannelFormattable): VideoChannel {
+    const viewsPerDayString = this.get('viewsPerDay') as string
+    const videosCount = this.get('videosCount') as number
+    const viewsGroupInterval = this.get('viewsGroupInterval') as VideoChannel['viewsGroupInterval']
+
+    let viewsPerDay: { date: Date, views: number }[]
+
+    if (viewsPerDayString) {
+      viewsPerDay = viewsPerDayString.split(',')
+        .map(v => {
+          const [ dateString, amount ] = v.split('|')
+
+          return {
+            date: new Date(dateString),
+            views: +amount
+          }
+        })
+    }
+
+    const totalViews = this.get('totalViews') as number
+
+    const actor = this.Actor.toFormattedJSON()
+    const videoChannel = {
+      id: this.id,
+      displayName: this.getDisplayName(),
+      description: this.description,
+      support: this.support,
+      publicEmail: this.publicEmail,
+      isLocal: this.Actor.isLocal(),
+      updatedAt: this.updatedAt,
+
+      ownerAccount: undefined,
+
+      videosCount,
+      viewsPerDay,
+      viewsGroupInterval,
+      totalViews,
+
+      avatars: actor.avatars
+    }
+
+    if (this.Account) videoChannel.ownerAccount = this.Account.toFormattedJSON()
+
+    return Object.assign(actor, videoChannel)
+  }
+
+  async toActivityPubObject (this: MChannelAP): Promise<ActivityPubActor> {
+    const obj = await this.Actor.toActivityPubObject(this.name)
+
+    return {
+      ...obj,
+
+      url: [
+        {
+          type: 'Link',
+          mediaType: 'text/html',
+          href: this.getClientUrl(true)
+        },
+        {
+          type: 'Link',
+          mediaType: 'text/html',
+          href: this.getClientUrl(false)
+        },
+        {
+          type: 'Link',
+          mediaType: 'text/html',
+          href: this.Actor.url
+        }
+      ] as ActivityUrlObject[],
+
+      playerSettings: getLocalActorPlayerSettingsActivityPubUrl(this.Actor),
+
+      summary: this.description,
+      support: this.support,
+      postingRestrictedToMods: true,
+
+      email: this.publicEmail,
+
+      attributedTo: [
+        this.Account.Actor.url
+      ]
+    }
+  }
+
+  // Avoid error when running this method on MAccount... | MChannel...
+  getClientUrl (this: MAccountIdHost | MChannelIdHost, videosSuffix = true) {
+    const suffix = videosSuffix
+      ? '/videos'
+      : ''
+
+    return WEBSERVER.URL + '/c/' + this.Actor.getIdentifier() + suffix
+  }
+
+  getClientManageUrl (this: MAccountIdHost | MChannelIdHost) {
+    return WEBSERVER.URL + '/my-library/video-channels/manage/' + this.Actor.getIdentifier()
+  }
+
+  getDisplayName () {
+    return this.name
+  }
+
+  isOutdated () {
+    return this.Actor.isOutdated()
+  }
+
+  setAsUpdated (transaction?: Transaction) {
+    return setAsUpdated({ sequelize: this.sequelize, table: 'videoChannel', id: this.id, transaction })
+  }
+}

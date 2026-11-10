@@ -2,9 +2,15 @@
 
 set -eu
 
-rm -rf ./dist
+if [ -z ${1+x} ] || [ "$1" != "--incremental" ]; then
+  rm -rf ./dist ./packages/*/dist
+fi
 
-npm run tsc
-cp "./tsconfig.json" "./dist"
-cp -r "./server/static" "./server/assets" "./dist/server"
-cp -r "./server/lib/emails" "./dist/server/lib"
+npm run tsc --  -b --verbose server/tsconfig.json
+npm run tsc-alias:server
+
+bash ./scripts/build/server-assets.sh
+
+cp "./server/scripts/upgrade.sh" "./dist/scripts"
+
+mkdir -p ./client/dist && cp -r ./client/src/assets ./client/dist

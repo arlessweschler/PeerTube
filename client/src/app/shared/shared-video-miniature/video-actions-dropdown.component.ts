@@ -1,21 +1,30 @@
-import { Component, EventEmitter, Input, OnChanges, Output, ViewChild } from '@angular/core'
-import { AuthService, ConfirmService, Notifier, ScreenService } from '@app/core'
-import { BlocklistService, VideoBlockComponent, VideoBlockService, VideoReportComponent } from '@app/shared/shared-moderation'
-import { NgbDropdown } from '@ng-bootstrap/ng-bootstrap'
-import { VideoCaption } from '@shared/models'
+import { ChangeDetectionStrategy, Component, OnChanges, booleanAttribute, inject, input, output, viewChild } from '@angular/core'
+import { AuthService, ConfirmService, Notifier, ScreenService, ServerService } from '@app/core'
+import { getDisplayHandle } from '@app/helpers'
+import { NgbDropdown, NgbDropdownAnchor, NgbDropdownMenu } from '@ng-bootstrap/ng-bootstrap'
+import { UserRight, VideoCaption, VideoState } from '@peertube/peertube-models'
+import { of } from 'rxjs'
 import {
-  Actor,
+  ActionDropdownComponent,
   DropdownAction,
-  DropdownButtonSize,
-  DropdownDirection,
-  RedundancyService,
-  Video,
-  VideoDetails,
-  VideoService
-} from '../shared-main'
-import { LiveStreamInformationComponent } from '../shared-video-live'
-import { VideoAddToPlaylistComponent } from '../shared-video-playlist'
-import { VideoDownloadComponent } from './video-download.component'
+  DropdownButtonIcon,
+  DropdownButtonSize
+} from '../shared-main/buttons/action-dropdown.component'
+import { VideoCaptionService } from '../shared-main/video-caption/video-caption.service'
+import { RedundancyService } from '../shared-main/video/redundancy.service'
+import { VideoDetails } from '../shared-main/video/video-details.model'
+import { VideoImportService } from '../shared-main/video/video-import.service'
+import { Video } from '../shared-main/video/video.model'
+import { VideoService } from '../shared-main/video/video.service'
+import { AccountBlockBadgeInput } from '../shared-moderation/account-block-badges.component'
+import { BlocklistService } from '../shared-moderation/blocklist.service'
+import { VideoReportComponent } from '../shared-moderation/report-modals'
+import { VideoBlockComponent } from '../shared-moderation/video-block.component'
+import { VideoBlockService } from '../shared-moderation/video-block.service'
+import { VideoAddToPlaylistComponent } from '../shared-video-playlist/video-add-to-playlist.component'
+import { VideoDownloadComponent } from './download/video-download.component'
+
+export type VideoActionsModalName = 'download' | 'report' | 'block' | 'remove'
 
 export type VideoActionsDisplayType = {
   playlist?: boolean
@@ -25,28 +34,57 @@ export type VideoActionsDisplayType = {
   delete?: boolean
   report?: boolean
   duplicate?: boolean
-  mute?: boolean
+  muteByUser?: boolean
+  muteByServer?: boolean
   liveInfo?: boolean
+  removeFiles?: boolean
+  transcoding?: boolean
+  generateTranscription?: boolean
+  transcriptionWidget?: boolean
+  retryFailedImport?: boolean
 }
 
 @Component({
   selector: 'my-video-actions-dropdown',
   templateUrl: './video-actions-dropdown.component.html',
-  styleUrls: [ './video-actions-dropdown.component.scss' ]
+  styleUrls: [ './video-actions-dropdown.component.scss' ],
+  changeDetection: ChangeDetectionStrategy.Eager,
+  imports: [
+    NgbDropdown,
+    NgbDropdownAnchor,
+    NgbDropdownMenu,
+    VideoAddToPlaylistComponent,
+    ActionDropdownComponent,
+    VideoDownloadComponent,
+    VideoReportComponent,
+    VideoBlockComponent
+  ]
 })
 export class VideoActionsDropdownComponent implements OnChanges {
-  @ViewChild('playlistDropdown') playlistDropdown: NgbDropdown
-  @ViewChild('playlistAdd') playlistAdd: VideoAddToPlaylistComponent
+  private authService = inject(AuthService)
+  private notifier = inject(Notifier)
+  private confirmService = inject(ConfirmService)
+  private blocklistService = inject(BlocklistService)
+  private videoBlocklistService = inject(VideoBlockService)
+  private screenService = inject(ScreenService)
+  private videoService = inject(VideoService)
+  private videoCaptionService = inject(VideoCaptionService)
+  private redundancyService = inject(RedundancyService)
+  private serverService = inject(ServerService)
+  private videoImportService = inject(VideoImportService)
 
-  @ViewChild('videoDownloadModal') videoDownloadModal: VideoDownloadComponent
-  @ViewChild('videoReportModal') videoReportModal: VideoReportComponent
-  @ViewChild('videoBlockModal') videoBlockModal: VideoBlockComponent
-  @ViewChild('liveStreamInformationModal') liveStreamInformationModal: LiveStreamInformationComponent
+  readonly playlistDropdown = viewChild<NgbDropdown>('playlistDropdown')
+  readonly playlistAdd = viewChild<VideoAddToPlaylistComponent>('playlistAdd')
 
-  @Input() video: Video | VideoDetails
-  @Input() videoCaptions: VideoCaption[] = []
+  readonly videoDownloadModal = viewChild<VideoDownloadComponent>('videoDownloadModal')
+  readonly videoReportModal = viewChild<VideoReportComponent>('videoReportModal')
+  readonly videoBlockModal = viewChild<VideoBlockComponent>('videoBlockModal')
 
-  @Input() displayOptions: VideoActionsDisplayType = {
+  readonly video = input<Video | VideoDetails>()
+  readonly videoCaptions = input<VideoCaption[]>([])
+  readonly muteStatus = input<AccountBlockBadgeInput>()
+
+  readonly displayOptions = input<VideoActionsDisplayType>({
     playlist: false,
     download: true,
     update: true,
@@ -54,47 +92,57 @@ export class VideoActionsDropdownComponent implements OnChanges {
     delete: true,
     report: true,
     duplicate: true,
-    mute: true,
-    liveInfo: false
-  }
-  @Input() placement = 'left'
+    muteByUser: true,
+    muteByServer: true,
+    liveInfo: false,
+    removeFiles: false,
+    transcoding: false,
+    generateTranscription: false,
+    transcriptionWidget: false,
+    retryFailedImport: true
+  })
+  readonly placement = input('auto')
+  readonly moreActions = input<DropdownAction<{
+    video: Video
+  }>[][]>([])
+  readonly actionAvailabilityHint = input(false, { transform: booleanAttribute })
 
-  @Input() label: string
+  readonly label = input<string>(undefined)
+  readonly ariaLabel = input<string>(undefined)
 
-  @Input() buttonStyled = false
-  @Input() buttonSize: DropdownButtonSize = 'normal'
-  @Input() buttonDirection: DropdownDirection = 'vertical'
+  readonly buttonStyled = input(false, { transform: booleanAttribute })
+  readonly buttonSize = input<DropdownButtonSize>('normal')
+  readonly buttonIcon = input<DropdownButtonIcon>('more-vertical')
 
-  @Output() videoRemoved = new EventEmitter()
-  @Output() videoUnblocked = new EventEmitter()
-  @Output() videoBlocked = new EventEmitter()
-  @Output() videoAccountMuted = new EventEmitter()
-  @Output() modalOpened = new EventEmitter()
+  readonly transcriptionWidgetOpened = input<boolean>(undefined)
+
+  readonly videoFilesRemoved = output()
+  readonly videoRemoved = output()
+  readonly videoUnblocked = output()
+  readonly videoBlocked = output()
+  readonly muted = output()
+  readonly unmuted = output()
+  readonly transcodingCreated = output()
+  readonly videoImportRetried = output()
+  readonly videoExistsInPlaylistChange = output()
+
+  readonly modalOpened = output<VideoActionsModalName>()
+  readonly modalClosed = output<VideoActionsModalName>()
+
+  readonly showTranscriptionWidget = output()
+  readonly hideTranscriptionWidget = output()
 
   videoActions: DropdownAction<{ video: Video }>[][] = []
 
-  private loaded = false
-
-  constructor (
-    private authService: AuthService,
-    private notifier: Notifier,
-    private confirmService: ConfirmService,
-    private blocklistService: BlocklistService,
-    private videoBlocklistService: VideoBlockService,
-    private screenService: ScreenService,
-    private videoService: VideoService,
-    private redundancyService: RedundancyService
-  ) { }
+  dropdownOpened = false
 
   get user () {
     return this.authService.getUser()
   }
 
   ngOnChanges () {
-    if (this.loaded) {
-      this.loaded = false
-      if (this.playlistAdd) this.playlistAdd.reload()
-    }
+    const playlistAdd = this.playlistAdd()
+    if (playlistAdd) playlistAdd.reload()
 
     this.buildActions()
   }
@@ -103,146 +151,394 @@ export class VideoActionsDropdownComponent implements OnChanges {
     return this.authService.isLoggedIn()
   }
 
-  loadDropdownInformation () {
-    if (!this.isUserLoggedIn() || this.loaded === true) return
-
-    this.loaded = true
-
-    if (this.displayOptions.playlist) this.playlistAdd.load()
-  }
-
-  /* Show modals */
+  // ---------------------------------------------------------------------------
+  // Show modals
+  // ---------------------------------------------------------------------------
 
   showDownloadModal () {
-    this.modalOpened.emit()
+    this.modalOpened.emit('download')
 
-    this.videoDownloadModal.show(this.video as VideoDetails, this.videoCaptions)
+    const video = this.video()
+    const obs = video instanceof VideoDetails
+      ? of(video)
+      : this.videoService.getVideo({ videoId: video.uuid })
+
+    obs.subscribe((videoDetails: VideoDetails) => {
+      this.videoDownloadModal().show(videoDetails, this.videoCaptions())
+    })
   }
 
   showReportModal () {
-    this.modalOpened.emit()
+    this.modalOpened.emit('report')
 
-    this.videoReportModal.show()
+    this.videoReportModal().show()
   }
 
   showBlockModal () {
-    this.modalOpened.emit()
+    this.modalOpened.emit('block')
 
-    this.videoBlockModal.show()
+    this.videoBlockModal().show([ this.video() ])
   }
 
-  showLiveInfoModal (video: Video) {
-    this.modalOpened.emit()
+  // ---------------------------------------------------------------------------
+  // Actions checker
+  // ---------------------------------------------------------------------------
 
-    this.liveStreamInformationModal.show(video)
+  canUpdate () {
+    if (!this.user) return false
+
+    return this.video().canBeUpdatedBy(this.user)
   }
 
-  /* Actions checker */
+  canStudioEdit () {
+    if (!this.user) return false
 
-  isVideoUpdatable () {
-    return this.video.isUpdatableBy(this.user)
+    return this.video().canBeStudioEditedBy({
+      user: this.user,
+      studioEnabled: this.serverService.getHTMLConfig().videoStudio.enabled
+    })
   }
 
-  isVideoRemovable () {
-    return this.video.isRemovableBy(this.user)
+  canDisplayStats () {
+    if (!this.user) return false
+
+    // Users that can update the video can also see its stats
+    return this.video().canBeUpdatedBy(this.user)
   }
 
-  isVideoBlockable () {
-    return this.video.isBlockableBy(this.user)
+  canRemove () {
+    if (!this.user) return false
+
+    return this.video().canBeRemovedBy(this.user)
   }
 
-  isVideoUnblockable () {
-    return this.video.isUnblockableBy(this.user)
+  canBlock () {
+    if (!this.user) return false
+
+    return this.video().canBeBlockedBy(this.user)
   }
 
-  isVideoLiveInfoAvailable () {
-    return this.video.isLiveInfoAvailableBy(this.user)
+  canUnblock () {
+    if (!this.user) return false
+
+    return this.video().canBeUnblockedBy(this.user)
   }
 
-  isVideoDownloadable () {
-    return this.video &&
-      this.video.isLive !== true &&
-      this.video instanceof VideoDetails &&
-      this.video.downloadEnabled
+  canDisplayLiveInfo () {
+    if (!this.user) return false
+
+    return this.video().canDisplayLiveInfoBy(this.user)
   }
 
-  canVideoBeDuplicated () {
-    return !this.video.isLive && this.video.canBeDuplicatedBy(this.user)
+  canGenerateTranscription () {
+    if (!this.user) return false
+
+    return this.video().canGenerateTranscription(this.user, this.serverService.getHTMLConfig().videoTranscription.enabled)
   }
 
-  isVideoAccountMutable () {
-    return this.video.account.id !== this.user.account.id
+  canRetryImport () {
+    if (this.video().state?.id !== VideoState.TO_IMPORT_FAILED) return false
+    if (!this.user) return false
+    if (this.user.hasRight(UserRight.MANAGE_VIDEO_IMPORTS)) return true
+
+    const channel = this.video().channel
+    if (this.user.isEditorOfChannel(channel) || this.user.isOwnerOfChannel(channel)) return true
+
+    return false
   }
 
-  /* Action handlers */
+  canReport () {
+    if (!this.user) return false
+
+    return this.video().canBeReportedBy(this.user)
+  }
+
+  // ---------------------------------------------------------------------------
+
+  canBeDownloadedByAnonymous () {
+    const video = this.video()
+
+    return (
+      video &&
+      video.isLive !== true &&
+      video instanceof VideoDetails &&
+      video.downloadEnabled
+    )
+  }
+
+  canBeDownloadedByUser () {
+    if (!this.user) return false
+
+    const video = this.video()
+
+    return (
+      video &&
+      video.isLive !== true &&
+      video.canBypassDisabledDownload(this.user)
+    )
+  }
+
+  // ---------------------------------------------------------------------------
+
+  canDuplicate () {
+    if (!this.user) return false
+
+    const video = this.video()
+    return !video.isLive && video.canBeDuplicatedBy(this.user)
+  }
+
+  canRemoveFiles () {
+    if (!this.user) return false
+
+    return this.video().canRemoveAllHLSOrWebFiles(this.user)
+  }
+
+  canRunTranscoding () {
+    if (!this.user) return false
+
+    return this.video().canRunTranscoding(this.user)
+  }
+
+  // ---------------------------------------------------------------------------
+  // Action handlers
+  // ---------------------------------------------------------------------------
 
   async unblockVideo () {
-    const confirmMessage = $localize`Do you really want to unblock this video? It will be available again in the videos list.`
+    const confirmMessage = $localize`Do you really want to unblock ${this.video().name}? It will be available again in the videos list.`
 
-    const res = await this.confirmService.confirm(confirmMessage, $localize`Unblock`)
+    const res = await this.confirmService.confirm(confirmMessage, $localize`Unblock ${this.video().name}`)
     if (res === false) return
 
-    this.videoBlocklistService.unblockVideo(this.video.id)
-        .subscribe(
-          () => {
-            this.notifier.success($localize`Video ${this.video.name} unblocked.`)
+    this.videoBlocklistService.unblockVideos(this.video().id)
+      .subscribe({
+        next: () => {
+          const video = this.video()
+          this.notifier.success($localize`Video ${video.name} unblocked.`)
 
-            this.video.blacklisted = false
-            this.video.blockedReason = null
+          video.blacklisted = false
+          video.blacklistedReason = null
 
-            this.videoUnblocked.emit()
-          },
+          this.videoUnblocked.emit()
+        },
 
-          err => this.notifier.error(err.message)
-        )
+        error: err => this.notifier.handleError(err)
+      })
   }
 
   async removeVideo () {
-    this.modalOpened.emit()
+    this.modalOpened.emit('remove')
 
-    let message = $localize`Do you really want to delete this video?`
-    if (this.video.isLive) {
-      message += ' ' + $localize`The live stream will be automatically terminated.`
+    let message = $localize`Do you really want to delete ${this.video().name}?`
+    const video = this.video()
+    if (video.isLive) {
+      message += ' ' + $localize`The live stream will be automatically terminated and replays won't be saved.`
     }
 
-    const res = await this.confirmService.confirm(message, $localize`Delete`)
+    const res = await this.confirmService.confirm(message, $localize`Delete ${video.name}`)
     if (res === false) return
 
-    this.videoService.removeVideo(this.video.id)
-        .subscribe(
-          () => {
-            this.notifier.success($localize`Video ${this.video.name} deleted.`)
-            this.videoRemoved.emit()
-          },
+    this.videoService.removeVideo(video.id)
+      .subscribe({
+        next: () => {
+          this.notifier.success($localize`Video ${this.video().name} deleted.`)
+          this.videoRemoved.emit()
+          this.modalClosed.emit('remove')
+        },
 
-          error => this.notifier.error(error.message)
-        )
+        error: err => {
+          this.modalClosed.emit('remove')
+
+          this.notifier.handleError(err)
+        }
+      })
   }
 
   duplicateVideo () {
-    this.redundancyService.addVideoRedundancy(this.video)
-        .subscribe(
-          () => {
-            const message = $localize`This video will be duplicated by your instance.`
-            this.notifier.success(message)
-          },
+    this.redundancyService.addVideoRedundancy(this.video())
+      .subscribe({
+        next: () => {
+          const message = $localize`${this.video().name} will be duplicated by your platform.`
+          this.notifier.success(message)
+        },
 
-          err => this.notifier.error(err.message)
-        )
+        error: err => this.notifier.handleError(err)
+      })
   }
 
-  muteVideoAccount () {
-    const params = { nameWithHost: Actor.CREATE_BY_STRING(this.video.account.name, this.video.account.host) }
+  // ---------------------------------------------------------------------------
+
+  muteAccount () {
+    const params = { nameWithHost: this.video().account.name + '@' + this.video().account.host }
 
     this.blocklistService.blockAccountByUser(params)
-        .subscribe(
-          () => {
-            this.notifier.success($localize`Account ${params.nameWithHost} muted.`)
-            this.videoAccountMuted.emit()
-          },
+      .subscribe({
+        next: () => {
+          this.notifier.success($localize`Account ${getDisplayHandle(params.nameWithHost)} muted.`)
+          this.muted.emit()
+        },
 
-          err => this.notifier.error(err.message)
-        )
+        error: err => this.notifier.handleError(err)
+      })
+  }
+
+  unmuteAccount () {
+    const params = { nameWithHost: this.video().account.name + '@' + this.video().account.host }
+
+    this.blocklistService.unblockAccountByUser(params)
+      .subscribe({
+        next: () => {
+          this.unmuted.emit()
+
+          this.notifier.success($localize`Account ${getDisplayHandle(params.nameWithHost)} unmuted.`)
+        },
+
+        error: err => this.notifier.handleError(err)
+      })
+  }
+
+  muteServer () {
+    const host = this.video().account.host
+
+    this.blocklistService.blockServerByUser(host)
+      .subscribe({
+        next: () => {
+          this.notifier.success($localize`Server ${host} muted.`)
+          this.muted.emit()
+        },
+
+        error: err => this.notifier.handleError(err)
+      })
+  }
+
+  unmuteServer () {
+    const host = this.video().account.host
+
+    this.blocklistService.unblockServerByUser(host)
+      .subscribe({
+        next: () => {
+          this.unmuted.emit()
+
+          this.notifier.success($localize`Server ${host} unmuted.`)
+        },
+
+        error: err => this.notifier.handleError(err)
+      })
+  }
+
+  // ---------------------------------------------------------------------------
+
+  muteAccountByServer () {
+    const params = { nameWithHost: this.video().account.name + '@' + this.video().account.host }
+
+    this.blocklistService.blockAccountByInstanceAndNotify(params)
+      .subscribe({
+        next: () => {
+          this.muted.emit()
+        },
+
+        error: err => this.notifier.handleError(err)
+      })
+  }
+
+  unmuteAccountByServer () {
+    const params = { nameWithHost: this.video().account.name + '@' + this.video().account.host }
+
+    this.blocklistService.unblockAccountByInstanceAndNotify(params)
+      .subscribe({
+        next: () => {
+          this.unmuted.emit()
+        },
+
+        error: err => this.notifier.handleError(err)
+      })
+  }
+
+  muteServerByServer () {
+    const host = this.video().account.host
+
+    this.blocklistService.blockServerByInstanceAndNotify(host)
+      .subscribe({
+        next: () => {
+          this.muted.emit()
+        },
+
+        error: err => this.notifier.handleError(err)
+      })
+  }
+
+  unmuteServerByServer () {
+    const host = this.video().account.host
+
+    this.blocklistService.unblockServerByInstanceAndNotify(host)
+      .subscribe({
+        next: () => {
+          this.unmuted.emit()
+        },
+
+        error: err => this.notifier.handleError(err)
+      })
+  }
+
+  // ---------------------------------------------------------------------------
+
+  async removeVideoFiles (video: Video, type: 'hls' | 'web-videos') {
+    const confirmMessage = $localize`Do you really want to remove "${this.video().name}" files?`
+
+    const res = await this.confirmService.confirm(confirmMessage, $localize`Remove "${this.video().name}" files`)
+    if (res === false) return
+
+    this.videoService.removeVideoFiles([ video.id ], type)
+      .subscribe({
+        next: () => {
+          this.notifier.success($localize`Removed files of ${video.name}.`)
+          this.videoFilesRemoved.emit()
+        },
+
+        error: err => this.notifier.handleError(err)
+      })
+  }
+
+  runTranscoding (video: Video, type: 'hls' | 'web-video') {
+    this.videoService.runTranscoding({ videos: [ video ], type })
+      .subscribe({
+        next: result => {
+          if (result.failures.length !== 0) return this.notifier.handleError(result.failures[0].error)
+          if (!result.success) return
+
+          this.notifier.success($localize`Transcoding job created for "${video.name}".`)
+          this.transcodingCreated.emit()
+        },
+
+        error: err => this.notifier.handleError(err)
+      })
+  }
+
+  generateCaption (video: Video) {
+    this.videoCaptionService.generateCaption({ videos: [ video ] })
+      .subscribe({
+        next: result => {
+          if (result.failures.length !== 0) return this.notifier.handleError(result.failures[0].error)
+
+          if (result.success) this.notifier.success($localize`Transcription job created for "${video.name}".`)
+          else if (result.alreadyHasCaptions) this.notifier.info($localize`This video already has captions.`)
+        },
+
+        error: err => this.notifier.handleError(err)
+      })
+  }
+
+  retryImport () {
+    const video = this.video()
+
+    this.videoImportService.retryVideoImportByVideos([ video ])
+      .subscribe({
+        next: () => {
+          this.notifier.success($localize`Retry video import of "${video.name}" requested.`)
+          this.videoImportRetried.emit()
+        },
+
+        error: err => this.notifier.handleError(err)
+      })
   }
 
   onVideoBlocked () {
@@ -251,80 +547,236 @@ export class VideoActionsDropdownComponent implements OnChanges {
 
   getPlaylistDropdownPlacement () {
     if (this.screenService.isInSmallView()) {
-      return 'bottom-right'
+      return 'bottom-right auto'
     }
 
-    return 'bottom-left bottom-right'
+    return 'bottom-left bottom-right auto'
   }
 
   private buildActions () {
     this.videoActions = [
       [
         {
-          label: $localize`Save to playlist`,
-          handler: () => this.playlistDropdown.toggle(),
-          isDisplayed: () => this.authService.isLoggedIn() && this.displayOptions.playlist,
+          label: $localize`Save to playlist...`,
+          handler: () => this.playlistDropdown().toggle(),
+          isDisplayed: () => this.authService.isLoggedIn() && this.displayOptions().playlist,
           iconName: 'playlist-add'
         }
       ],
-      [ // actions regarding the video
+      [ // public actions regarding the video
         {
-          label: $localize`Download`,
+          label: $localize`Download...`,
           handler: () => this.showDownloadModal(),
-          isDisplayed: () => this.displayOptions.download && this.isVideoDownloadable(),
-          iconName: 'download'
+          isDisplayed: () => {
+            if (!this.displayOptions().download) return false
+
+            return this.canBeDownloadedByAnonymous() || this.canBeDownloadedByUser()
+          },
+          iconName: 'download',
+          ownerOrModeratorPrivilege: () => {
+            if (!this.actionAvailabilityHint()) return undefined
+            if (this.canBeDownloadedByAnonymous()) return undefined
+
+            return $localize`This option is visible only to you`
+          }
         },
         {
-          label: $localize`Display live information`,
-          handler: ({ video }) => this.showLiveInfoModal(video),
-          isDisplayed: () => this.displayOptions.liveInfo && this.isVideoLiveInfoAvailable(),
+          label: $localize`Show transcription`,
+          handler: () => this.showTranscriptionWidget.emit(),
+          isDisplayed: () => {
+            if (!this.displayOptions().transcriptionWidget) return false
+            if (this.transcriptionWidgetOpened()) return false
+
+            const videoCaptions = this.videoCaptions()
+            return Array.isArray(videoCaptions) && videoCaptions.length !== 0
+          },
+          iconName: 'video-lang'
+        },
+        {
+          label: $localize`Hide transcription`,
+          handler: () => this.hideTranscriptionWidget.emit(),
+          isDisplayed: () => {
+            if (!this.displayOptions().transcriptionWidget) return false
+
+            return this.transcriptionWidgetOpened() === true
+          },
+          iconName: 'video-lang'
+        }
+      ],
+      [ // private actions regarding the video
+        {
+          label: $localize`Live information`,
+          linkBuilder: ({ video }) => [ '/videos/manage', video.shortUUID, 'live-settings' ],
+          isDisplayed: () => this.displayOptions().liveInfo && this.canDisplayLiveInfo(),
           iconName: 'live'
         },
         {
-          label: $localize`Update`,
-          linkBuilder: ({ video }) => [ '/videos/update', video.uuid ],
-          iconName: 'edit',
-          isDisplayed: () => this.authService.isLoggedIn() && this.displayOptions.update && this.isVideoUpdatable()
+          label: $localize`Manage`,
+          linkBuilder: ({ video }) => [ '/videos/manage', video.shortUUID ],
+          iconName: 'film',
+          isDisplayed: () => this.authService.isLoggedIn() && this.displayOptions().update && this.canUpdate()
         },
         {
-          label: $localize`Block`,
+          label: $localize`Retry import`,
+          handler: () => this.retryImport(),
+          isDisplayed: () => this.authService.isLoggedIn() && this.displayOptions().retryFailedImport && this.canRetryImport(),
+          iconName: 'refresh'
+        },
+        {
+          label: $localize`Block...`,
           handler: () => this.showBlockModal(),
           iconName: 'no',
-          isDisplayed: () => this.authService.isLoggedIn() && this.displayOptions.blacklist && this.isVideoBlockable()
+          isDisplayed: () => this.authService.isLoggedIn() && this.displayOptions().blacklist && this.canBlock()
         },
         {
           label: $localize`Unblock`,
           handler: () => this.unblockVideo(),
           iconName: 'undo',
-          isDisplayed: () => this.authService.isLoggedIn() && this.displayOptions.blacklist && this.isVideoUnblockable()
+          isDisplayed: () => this.authService.isLoggedIn() && this.displayOptions().blacklist && this.canUnblock()
         },
         {
           label: $localize`Mirror`,
           handler: () => this.duplicateVideo(),
-          isDisplayed: () => this.authService.isLoggedIn() && this.displayOptions.duplicate && this.canVideoBeDuplicated(),
+          isDisplayed: () => this.authService.isLoggedIn() && this.displayOptions().duplicate && this.canDuplicate(),
           iconName: 'cloud-download'
         },
         {
           label: $localize`Delete`,
           handler: () => this.removeVideo(),
-          isDisplayed: () => this.authService.isLoggedIn() && this.displayOptions.delete && this.isVideoRemovable(),
+          isDisplayed: () => this.authService.isLoggedIn() && this.displayOptions().delete && this.canRemove(),
           iconName: 'delete'
         },
         {
-          label: $localize`Report`,
+          label: $localize`Report...`,
           handler: () => this.showReportModal(),
-          isDisplayed: () => this.authService.isLoggedIn() && this.displayOptions.report,
+          isDisplayed: () => this.authService.isLoggedIn() && this.displayOptions().report && this.canReport(),
           iconName: 'flag'
         }
       ],
-      [ // actions regarding the account/its server
+      [
+        {
+          label: $localize`Run HLS transcoding`,
+          handler: ({ video }) => this.runTranscoding(video, 'hls'),
+          isDisplayed: () => this.displayOptions().transcoding && this.canRunTranscoding(),
+          iconName: 'cog'
+        },
+        {
+          label: $localize`Run Web Video transcoding`,
+          handler: ({ video }) => this.runTranscoding(video, 'web-video'),
+          isDisplayed: () => this.displayOptions().transcoding && this.canRunTranscoding(),
+          iconName: 'cog'
+        },
+        {
+          label: $localize`Delete HLS files`,
+          handler: ({ video }) => this.removeVideoFiles(video, 'hls'),
+          isDisplayed: () => this.displayOptions().removeFiles && this.canRemoveFiles(),
+          iconName: 'delete'
+        },
+        {
+          label: $localize`Delete Web Video files`,
+          handler: ({ video }) => this.removeVideoFiles(video, 'web-videos'),
+          isDisplayed: () => this.displayOptions().removeFiles && this.canRemoveFiles(),
+          iconName: 'delete'
+        }
+      ],
+      [
+        {
+          label: $localize`Generate caption`,
+          handler: ({ video }) => this.generateCaption(video),
+          isDisplayed: () => this.displayOptions().generateTranscription && this.canGenerateTranscription(),
+          iconName: 'video-lang'
+        }
+      ],
+      [
         {
           label: $localize`Mute account`,
-          handler: () => this.muteVideoAccount(),
-          isDisplayed: () => this.authService.isLoggedIn() && this.displayOptions.mute && this.isVideoAccountMutable(),
+          handler: () => this.muteAccount(),
+          isDisplayed: () =>
+            this.authService.isLoggedIn() &&
+            this.displayOptions().muteByUser &&
+            this.muteStatus()?.mutedByUser === false &&
+            this.blocklistService.canMuteAccountByAccount(this.user, this.video().account),
           iconName: 'no'
+        },
+        {
+          label: $localize`Unmute account`,
+          handler: () => this.unmuteAccount(),
+          isDisplayed: () =>
+            this.authService.isLoggedIn() &&
+            this.displayOptions().muteByUser &&
+            this.muteStatus()?.mutedByUser === true &&
+            this.blocklistService.canMuteAccountByAccount(this.user, this.video().account),
+
+          iconName: 'undo'
+        },
+        {
+          label: $localize`Mute platform`,
+          handler: () => this.muteServer(),
+          isDisplayed: () =>
+            this.authService.isLoggedIn() &&
+            this.displayOptions().muteByUser &&
+            this.muteStatus()?.mutedServerByUser === false &&
+            this.blocklistService.canMutePlatformByAccount(this.user, this.video().account),
+          iconName: 'no'
+        },
+        {
+          label: $localize`Unmute platform`,
+          handler: () => this.unmuteServer(),
+          isDisplayed: () =>
+            this.authService.isLoggedIn() &&
+            this.displayOptions().muteByUser &&
+            this.muteStatus()?.mutedServerByUser === true &&
+            this.blocklistService.canMutePlatformByAccount(this.user, this.video().account),
+
+          iconName: 'undo'
+        }
+      ],
+      [
+        {
+          label: $localize`Mute account by your platform`,
+          handler: () => this.muteAccountByServer(),
+          isDisplayed: () =>
+            this.authService.isLoggedIn() &&
+            this.displayOptions().muteByServer &&
+            this.muteStatus()?.mutedByInstance === false &&
+            this.blocklistService.canMuteAccountByInstance(this.user, this.video().account),
+          iconName: 'no'
+        },
+        {
+          label: $localize`Unmute account by your platform`,
+          handler: () => this.unmuteAccountByServer(),
+          isDisplayed: () =>
+            this.authService.isLoggedIn() &&
+            this.displayOptions().muteByServer &&
+            this.muteStatus()?.mutedByInstance === true &&
+            this.blocklistService.canMuteAccountByInstance(this.user, this.video().account),
+
+          iconName: 'undo'
+        },
+        {
+          label: $localize`Mute platform by your platform`,
+          handler: () => this.muteServerByServer(),
+          isDisplayed: () =>
+            this.authService.isLoggedIn() &&
+            this.displayOptions().muteByServer &&
+            this.muteStatus()?.mutedServerByInstance === false &&
+            this.blocklistService.canMutePlatformByInstance(this.user, this.video().account),
+          iconName: 'no'
+        },
+        {
+          label: $localize`Unmute platform by your platform`,
+          handler: () => this.unmuteServerByServer(),
+          isDisplayed: () =>
+            this.authService.isLoggedIn() &&
+            this.displayOptions().muteByServer &&
+            this.muteStatus()?.mutedServerByInstance === true &&
+            this.blocklistService.canMutePlatformByInstance(this.user, this.video().account),
+
+          iconName: 'undo'
         }
       ]
     ]
+
+    this.videoActions = this.videoActions.concat(this.moreActions())
   }
 }

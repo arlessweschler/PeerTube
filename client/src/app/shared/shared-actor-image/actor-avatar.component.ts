@@ -1,111 +1,205 @@
-import { Component, Input } from '@angular/core'
-import { SafeResourceUrl } from '@angular/platform-browser'
-import { VideoChannel } from '../shared-main'
+import { CommonModule, NgTemplateOutlet } from '@angular/common'
+import {
+  ChangeDetectionStrategy,
+  Component,
+  ElementRef,
+  OnChanges,
+  OnInit,
+  booleanAttribute,
+  inject,
+  input,
+  numberAttribute,
+  viewChild
+} from '@angular/core'
+import { RouterLink } from '@angular/router'
+import { objectKeysTyped } from '@peertube/peertube-core-utils'
+import { ActorImage } from '@peertube/peertube-models'
+import { findAppropriateImageFileUrl } from '@root-helpers/images'
 import { Account } from '../shared-main/account/account.model'
+import { VideoChannel } from '../shared-main/channel/video-channel.model'
 
-type ActorInput = {
+export type ActorAvatarInput = {
   name: string
-  avatar?: { url?: string, path: string }
-  url: string
+  avatars: Pick<ActorImage, 'width' | 'fileUrl'>[]
 }
 
-export type ActorAvatarSize = '18' | '25' | '32' | '34' | '36' | '40' | '100' | '120'
+export type ActorAvatarType = 'channel' | 'account' | 'instance' | 'unlogged'
 
 @Component({
   selector: 'my-actor-avatar',
   styleUrls: [ './actor-avatar.component.scss' ],
-  templateUrl: './actor-avatar.component.html'
+  templateUrl: './actor-avatar.component.html',
+  changeDetection: ChangeDetectionStrategy.Eager,
+  imports: [ CommonModule, NgTemplateOutlet, RouterLink ]
 })
-export class ActorAvatarComponent {
-  @Input() account: ActorInput
-  @Input() channel: ActorInput
+export class ActorAvatarComponent implements OnInit, OnChanges {
+  private el = inject(ElementRef)
 
-  @Input() previewImage: SafeResourceUrl
+  readonly avatarEl = viewChild<ElementRef>('avatarEl')
 
-  @Input() size: ActorAvatarSize
+  readonly actor = input.required<ActorAvatarInput>()
+  readonly actorType = input.required<ActorAvatarType>()
+
+  readonly previewImage = input<string>(undefined)
+
+  readonly size = input(120, { transform: numberAttribute })
+  readonly responseSize = input(false, { transform: booleanAttribute })
 
   // Use an external link
-  @Input() href: string
+  readonly href = input<string>(undefined)
   // Use routerLink
-  @Input() internalHref: string | any[]
+  readonly internalHref = input<string | any[]>(undefined)
 
-  @Input() set title (value) {
-    this._title = value
-  }
+  readonly title = input<string>()
 
-  private _title: string
+  // Hide the avatar link from assistive technologies, for example when the parent component renders another link to the same actor
+  readonly ariaHidden = input(false, { transform: booleanAttribute })
 
-  get title () {
-    if (this._title) return this._title
-    if (this.account) return $localize`${this.account.name} (account page)`
-    if (this.channel) return $localize`${this.channel.name} (channel page)`
-
-    return ''
-  }
-
-  get alt () {
-    if (this.account) return $localize`Account avatar`
-    if (this.channel) return $localize`Channel avatar`
+  getTitle () {
+    if (this.title()) return this.title()
+    if (this.isAccount()) return $localize`${this.actor().name} (account page)`
+    if (this.isChannel()) return $localize`${this.actor().name} (channel page)`
+    if (this.isInstance()) return $localize`${this.actor().name} (instance page)`
 
     return ''
   }
 
-  getClass (type: 'avatar' | 'initial') {
-    const base = [ 'avatar' ]
+  classes: string[] = []
+  defaultAvatarUrl: string
+  avatarUrl: string
 
-    if (this.size) base.push(`avatar-${this.size}`)
+  ngOnInit () {
+    this.buildDefaultAvatarUrl()
 
-    if (this.channel) base.push('channel')
-    else base.push('account')
+    this.buildAvatarUrl()
+    this.buildClasses()
+  }
 
-    if (type === 'initial' && this.initial) {
-      base.push('initial')
-      base.push(this.getColorTheme())
+  ngOnChanges () {
+    this.buildAvatarUrl()
+    this.buildClasses()
+  }
+
+  private buildClasses () {
+    let avatarSize = '100%'
+    let fontSize = '22px'
+
+    this.classes = [ 'avatar' ]
+
+    const size = this.size()
+    if (size && !this.responseSize()) {
+      avatarSize = `${size}px`
+
+      if (size <= 18) {
+        fontSize = '13px'
+      } else if (size >= 100) {
+        fontSize = '40px'
+      } else if (size >= 120) {
+        fontSize = '46px'
+      }
     }
 
-    return base
+    if (this.isChannel()) {
+      this.classes.push('channel')
+    } else if (this.isAccount()) {
+      this.classes.push('account')
+    } else if (this.isInstance()) {
+      this.classes.push('instance')
+    }
+
+    // No avatar, use actor name initial
+    if (this.displayActorInitial()) {
+      this.classes.push('initial')
+      this.classes.push(this.getColorTheme())
+    }
+
+    const elStyle = (this.el.nativeElement as HTMLElement).style
+    elStyle.setProperty('--co-avatar-size', avatarSize)
+    elStyle.setProperty('--co-font-size', fontSize)
   }
 
-  get defaultAvatarUrl () {
-    if (this.channel) return VideoChannel.GET_DEFAULT_AVATAR_URL()
+  private buildDefaultAvatarUrl () {
+    // TODO: have a default instance avatar
 
-    return Account.GET_DEFAULT_AVATAR_URL()
+    this.defaultAvatarUrl = this.isChannel()
+      ? VideoChannel.GET_DEFAULT_AVATAR_URL(this.getSizeNumber())
+      : Account.GET_DEFAULT_AVATAR_URL(this.getSizeNumber())
   }
 
-  get avatarUrl () {
-    if (this.account) return Account.GET_ACTOR_AVATAR_URL(this.account)
-    if (this.channel) return VideoChannel.GET_ACTOR_AVATAR_URL(this.channel)
+  private buildAvatarUrl () {
+    const actor = this.actor()
+    if (!actor) {
+      this.avatarUrl = ''
+      return
+    }
 
-    return ''
+    if (this.isAccount() || this.isChannel() || this.isInstance()) {
+      this.avatarUrl = findAppropriateImageFileUrl(actor.avatars, this.getSizeNumber())
+      return
+    }
+
+    this.avatarUrl = ''
   }
 
-  get initial () {
-    const name = this.account?.name
+  displayImage () {
+    if (this.actorType() === 'unlogged') return true
+    if (this.previewImage()) return true
+
+    return !!(this.actor() && this.avatarUrl)
+  }
+
+  displayActorInitial () {
+    return !this.displayImage() && this.actor() && !this.avatarUrl
+  }
+
+  displayPlaceholder () {
+    return this.actorType() !== 'unlogged' && !this.actor()
+  }
+
+  getActorInitial () {
+    const name = this.actor()?.name
     if (!name) return ''
 
     return name.slice(0, 1)
   }
 
-  hasActor () {
-    return !!this.account || !!this.channel
+  private isAccount () {
+    return this.actorType() === 'account'
+  }
+
+  private isChannel () {
+    return this.actorType() === 'channel'
+  }
+
+  private isInstance () {
+    return this.actorType() === 'instance'
+  }
+
+  private getSizeNumber () {
+    const size = this.size()
+    if (size) return +size
+
+    return undefined
   }
 
   private getColorTheme () {
+    const initialLowercase = this.getActorInitial().toLowerCase()
+
     // Keep consistency with CSS
     const themes = {
-      abc: 'blue',
-      def: 'green',
-      ghi: 'purple',
-      jkl: 'gray',
-      mno: 'yellow',
-      pqr: 'orange',
-      stvu: 'red',
-      wxyz: 'dark-blue'
+      '0123456789abc': 'blue',
+      'def': 'green',
+      'ghi': 'purple',
+      'jkl': 'gray',
+      'mno': 'yellow',
+      'pqr': 'orange',
+      'stvu': 'red',
+      'wxyz': 'dark-blue'
     }
 
-    const theme = Object.keys(themes)
-                        .find(chars => chars.includes(this.initial))
+    const theme = objectKeysTyped(themes)
+      .find(chars => chars.includes(initialLowercase))
 
-    return themes[theme]
+    return themes[theme] || 'blue'
   }
 }

@@ -1,0 +1,1151 @@
+import { forceNumber } from '@peertube/peertube-core-utils'
+import {
+  VideoAIUsageType,
+  VideoChannelCollaboratorState,
+  VideoInclude,
+  VideoIncludeType,
+  VideoPrivacy,
+  VideoPrivacyType,
+  VideoState,
+  VideoStateType
+} from '@peertube/peertube-models'
+import { exists } from '@server/helpers/custom-validators/misc.js'
+import { WEBSERVER } from '@server/initializers/constants.js'
+import { buildSortDirectionAndField, throwOnInvalidSortColumnName } from '@server/models/shared/index.js'
+import { MUserAccountId, MUserId } from '@server/types/models/index.js'
+import { Transaction } from 'sequelize'
+import validator from 'validator'
+import { AbstractRunQuery } from '../../../shared/abstract-run-query.js'
+import { createSafeIn, parseRowCountResult } from '../../../shared/index.js'
+
+/**
+ * Build videos list SQL query to fetch rows
+ * We don't list classic SQL builder classes used by other models because for performance reasons
+ */
+
+// Used to normalize ts_rank() into the [0, 1] range of word_similarity()
+const TS_RANK_NAME_MATCH = 0.61
+
+// Relevance scores are compared by steps of 0.1, so videos with close scores are sorted by publication date
+const SIMILARITY_STEPS = 10
+
+// to_tsquery() parses its argument as a tsquery expression: `&`, `|`, `!`, `<->`, parentheses and `:` weight markers
+// So raw user input like "rock & roll", "hello!" or "12:30" makes it throw a syntax error
+// Returns '' when the search holds no lexeme at all
+function buildTSQueryTerms (search: string) {
+  return search
+    .replace(/[^\p{L}\p{N}_]/gu, ' ')
+    .split(/\s+/)
+    .filter(term => term.length !== 0)
+    .map(term => `${term}:*`)
+    .join(' & ')
+}
+
+export type DisplayOnlyForFollowerOptions = {
+  actorId: number
+  orLocalVideos: boolean
+}
+
+export type BuildVideosListQueryOptions = {
+  attributes?: string[]
+
+  serverAccountIdForBlock: number
+
+  displayOnlyForFollower: DisplayOnlyForFollowerOptions
+
+  count: number
+  start: number
+  sort: string
+
+  nsfw?: boolean
+  nsfwFlagsIncluded?: number
+  nsfwFlagsExcluded?: number
+
+  host?: string
+  isLive?: boolean
+  isLocal?: boolean
+  include?: VideoIncludeType
+  includeScheduledLive?: boolean
+
+  categoryOneOf?: number[]
+  licenceOneOf?: number[]
+  languageOneOf?: string[]
+
+  aiUsageOneOf?: VideoAIUsageType[]
+
+  tagsOneOf?: string[]
+  tagsAllOf?: string[]
+
+  privacyOneOf?: VideoPrivacyType[]
+
+  autoTagOneOf?: string[]
+
+  stateOneOf?: VideoStateType[]
+
+  uuids?: string[]
+  excludeVideoIds?: number[]
+
+  // Inclusive
+  idRange?: { min: number, max: number }
+
+  hasFiles?: boolean
+  hasHLSFiles?: boolean
+
+  hasWebVideoFiles?: boolean
+
+  accountId?: number
+
+  onlyCollaborated?: boolean
+  includeCollaborations?: boolean
+
+  videoChannelId?: number
+  channelNameOneOf?: string[]
+
+  videoPlaylistId?: number
+
+  trendingDays: number
+
+  // Used to include user history information, exclude blocked videos, include internal videos, adapt hot algorithm...
+  user?: MUserAccountId
+
+  // Only list videos watched by this user
+  historyOfUser?: MUserId
+
+  startDate?: string // ISO 8601
+  endDate?: string // ISO 8601
+  originallyPublishedStartDate?: string
+  originallyPublishedEndDate?: string
+
+  durationMin?: number // seconds
+  durationMax?: number // seconds
+
+  search?: string
+
+  isCount?: boolean
+
+  group?: string
+  having?: string
+
+  transaction?: Transaction
+  logging?: boolean
+
+  excludeAlreadyWatched?: boolean
+
+  hasRedundancy?: boolean
+  redundancyStrategy?: string
+  includeRedundancy?: boolean
+  localRedundancy?: boolean
+}
+
+type SortDirection = 'ASC' | 'DESC'
+
+export class VideosIdListQueryBuilder extends AbstractRunQuery {
+  protected replacements: any = {}
+
+  private attributes: string[]
+  private joins: string[] = []
+
+  private readonly and: string[] = []
+
+  private readonly cte: string[] = []
+
+  private group = ''
+  private having = ''
+
+  private sort = ''
+
+  private limit = ''
+  private offset = ''
+
+  private builtChannelJoin = false
+
+  queryVideoIds (options: BuildVideosListQueryOptions) {
+    this.buildIdsListQuery(options)
+
+    return this.runQuery()
+  }
+
+  countVideoIds (countOptions: BuildVideosListQueryOptions): Promise<number> {
+    this.buildIdsListQuery(countOptions)
+
+    return this.runQuery().then(rows => parseRowCountResult(rows))
+  }
+
+  getQuery (options: BuildVideosListQueryOptions) {
+    this.buildIdsListQuery(options)
+
+    return { query: this.query, sort: this.sort, replacements: this.replacements }
+  }
+
+  private buildIdsListQuery (options: BuildVideosListQueryOptions) {
+    if (options.attributes) {
+      this.attributes = [ ...options.attributes ]
+    } else if (options.isCount === true) {
+      this.attributes = [ 'COUNT(*) as "total"' ]
+    } else {
+      this.attributes = [ '"video"."id"' ]
+    }
+
+    if (options.group) this.group = options.group
+    if (options.having) this.having = options.having
+
+    if (options.includeCollaborations) {
+      if (!options.accountId) throw new Error('accountId parameter is required when includeCollaborations is true')
+
+      this.buildUnionIdsListQuery(options)
+    } else {
+      this.buildSingleIdsListQuery(options)
+    }
+  }
+
+  private buildUnionIdsListQuery (options: BuildVideosListQueryOptions) {
+    const { sortColumn } = this.buildSortAndPagination(options)
+    if (sortColumn === 'match') this.attributes.push('"similarity"')
+
+    const unionAttributes = new Set([ '"video"."id"' ])
+
+    const videoAttributesForSort = this.updateQueryForComplexSort({ ...options, column: sortColumn })
+
+    for (const attr of videoAttributesForSort) {
+      unionAttributes.add(`"video".${attr}`)
+    }
+
+    const baseOptions = {
+      ...options,
+
+      attributes: Array.from(unionAttributes),
+      isCount: false,
+      count: undefined,
+      start: undefined,
+      sort: undefined,
+      includeCollaborations: false
+    } satisfies BuildVideosListQueryOptions
+
+    const union = this.makeUnion([
+      { ...baseOptions, onlyCollaborated: false },
+      { ...baseOptions, onlyCollaborated: true }
+    ])
+
+    this.query = 'SELECT ' + this.attributes.join(', ') + ' FROM ' +
+      '(' + union + ') AS "video" ' +
+      this.joins.join(' ') + ' ' +
+      this.group + ' ' +
+      this.having + ' ' +
+      this.sort + ' ' +
+      this.limit + ' ' +
+      this.offset
+  }
+
+  private buildSingleIdsListQuery (options: BuildVideosListQueryOptions) {
+    const { sortColumn } = this.buildSortAndPagination(options)
+
+    this.updateQueryForComplexSort({ ...options, column: sortColumn })
+
+    this.joins = this.joins.concat([
+      'INNER JOIN "videoChannel" ON "videoChannel"."id" = "video"."channelId"',
+      'INNER JOIN "account" ON "account"."id" = "videoChannel"."accountId"',
+      'INNER JOIN "actor" "accountActor" ON "account"."id" = "accountActor"."accountId"'
+    ])
+
+    if (!(options.include & VideoInclude.BLACKLISTED)) {
+      this.whereNotBlacklisted()
+    }
+
+    if (options.serverAccountIdForBlock && !(options.include & VideoInclude.BLOCKED_OWNER)) {
+      this.whereNotBlocked(options.serverAccountIdForBlock, options.user)
+    }
+
+    // Only list published videos
+    if (!(options.include & VideoInclude.NOT_PUBLISHED_STATE) && !options.stateOneOf) {
+      this.whereStateAvailable({ includeScheduledLive: options.includeScheduledLive ?? false })
+    } else if (options.stateOneOf) {
+      this.whereStateOneOf(options.stateOneOf)
+    }
+
+    if (options.videoPlaylistId) {
+      this.joinPlaylist(options.videoPlaylistId)
+    }
+
+    if (exists(options.isLocal)) {
+      this.whereLocal(options.isLocal)
+    }
+
+    if (options.host) {
+      this.whereHost(options.host)
+    }
+
+    if (options.onlyCollaborated) {
+      this.whereOnlyCollaborated(options.accountId)
+    } else if (options.accountId) {
+      this.whereAccountId(options.accountId)
+    }
+
+    if (options.videoChannelId) {
+      this.whereChannelId(options.videoChannelId)
+    }
+
+    if (options.channelNameOneOf && options.channelNameOneOf.length !== 0) {
+      this.whereChannelOneOf(options.channelNameOneOf)
+    }
+
+    // Every local video is displayed when the follower also accepts local videos: skip the costly follow constraint
+    const followConstraintIsNoop = options.isLocal === true && options.displayOnlyForFollower?.orLocalVideos === true
+
+    if (options.displayOnlyForFollower && !followConstraintIsNoop) {
+      this.whereFollowerActorId({ ...options.displayOnlyForFollower, isCount: options.isCount === true, sortColumn })
+    }
+
+    if (options.hasFiles === true) {
+      this.whereFileExists()
+    }
+
+    if (exists(options.hasWebVideoFiles)) {
+      this.whereWebVideoFileExists(options.hasWebVideoFiles)
+    }
+
+    if (exists(options.hasHLSFiles)) {
+      this.whereHLSFileExists(options.hasHLSFiles)
+    }
+
+    if (options.tagsOneOf) {
+      this.whereTagsOneOf(options.tagsOneOf)
+    }
+
+    if (options.tagsAllOf) {
+      this.whereTagsAllOf(options.tagsAllOf)
+    }
+
+    if (options.autoTagOneOf) {
+      this.whereAutoTagOneOf(options.autoTagOneOf)
+    }
+
+    if (options.privacyOneOf) {
+      this.wherePrivacyOneOf(options.privacyOneOf)
+    } else {
+      // Only list videos with the appropriate privacy
+      this.wherePrivacyAvailable(options.user)
+    }
+
+    if (options.uuids) {
+      this.whereUUIDs(options.uuids)
+    }
+
+    if (options.excludeVideoIds && options.excludeVideoIds.length !== 0) {
+      this.whereExcludeVideoIds(options.excludeVideoIds)
+    }
+
+    if (options.idRange) {
+      this.whereIdRange(options.idRange)
+    }
+
+    if (options.nsfw === true) {
+      this.whereNSFW(options.nsfwFlagsExcluded)
+    } else if (options.nsfw === false) {
+      this.whereSFW(options.nsfwFlagsIncluded)
+    } else if (options.nsfwFlagsExcluded) {
+      this.whereNSFWFlagsExcluded(options.nsfwFlagsExcluded)
+    }
+
+    if (options.isLive === true) {
+      this.whereLive()
+    } else if (options.isLive === false) {
+      this.whereVOD()
+    }
+
+    if (options.categoryOneOf) {
+      this.whereCategoryOneOf(options.categoryOneOf)
+    }
+
+    if (options.licenceOneOf) {
+      this.whereLicenceOneOf(options.licenceOneOf)
+    }
+
+    if (options.languageOneOf) {
+      this.whereLanguageOneOf(options.languageOneOf)
+    }
+
+    if (options.aiUsageOneOf && options.aiUsageOneOf.length !== 0) {
+      this.whereAIUsageOneOf(options.aiUsageOneOf)
+    }
+
+    if (options.historyOfUser) {
+      this.joinHistory(options.historyOfUser.id)
+    }
+
+    if (options.startDate) {
+      this.whereStartDate(options.startDate)
+    }
+
+    if (options.endDate) {
+      this.whereEndDate(options.endDate)
+    }
+
+    if (options.originallyPublishedStartDate) {
+      this.whereOriginallyPublishedStartDate(options.originallyPublishedStartDate)
+    }
+
+    if (options.originallyPublishedEndDate) {
+      this.whereOriginallyPublishedEndDate(options.originallyPublishedEndDate)
+    }
+
+    if (options.durationMin) {
+      this.whereDurationMin(options.durationMin)
+    }
+
+    if (options.durationMax) {
+      this.whereDurationMax(options.durationMax)
+    }
+
+    if (options.excludeAlreadyWatched) {
+      if (exists(options.user.id)) {
+        this.whereExcludeAlreadyWatched(options.user.id)
+      } else {
+        throw new Error('Cannot use excludeAlreadyWatched parameter when auth token is not provided')
+      }
+    }
+
+    if (options.hasRedundancy === true) {
+      this.whereRedundancyExists({ redundancyStrategy: options.redundancyStrategy, localRedundancy: options.localRedundancy })
+    }
+
+    this.whereSearch(options)
+
+    const cteString = this.cte.length !== 0
+      ? `WITH ${this.cte.join(', ')} `
+      : ''
+
+    this.query = cteString +
+      'SELECT ' + this.attributes.join(', ') + ' ' +
+      'FROM "video" ' + this.joins.join(' ') + ' ' +
+      'WHERE ' + this.and.join(' AND ') + ' ' +
+      this.group + ' ' +
+      this.having + ' ' +
+      this.sort + ' ' +
+      this.limit + ' ' +
+      this.offset
+  }
+
+  private buildSortAndPagination (options: BuildVideosListQueryOptions) {
+    if (options.isCount) return {}
+
+    let sortColumn: string
+    let sortDirection: SortDirection
+
+    if (options.sort) {
+      const { direction, field } = buildSortDirectionAndField(options.sort)
+
+      sortColumn = field
+      sortDirection = direction
+    }
+
+    if (exists(sortColumn)) {
+      this.setSort(sortColumn, sortDirection)
+    }
+
+    if (exists(options.count)) {
+      this.setLimit(options.count)
+    }
+
+    if (exists(options.start)) {
+      this.setOffset(options.start)
+    }
+
+    return { sortColumn, sortDirection }
+  }
+
+  private makeUnion (queryOptions: BuildVideosListQueryOptions[]) {
+    const queries: string[] = []
+
+    for (const queryOption of queryOptions) {
+      const builder = new VideosIdListQueryBuilder(this.sequelize)
+      const { query, replacements } = builder.getQuery(queryOption)
+
+      queries.push('(' + query + ')')
+
+      this.replacements = { ...this.replacements, ...replacements }
+    }
+
+    return queries.join(' UNION')
+  }
+
+  private joinHistory (userId: number) {
+    this.joins.push('INNER JOIN "userVideoHistory" ON "video"."id" = "userVideoHistory"."videoId"')
+
+    this.and.push('"userVideoHistory"."userId" = :historyOfUser')
+
+    this.replacements.historyOfUser = userId
+  }
+
+  private joinPlaylist (playlistId: number) {
+    this.joins.push(
+      'INNER JOIN "videoPlaylistElement" "VideoPlaylistElement" ON "video"."id" = "VideoPlaylistElement"."videoId" ' +
+        'AND "VideoPlaylistElement"."videoPlaylistId" = :videoPlaylistId'
+    )
+
+    this.replacements.videoPlaylistId = playlistId
+  }
+
+  private joinChannel () {
+    if (this.builtChannelJoin) return
+    this.builtChannelJoin = true
+
+    this.joins.push('INNER JOIN "actor" "channelActor" ON "videoChannel"."id" = "channelActor"."videoChannelId"')
+  }
+
+  private whereRedundancyExists (options: {
+    redundancyStrategy?: string
+    localRedundancy?: boolean
+  }) {
+    let strategySql = ''
+
+    if (options.redundancyStrategy) {
+      strategySql = ' AND "videoRedundancy"."strategy" = :redundancyStrategy'
+      this.replacements.redundancyStrategy = options.redundancyStrategy
+    } else if (options.localRedundancy === true) {
+      strategySql = ' AND "videoRedundancy"."strategy" IS NOT NULL'
+    }
+
+    this.and.push(
+      'EXISTS (' +
+        'SELECT 1 FROM "videoStreamingPlaylist" ' +
+        'INNER JOIN "videoRedundancy" ON "videoRedundancy"."videoStreamingPlaylistId" = "videoStreamingPlaylist"."id" ' +
+        'WHERE "videoStreamingPlaylist"."videoId" = "video"."id"' + strategySql +
+        ')'
+    )
+  }
+
+  private whereStateAvailable (options: {
+    includeScheduledLive: boolean
+  }) {
+    const or: string[] = []
+
+    or.push(`"video"."state" = ${VideoState.PUBLISHED}`)
+    or.push(`("video"."state" = ${VideoState.TO_TRANSCODE} AND "video"."waitTranscoding" IS false)`)
+
+    if (options.includeScheduledLive) {
+      // Use EXISTS instead of a join: a live can have multiple schedules and we don't want duplicate videos
+      or.push(
+        `("video"."state" = ${VideoState.WAITING_FOR_LIVE} AND EXISTS (` +
+          'SELECT 1 FROM "videoLive" ' +
+          'INNER JOIN "videoLiveSchedule" ON "videoLiveSchedule"."liveVideoId" = "videoLive"."id" ' +
+          'WHERE "videoLive"."videoId" = "video"."id" AND "videoLiveSchedule"."startAt" > NOW()' +
+          '))'
+      )
+    }
+
+    this.and.push(`(${or.join(' OR ')})`)
+  }
+
+  private wherePrivacyAvailable (user?: MUserAccountId) {
+    if (user) {
+      this.and.push(
+        `("video"."privacy" = ${VideoPrivacy.PUBLIC} OR "video"."privacy" = ${VideoPrivacy.INTERNAL})`
+      )
+    } else { // Or only public videos
+      this.and.push(
+        `"video"."privacy" = ${VideoPrivacy.PUBLIC}`
+      )
+    }
+  }
+
+  private whereLocal (isLocal: boolean) {
+    const isRemote = isLocal ? 'false' : 'true'
+
+    this.and.push('"video"."remote" = ' + isRemote)
+  }
+
+  private whereHost (host: string) {
+    // Local instance
+    if (host === WEBSERVER.HOST) {
+      this.and.push('"accountActor"."serverId" IS NULL')
+      return
+    }
+
+    this.joins.push('INNER JOIN "server" ON "server"."id" = "accountActor"."serverId"')
+
+    this.and.push('"server"."host" = :host')
+    this.replacements.host = host
+  }
+
+  private whereAccountId (accountId: number) {
+    this.and.push('"account"."id" = :accountId')
+    this.replacements.accountId = accountId
+  }
+
+  private whereOnlyCollaborated (accountId: number) {
+    this.joins.push(
+      'INNER JOIN "videoChannelCollaborator" ON "videoChannelCollaborator"."channelId" = "videoChannel".id ' +
+        'AND "videoChannelCollaborator"."state" = :channelCollaboratorState ' +
+        // Ensure we join with max 1 collaborator to not duplicate rows
+        'AND "videoChannelCollaborator"."accountId" = :accountId'
+    )
+
+    this.replacements.accountId = accountId
+    this.replacements.channelCollaboratorState = VideoChannelCollaboratorState.ACCEPTED
+  }
+
+  private whereChannelId (channelId: number) {
+    this.and.push('"videoChannel"."id" = :videoChannelId')
+    this.replacements.videoChannelId = channelId
+  }
+
+  private whereChannelOneOf (channelOneOf: string[]) {
+    this.joinChannel()
+
+    this.and.push('"channelActor"."preferredUsername" IN (:channelOneOf)')
+    this.replacements.channelOneOf = channelOneOf
+  }
+
+  private whereFollowerActorId (options: { sortColumn: string, actorId: number, orLocalVideos: boolean, isCount: boolean }) {
+    const complexSorts = new Set([
+      'trending',
+      'hot',
+      'best',
+      'match',
+      'localVideoFilesSize'
+    ])
+    const isComplexSort = options.sortColumn && complexSorts.has(options.sortColumn)
+
+    // EXISTS doesn't work very well with COUNT queries or complex sorts where PostgreSQL has to compute follow constraint for many rows
+    // So we use a CTE instead
+    if (options.isCount || isComplexSort) {
+      // Don't use CTE on purpose, that seems to be slower in this case
+      const targetActorIdQuery =
+        `SELECT "targetActorId" FROM "actorFollow" WHERE "actorFollow"."actorId" = :followerActorId AND "actorFollow"."state" = 'accepted'`
+
+      let cteQuery = '"videoCandidates" AS (' +
+        `SELECT "videoShare"."videoId" FROM "videoShare" WHERE "videoShare"."actorId" IN (${targetActorIdQuery}) ` +
+        `UNION ` +
+        `SELECT "video"."id" FROM "video" INNER JOIN "videoChannel" ON "videoChannel"."id" = "video"."channelId" ` +
+        `  INNER JOIN "actor" "channelActor" ON "videoChannel"."id" = "channelActor"."videoChannelId" ` +
+        `  WHERE "channelActor"."id" IN (${targetActorIdQuery}) ` +
+        `UNION ` +
+        `SELECT "video"."id" FROM "video" INNER JOIN "videoChannel" ON "videoChannel"."id" = "video"."channelId" ` +
+        `  INNER JOIN "account" ON "account"."id" = "videoChannel"."accountId" ` +
+        `  INNER JOIN "actor" "accountActor" ON "account"."id" = "accountActor"."accountId" ` +
+        `  WHERE "accountActor"."id" IN (${targetActorIdQuery}) `
+
+      if (options.orLocalVideos) {
+        cteQuery += 'UNION SELECT "video"."id" FROM "video" WHERE "remote" = false'
+      }
+
+      cteQuery += ')'
+
+      this.cte.push(cteQuery)
+
+      this.joins.push('INNER JOIN "videoCandidates" ON "video"."id" = "videoCandidates"."videoId"')
+    } else {
+      this.joinChannel()
+
+      // PostgreSQL evaluates OR operands in order: check the cheap local condition first to skip the EXISTS subquery for local videos
+      const query = '(' +
+        (options.orLocalVideos ? '"video"."remote" = false OR ' : '') +
+        '  EXISTS (' + // Videos shared by actors (instances, channels) we follow
+        '    SELECT 1 FROM "videoShare" ' +
+        '    INNER JOIN "actorFollow" "actorFollowShare" ON "actorFollowShare"."targetActorId" = "videoShare"."actorId" ' +
+        '    AND "actorFollowShare"."actorId" = :followerActorId AND "actorFollowShare"."state" = \'accepted\' ' +
+        '    WHERE "videoShare"."videoId" = "video"."id"' +
+        '    UNION ALL ' +
+        '    SELECT 1 from "actorFollow" ' + // Videos published by accounts we follow
+        '    WHERE "actorFollow"."targetActorId" = "accountActor"."id" ' +
+        '    AND "actorFollow"."actorId" = :followerActorId ' +
+        '    AND "actorFollow"."state" = \'accepted\'' +
+        '    UNION ALL ' +
+        '    SELECT 1 from "actorFollow" ' + // Videos published by channels we follow
+        '    WHERE "actorFollow"."targetActorId" = "channelActor"."id" ' +
+        '    AND "actorFollow"."actorId" = :followerActorId ' +
+        '    AND "actorFollow"."state" = \'accepted\'' +
+        '    LIMIT 1' +
+        '  )' +
+        ')'
+
+      this.and.push(query)
+    }
+
+    this.replacements.followerActorId = options.actorId
+  }
+
+  private whereFileExists () {
+    this.and.push(`(${this.buildWebVideoFileExistsQuery(true)} OR ${this.buildHLSFileExistsQuery(true)})`)
+  }
+
+  private whereWebVideoFileExists (exists: boolean) {
+    this.and.push(this.buildWebVideoFileExistsQuery(exists))
+  }
+
+  private whereHLSFileExists (exists: boolean) {
+    this.and.push(this.buildHLSFileExistsQuery(exists))
+  }
+
+  private buildWebVideoFileExistsQuery (exists: boolean) {
+    const prefix = exists ? '' : 'NOT '
+
+    return prefix + 'EXISTS (SELECT 1 FROM "videoFile" WHERE "videoFile"."videoId" = "video"."id")'
+  }
+
+  private buildHLSFileExistsQuery (exists: boolean) {
+    const prefix = exists ? '' : 'NOT '
+
+    return prefix + 'EXISTS (' +
+      '  SELECT 1 FROM "videoStreamingPlaylist" ' +
+      '  INNER JOIN "videoFile" ON "videoFile"."videoStreamingPlaylistId" = "videoStreamingPlaylist"."id" ' +
+      '  WHERE "videoStreamingPlaylist"."videoId" = "video"."id"' +
+      ')'
+  }
+
+  private whereTagsOneOf (tagsOneOf: string[]) {
+    const tagsOneOfLower = tagsOneOf.map(t => t.toLowerCase())
+
+    this.cte.push(
+      // DISTINCT so a video matching multiple tags is not listed multiple times
+      '"tagsOneOf" AS (' +
+        '  SELECT DISTINCT "videoTag"."videoId" AS "videoId" FROM "videoTag" ' +
+        '  INNER JOIN "tag" ON "tag"."id" = "videoTag"."tagId" ' +
+        '  WHERE lower("tag"."name") IN (' + createSafeIn(this.sequelize, tagsOneOfLower) + ') ' +
+        ')'
+    )
+
+    this.joins.push('INNER JOIN "tagsOneOf" ON "video"."id" = "tagsOneOf"."videoId"')
+  }
+
+  private whereAutoTagOneOf (autoTagOneOf: string[]) {
+    const tags = autoTagOneOf.map(t => t.toLowerCase())
+
+    this.cte.push(
+      '"autoTagsOneOf" AS (' +
+        '  SELECT "videoAutomaticTag"."videoId" AS "videoId" FROM "videoAutomaticTag" ' +
+        '  INNER JOIN "automaticTag" ON "automaticTag"."id" = "videoAutomaticTag"."automaticTagId" ' +
+        '  WHERE lower("automaticTag"."name") IN (' + createSafeIn(this.sequelize, tags) + ') ' +
+        ')'
+    )
+
+    this.joins.push('INNER JOIN "autoTagsOneOf" ON "video"."id" = "autoTagsOneOf"."videoId"')
+  }
+
+  private whereTagsAllOf (tagsAllOf: string[]) {
+    const tagsAllOfLower = tagsAllOf.map(t => t.toLowerCase())
+
+    this.cte.push(
+      '"tagsAllOf" AS (' +
+        '  SELECT "videoTag"."videoId" AS "videoId" FROM "videoTag" ' +
+        '  INNER JOIN "tag" ON "tag"."id" = "videoTag"."tagId" ' +
+        '  WHERE lower("tag"."name") IN (' + createSafeIn(this.sequelize, tagsAllOfLower) + ') ' +
+        '  GROUP BY "videoTag"."videoId" HAVING COUNT(*) = ' + tagsAllOfLower.length +
+        ')'
+    )
+
+    this.joins.push('INNER JOIN "tagsAllOf" ON "video"."id" = "tagsAllOf"."videoId"')
+  }
+
+  private wherePrivacyOneOf (privacyOneOf: VideoPrivacyType[]) {
+    this.and.push('"video"."privacy" IN (:privacyOneOf)')
+    this.replacements.privacyOneOf = privacyOneOf
+  }
+
+  private whereStateOneOf (stateOneOf: VideoStateType[]) {
+    this.and.push('"video"."state" IN (:stateOneOf)')
+    this.replacements.stateOneOf = stateOneOf
+  }
+
+  private whereUUIDs (uuids: string[]) {
+    this.and.push('"video"."uuid" IN (' + createSafeIn(this.sequelize, uuids) + ')')
+  }
+
+  private whereExcludeVideoIds (excludeVideoIds: number[]) {
+    this.and.push('"video"."id" NOT IN (:excludeVideoIds)')
+    this.replacements.excludeVideoIds = excludeVideoIds
+  }
+
+  private whereIdRange (idRange: { min: number, max: number }) {
+    this.and.push('"video"."id" BETWEEN :idRangeMin AND :idRangeMax')
+    this.replacements.idRangeMin = idRange.min
+    this.replacements.idRangeMax = idRange.max
+  }
+
+  private whereCategoryOneOf (categoryOneOf: number[]) {
+    this.and.push('"video"."category" IN (:categoryOneOf)')
+    this.replacements.categoryOneOf = categoryOneOf
+  }
+
+  private whereLicenceOneOf (licenceOneOf: number[]) {
+    this.and.push('"video"."licence" IN (:licenceOneOf)')
+    this.replacements.licenceOneOf = licenceOneOf
+  }
+
+  private whereAIUsageOneOf (aiUsageOneOf: VideoAIUsageType[]) {
+    this.and.push('"video"."aiUsage" IN (:aiUsageOneOf)')
+    this.replacements.aiUsageOneOf = aiUsageOneOf
+  }
+
+  private whereLanguageOneOf (languageOneOf: string[]) {
+    const languages = languageOneOf.filter(l => l && l !== '_unknown')
+    const languagesQueryParts: string[] = []
+
+    if (languages.length !== 0) {
+      languagesQueryParts.push('"video"."language" IN (:languageOneOf)')
+      this.replacements.languageOneOf = languages
+
+      languagesQueryParts.push(
+        'EXISTS (' +
+          '  SELECT 1 FROM "videoCaption" WHERE "videoCaption"."language" ' +
+          '  IN (' + createSafeIn(this.sequelize, languages) + ') AND ' +
+          '  "videoCaption"."videoId" = "video"."id"' +
+          ')'
+      )
+    }
+
+    if (languageOneOf.includes('_unknown')) {
+      languagesQueryParts.push('"video"."language" IS NULL')
+    }
+
+    if (languagesQueryParts.length !== 0) {
+      this.and.push('(' + languagesQueryParts.join(' OR ') + ')')
+    }
+  }
+
+  private whereNSFW (nsfwFlagsExcluded?: number) {
+    let filter = '"video"."nsfw" = true'
+
+    if (nsfwFlagsExcluded) {
+      filter += ' AND "video"."nsfwFlags" & :nsfwFlagsExcluded = 0'
+      this.replacements.nsfwFlagsExcluded = nsfwFlagsExcluded
+    }
+
+    this.and.push(filter)
+  }
+
+  private whereSFW (nsfwFlagsIncluded?: number) {
+    let filter = '"video"."nsfw" = false'
+
+    if (nsfwFlagsIncluded) {
+      filter = `(${filter} OR "video"."nsfwFlags" & :nsfwFlagsIncluded != 0)`
+      this.replacements.nsfwFlagsIncluded = nsfwFlagsIncluded
+    }
+
+    this.and.push(filter)
+  }
+
+  private whereNSFWFlagsExcluded (nsfwFlagsExcluded: number) {
+    this.and.push('"video"."nsfwFlags" & :nsfwFlagsExcluded = 0')
+    this.replacements.nsfwFlagsExcluded = nsfwFlagsExcluded
+  }
+
+  private whereLive () {
+    this.and.push('"video"."isLive" = true')
+  }
+
+  private whereVOD () {
+    this.and.push('"video"."isLive" = false')
+  }
+
+  private whereNotBlocked (serverAccountId: number, user?: MUserAccountId) {
+    const blockerIds = [ serverAccountId ]
+    if (user) blockerIds.push(user.Account.id)
+
+    const inClause = createSafeIn(this.sequelize, blockerIds)
+
+    this.and.push(
+      'NOT EXISTS (' +
+        '  SELECT 1 FROM "accountBlocklist" ' +
+        '  WHERE "accountBlocklist"."accountId" IN (' + inClause + ') ' +
+        '  AND "accountBlocklist"."targetAccountId" = "account"."id" ' +
+        ')' +
+        'AND NOT EXISTS (' +
+        '  SELECT 1 FROM "serverBlocklist" WHERE "serverBlocklist"."accountId" IN (' + inClause + ') ' +
+        '  AND "serverBlocklist"."targetServerId" = "accountActor"."serverId"' +
+        ')'
+    )
+  }
+
+  private whereSearch (options: {
+    isCount?: boolean
+    search?: string
+  }) {
+    const { search, isCount } = options
+
+    if (!search) {
+      if (!isCount) this.attributes.push('0 as similarity')
+
+      return
+    }
+
+    const escapedSearch = this.sequelize.escape(search)
+    const escapedLikeSearch = this.sequelize.escape('%' + search + '%')
+
+    const tsQueryTerms = buildTSQueryTerms(search)
+    // A search made only of punctuation ("!!!", "...") has no lexeme to look for: skip the full text search
+    const hasFTS = tsQueryTerms !== ''
+
+    const searchExpr = `lower(immutable_unaccent(${escapedSearch}))`
+    const nameExpr = 'lower(immutable_unaccent("video"."name"))'
+    const nameLikeMatch = `${nameExpr} LIKE lower(immutable_unaccent(${escapedLikeSearch}))`
+
+    const trigramMatch = `${searchExpr} <% ${nameExpr} OR ${nameLikeMatch}`
+
+    /**
+     * Every match is a condition on the video row itself so PG can combine indexes (BitmapOr)
+     * Don't use LEFT JOIN that would force full scan of video table
+     * Don't use a join on a list of matching ids that would force PG to compute this list even for broad searches
+     */
+    const matchConditions: string[] = []
+
+    if (validator.default.isUUID(search)) {
+      matchConditions.push(`"video"."uuid" = ${escapedSearch}`)
+    }
+
+    matchConditions.push(trigramMatch)
+
+    if (hasFTS) {
+      this.cte.push(
+        // Build the tsquery once instead of once per referencing expression
+        `"tsQuery" AS (SELECT to_tsquery('simple', immutable_unaccent(${this.sequelize.escape(tsQueryTerms)})) AS "query")`
+      )
+
+      matchConditions.push(
+        '"video"."id" = ANY(ARRAY(' +
+          'SELECT "videoSearch"."videoId" FROM "videoSearch", "tsQuery" WHERE "videoSearch"."searchVector" @@ "tsQuery"."query"' +
+          '))'
+      )
+    }
+
+    matchConditions.push(
+      '"video"."id" = ANY(ARRAY(' +
+        'SELECT "videoTag"."videoId" FROM "videoTag" INNER JOIN "tag" ON "tag"."id" = "videoTag"."tagId" ' +
+        `WHERE lower("tag"."name") = lower(${escapedSearch})` +
+        '))'
+    )
+
+    this.and.push('(' + matchConditions.join(' OR ') + ')')
+
+    if (isCount) return
+
+    // Only rows matched by the trigram condition get the trigram similarity: exact tag and UUID matches don't add similarity
+    // Computing word_similarity once in a scalar subquery doesn't save much on broad searches: not worth the complexity
+    const trigramSimilarity = `CASE WHEN ${trigramMatch} THEN word_similarity(${searchExpr}, ${nameExpr}) ELSE 0 END`
+
+    let attribute: string
+
+    if (hasFTS) {
+      this.joins.push(
+        'LEFT JOIN "videoSearch" ON "videoSearch"."videoId" = "video"."id" ' +
+          'AND "videoSearch"."searchVector" @@ (SELECT "query" FROM "tsQuery")'
+      )
+
+      // ts_rank tops out at ~0.61 for a name-only match while word_similarity returns 1 for the same match.
+      // Normalize by that constant so both similarities share a [0, 1]
+      // A description-only match scores ~0.4, so below any name match
+      // COALESCE before LEAST, which ignores NULL arguments: a video without full text match must get 0, not 1
+      const ftsSimilarity =
+        `LEAST(COALESCE(ts_rank("videoSearch"."searchVector", (SELECT "query" FROM "tsQuery")), 0) / ${TS_RANK_NAME_MATCH}, 1)`
+
+      attribute = `GREATEST(${ftsSimilarity}, ${trigramSimilarity})`
+    } else {
+      attribute = trigramSimilarity
+    }
+
+    if (this.group) attribute = `AVG(${attribute})`
+
+    // Floor instead of round, so a close match cannot tie with a full match (score of 1)
+    this.attributes.push(`FLOOR(${attribute} * ${SIMILARITY_STEPS}) as similarity`)
+  }
+
+  private whereNotBlacklisted () {
+    this.and.push('NOT EXISTS (SELECT 1 FROM "videoBlacklist" WHERE "videoBlacklist"."videoId" = "video"."id")')
+  }
+
+  private whereStartDate (startDate: string) {
+    this.and.push('"video"."publishedAt" >= :startDate')
+    this.replacements.startDate = startDate
+  }
+
+  private whereEndDate (endDate: string) {
+    this.and.push('"video"."publishedAt" <= :endDate')
+    this.replacements.endDate = endDate
+  }
+
+  private whereOriginallyPublishedStartDate (startDate: string) {
+    this.and.push('"video"."originallyPublishedAt" >= :originallyPublishedStartDate')
+    this.replacements.originallyPublishedStartDate = startDate
+  }
+
+  private whereOriginallyPublishedEndDate (endDate: string) {
+    this.and.push('"video"."originallyPublishedAt" <= :originallyPublishedEndDate')
+    this.replacements.originallyPublishedEndDate = endDate
+  }
+
+  private whereDurationMin (durationMin: number) {
+    this.and.push('"video"."duration" >= :durationMin')
+    this.replacements.durationMin = durationMin
+  }
+
+  private whereDurationMax (durationMax: number) {
+    this.and.push('"video"."duration" <= :durationMax')
+    this.replacements.durationMax = durationMax
+  }
+
+  private whereExcludeAlreadyWatched (userId: number) {
+    this.and.push(
+      'NOT EXISTS (' +
+        '  SELECT 1' +
+        '  FROM "userVideoHistory"' +
+        '  WHERE "video"."id" = "userVideoHistory"."videoId"' +
+        '  AND "userVideoHistory"."userId" = :excludeAlreadyWatchedUserId' +
+        ')'
+    )
+    this.replacements.excludeAlreadyWatchedUserId = userId
+  }
+
+  private updateQueryForComplexSort (options: {
+    column: string
+    trendingDays?: number
+    user?: MUserAccountId
+  }) {
+    const { column, trendingDays, user } = options
+    if (!column) return []
+
+    let videoAttributesForSort: string[] = []
+
+    if (column === 'originallyPublishedAt') {
+      // Keep in sync with the "video_published_at_for_order" index of VideoModel
+      this.attributes.push(
+        `COALESCE("video"."originallyPublishedAt", "video"."publishedAt") AS "publishedAtForOrder"`
+      )
+
+      videoAttributesForSort.push('"originallyPublishedAt"', '"publishedAt"')
+    } else if (column === 'localVideoFilesSize') {
+      this.attributes.push(
+        '(' +
+          'CASE ' +
+          `  WHEN "video"."remote" = true THEN 0 ` + // Consider remote videos with size of 0
+          '  ELSE (' +
+          `    (SELECT COALESCE(SUM(size), 0) FROM "videoFile" WHERE "videoFile"."videoId" = "video"."id")` +
+          '    + ' +
+          `    (` +
+          `      SELECT COALESCE(SUM(size), 0) FROM "videoFile" ` +
+          `      INNER JOIN "videoStreamingPlaylist" ON "videoStreamingPlaylist"."id" = "videoFile"."videoStreamingPlaylistId" ` +
+          `      AND "videoStreamingPlaylist"."videoId" = "video"."id"` +
+          '     )' +
+          '    + ' +
+          '    (' +
+          '     SELECT COALESCE(SUM(size), 0) FROM "videoSource" ' +
+          `     WHERE "videoSource"."videoId" = "video"."id" AND "videoSource"."storage" IS NOT NULL` +
+          '    )' +
+          '  ) END' +
+          ') AS "localVideoFilesSize"'
+      )
+
+      videoAttributesForSort.push('"remote"')
+    } else if (column === 'trending') {
+      const viewsGteDate = new Date(new Date().getTime() - (24 * 3600 * 1000) * trendingDays)
+
+      this.joins.push(
+        `LEFT JOIN "videoStat" ON "video"."id" = "videoStat"."videoId" AND "videoStat"."startDate" >= :viewsGteDate`
+      )
+      this.replacements.viewsGteDate = viewsGteDate
+
+      this.attributes.push('COALESCE(SUM("videoStat"."views"), 0) AS "score"')
+      videoAttributesForSort.push('"views"')
+
+      this.group = `GROUP BY "video"."id"`
+    } else if (column === 'hot' || column === 'best') {
+      /**
+       * "Hotness" is a measure based on absolute view/comment/like/dislike numbers,
+       * with fixed weights only applied to their log values.
+       *
+       * This algorithm gives little chance for an old video to have a good score,
+       * for which recent spikes in interactions could be a sign of "hotness" and
+       * justify a better score. However there are multiple ways to achieve that
+       * goal, which is left for later. Yes, this is a TODO :)
+       *
+       * notes:
+       *  - weights and base score are in number of half-days.
+       *  - all comments are counted, regardless of being written by the video author or not
+       * see https://github.com/reddit-archive/reddit/blob/master/r2/r2/lib/db/_sorts.pyx#L47-L58
+       *  - we have less interactions than on reddit, so multiply weights by an arbitrary factor
+       */
+      const weights = {
+        like: 3 * 50,
+        dislike: -3 * 50,
+        view: Math.floor((1 / 3) * 50),
+        comment: 2 * 50, // a comment takes more time than a like to do, but can be done multiple times
+        history: -2 * 50
+      }
+
+      let attribute = `LOG(GREATEST(1, "video"."likes" - 1)) * ${weights.like} ` + // likes (+)
+        `+ LOG(GREATEST(1, "video"."dislikes" - 1)) * ${weights.dislike} ` + // dislikes (-)
+        `+ LOG("video"."views" + 1) * ${weights.view} ` + // views (+)
+        `+ LOG(GREATEST(1, "video"."comments")) * ${weights.comment} ` + // comments (+)
+        `+ (SELECT (EXTRACT(epoch FROM "video"."publishedAt") - 1446156582) / 47000) ` // base score (in number of half-days)
+
+      if (column === 'best' && user) {
+        this.joins.push(
+          `LEFT JOIN "userVideoHistory" ON "video"."id" = "userVideoHistory"."videoId" ` +
+            `AND "userVideoHistory"."userId" = :bestUser`
+        )
+        this.replacements.bestUser = user.id
+
+        attribute += `+ POWER(CASE WHEN "userVideoHistory"."id" IS NULL THEN 0 ELSE 1 END, 2.0) * ${weights.history} `
+      }
+
+      attribute += 'AS "score"'
+      this.attributes.push(attribute)
+      videoAttributesForSort = [ '"likes"', '"dislikes"', '"views"', '"comments"', '"publishedAt"' ]
+    } else if (column === 'match') {
+      videoAttributesForSort = [ '"publishedAt"' ]
+    } else {
+      videoAttributesForSort = [ `"${column}"` ]
+    }
+
+    return videoAttributesForSort
+  }
+
+  private setSort (column: string, direction: 'ASC' | 'DESC') {
+    throwOnInvalidSortColumnName(column)
+
+    if (column === 'random') {
+      this.sort = 'ORDER BY RANDOM()'
+      return
+    }
+
+    if (column === 'total') {
+      this.sort = `ORDER BY "total" ${direction}`
+      return
+    }
+
+    // Sort by aggregation
+    if ([ 'trending', 'hot', 'best' ].includes(column)) {
+      this.sort = `ORDER BY "score" ${direction}`
+      return
+    }
+
+    let firstSort: string
+    let secondarySort = ''
+
+    if (column === 'match') { // Search
+      firstSort = '"similarity"'
+      secondarySort = '"video"."publishedAt" DESC, '
+    } else if (column === 'originallyPublishedAt') {
+      firstSort = '"publishedAtForOrder"'
+    } else if (column === 'localVideoFilesSize') {
+      firstSort = '"localVideoFilesSize"'
+    } else if (column === 'playlistElementPosition') {
+      firstSort = '"VideoPlaylistElement"."position"'
+    } else if (column.includes('.')) {
+      firstSort = column.split('.').map(c => `"${c}"`).join('.')
+    } else {
+      firstSort = `"video"."${column}"`
+    }
+
+    this.sort = `ORDER BY ${firstSort} ${direction}, ${secondarySort}"video"."id" ASC`
+  }
+
+  private setLimit (countArg: number) {
+    const count = forceNumber(countArg)
+    this.limit = `LIMIT ${count}`
+  }
+
+  private setOffset (startArg: number) {
+    const start = forceNumber(startArg)
+    this.offset = `OFFSET ${start}`
+  }
+}

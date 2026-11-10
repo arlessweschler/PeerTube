@@ -1,0 +1,319 @@
+import { Activity, ActivityAudience, ActivitypubHttpBroadcastPayload, ContextType } from '@peertube/peertube-models'
+import { ActorFollowHealthCache } from '@server/lib/actor-follow-health-cache.js'
+import { getServerActor } from '@server/models/application/application.js'
+import { VideoShareModel } from '@server/models/video/video-share.js'
+import { VideoModel } from '@server/models/video/video.js'
+import { Transaction } from 'sequelize'
+import { afterCommitIfTransaction } from '../../../../helpers/database-utils.js'
+import { createLogger } from '../../../../helpers/logger.js'
+import { ActorFollowModel } from '../../../../models/actor/actor-follow.js'
+import { ActorModel } from '../../../../models/actor/actor.js'
+import {
+  MActor,
+  MActorId,
+  MActorLight,
+  MActorWithInboxes,
+  MVideoAccountLight,
+  MVideoId,
+  MVideoImmutable
+} from '../../../../types/models/index.js'
+import { JobQueue } from '../../../job-queue/index.js'
+import { getDirectAudience, getVideoAudience } from '../../audience.js'
+
+const logger = createLogger()
+
+async function sendVideoRelatedActivity (activityBuilder: (audience: ActivityAudience) => Activity, options: {
+  byActor: MActorLight
+  video: MVideoAccountLight
+  contextType: ContextType
+  parallelizable?: boolean
+  transaction?: Transaction
+  skipPrivacyCheck?: boolean
+}) {
+  const { byActor, transaction, contextType, parallelizable, video, skipPrivacyCheck } = options
+
+  // Send to origin
+  if (video.isLocal() === false) {
+    return sendVideoRelatedActivityToOrigin(activityBuilder, options)
+  }
+
+  const actorsInvolvedInVideo = await getActorsInvolvedInVideo(video, transaction)
+
+  const audience = getVideoAudience({
+    account: video.VideoChannel.Account,
+    channel: video.VideoChannel,
+    privacy: video.privacy,
+    skipPrivacyCheck
+  })
+  const activity = activityBuilder(audience)
+
+  const actorsException = [ byActor ]
+
+  return broadcastToFollowers({
+    data: activity,
+    byActor,
+    toFollowersOf: actorsInvolvedInVideo,
+    transaction,
+    actorsException,
+    parallelizable,
+    contextType
+  })
+}
+
+async function sendVideoRelatedActivityToOrigin (
+  activityBuilder: (audience: ActivityAudience) => Activity,
+  options: {
+    byActor: MActorLight
+    video: MVideoImmutable | MVideoAccountLight
+    contextType: ContextType
+    transaction?: Transaction
+  }
+) {
+  const { byActor, video, transaction, contextType } = options
+
+  if (video.isLocal()) throw new Error('Cannot send activity to owned video origin ' + video.url)
+
+  let accountActor: MActorLight = (video as MVideoAccountLight).VideoChannel?.Account?.Actor
+  if (!accountActor) accountActor = await ActorModel.loadAccountActorByVideoId(video.id, transaction)
+
+  const audience = getDirectAudience(accountActor)
+  const activity = activityBuilder(audience)
+
+  return afterCommitIfTransaction(transaction, () => {
+    return unicastTo({
+      data: activity,
+      byActor,
+      toActorUrl: accountActor.getSharedInbox(),
+      contextType
+    })
+  })
+}
+
+// ---------------------------------------------------------------------------
+
+async function forwardVideoRelatedActivity (options: {
+  activity: Activity
+  transaction: Transaction
+  followersException: MActorWithInboxes[]
+  video: MVideoId
+  parallelizable?: boolean
+}) {
+  const { activity, transaction, followersException, parallelizable, video } = options
+
+  // Mastodon does not add our announces in audience, so we forward to them manually
+  const additionalActors = await getActorsInvolvedInVideo(video, transaction)
+  const additionalFollowerUrls = additionalActors.map(a => a.followersUrl)
+
+  logger.info('Forwarding activity %s.', activity.id)
+
+  const followersUrls = additionalFollowerUrls
+
+  const toActorFollowers = await ActorModel.listByFollowersUrls(followersUrls, transaction)
+  const uris = await computeFollowerUris(toActorFollowers, followersException, transaction)
+
+  if (uris.length === 0) {
+    logger.info('0 followers for %s, no forwarding.', toActorFollowers.map(a => a.id).join(', '))
+    return undefined
+  }
+
+  logger.debug('Creating forwarding job.', { uris })
+
+  const payload: ActivitypubHttpBroadcastPayload = {
+    uris,
+    body: activity,
+    contextType: null
+  }
+
+  return afterCommitIfTransaction(transaction, () => {
+    JobQueue.Instance.createJobAsync({
+      type: parallelizable
+        ? 'activitypub-http-broadcast-parallel'
+        : 'activitypub-http-broadcast',
+      payload
+    })
+  })
+}
+
+// ---------------------------------------------------------------------------
+
+async function broadcastToFollowers (options: {
+  data: any
+  byActor: MActorId
+  toFollowersOf: MActorId[]
+  transaction: Transaction
+  contextType: ContextType
+
+  parallelizable?: boolean
+  actorsException?: MActorWithInboxes[]
+}) {
+  const { data, byActor, toFollowersOf, transaction, contextType, actorsException = [], parallelizable } = options
+
+  const uris = await computeFollowerUris(toFollowersOf, actorsException, transaction)
+
+  return afterCommitIfTransaction(transaction, () => {
+    return broadcastTo({
+      uris,
+      data,
+      byActor,
+      parallelizable,
+      contextType
+    })
+  })
+}
+
+async function broadcastToActors (options: {
+  data: any
+  byActor: MActorId
+  toActors: MActor[]
+  transaction: Transaction
+  contextType: ContextType
+  actorsException?: MActorWithInboxes[]
+}) {
+  const { data, byActor, toActors, transaction, contextType, actorsException = [] } = options
+
+  const uris = await computeUris(toActors, actorsException)
+
+  return afterCommitIfTransaction(transaction, () => {
+    return broadcastTo({
+      uris,
+      data,
+      byActor,
+      contextType
+    })
+  })
+}
+
+async function broadcastTo (options: {
+  uris: string[]
+  data: any
+  byActor: MActorId
+  contextType: ContextType
+  parallelizable?: boolean // default to false
+}) {
+  const { uris, data, byActor, contextType, parallelizable } = options
+
+  if (uris.length === 0) return undefined
+
+  const broadcastUris: string[] = []
+  const unicastUris: string[] = []
+
+  // Bad URIs could be slow to respond, prefer to process them in a dedicated queue
+  const lastBadInboxes = await ActorFollowHealthCache.Instance.areLastBadInboxes(uris)
+
+  for (let i = 0; i < uris.length; i++) {
+    if (lastBadInboxes[i]) {
+      unicastUris.push(uris[i])
+    } else {
+      broadcastUris.push(uris[i])
+    }
+  }
+
+  logger.debug('Creating broadcast job.', { broadcastUris, unicastUris })
+
+  if (broadcastUris.length !== 0) {
+    const payload = {
+      uris: broadcastUris,
+      signatureActorId: byActor.id,
+      body: data,
+      contextType
+    }
+
+    JobQueue.Instance.createJobAsync({
+      type: parallelizable
+        ? 'activitypub-http-broadcast-parallel'
+        : 'activitypub-http-broadcast',
+
+      payload
+    })
+  }
+
+  for (const unicastUri of unicastUris) {
+    const payload = {
+      uri: unicastUri,
+      signatureActorId: byActor.id,
+      body: data,
+      contextType
+    }
+
+    JobQueue.Instance.createJobAsync({ type: 'activitypub-http-unicast', payload })
+  }
+}
+
+function unicastTo (options: {
+  data: any
+  byActor: MActorId
+  toActorUrl: string
+  contextType: ContextType
+}) {
+  const { data, byActor, toActorUrl, contextType } = options
+
+  logger.debug('Creating unicast job.', { uri: toActorUrl })
+
+  const payload = {
+    uri: toActorUrl,
+    signatureActorId: byActor.id,
+    body: data,
+    contextType
+  }
+
+  JobQueue.Instance.createJobAsync({ type: 'activitypub-http-unicast', payload })
+}
+
+// ---------------------------------------------------------------------------
+
+export async function getActorsInvolvedInVideo (video: MVideoId, t: Transaction) {
+  const actors = await VideoShareModel.listActorIdsAndFollowerUrlsByShare(video.id, t)
+
+  const alreadyLoadedActor = (video as VideoModel).VideoChannel?.Account?.Actor
+
+  const videoActor = alreadyLoadedActor?.url && alreadyLoadedActor?.followersUrl
+    ? alreadyLoadedActor
+    : await ActorModel.loadAccountActorFollowerUrlByVideoId(video.id, t)
+
+  if (videoActor) actors.push(videoActor)
+
+  return actors
+}
+
+// ---------------------------------------------------------------------------
+
+export {
+  broadcastToActors,
+  broadcastToFollowers,
+  forwardVideoRelatedActivity,
+  sendVideoRelatedActivity,
+  sendVideoRelatedActivityToOrigin,
+  unicastTo
+}
+
+// ---------------------------------------------------------------------------
+
+async function computeFollowerUris (toFollowersOf: MActorId[], actorsException: MActorWithInboxes[], t: Transaction) {
+  const toActorFollowerIds = toFollowersOf.map(a => a.id)
+
+  const result = await ActorFollowModel.listAcceptedFollowerSharedInboxUrls(toActorFollowerIds, t)
+  const sharedInboxesException = await buildSharedInboxesException(actorsException)
+
+  return result.data.filter(sharedInbox => sharedInboxesException.includes(sharedInbox) === false)
+}
+
+async function computeUris (toActors: MActor[], actorsException: MActorWithInboxes[] = []) {
+  const serverActor = await getServerActor()
+  const targetUrls = toActors
+    .filter(a => a.id !== serverActor.id) // Don't send to ourselves
+    .map(a => a.getSharedInbox())
+
+  const toActorSharedInboxesSet = new Set(targetUrls)
+
+  const sharedInboxesException = await buildSharedInboxesException(actorsException)
+  return Array.from(toActorSharedInboxesSet)
+    .filter(sharedInbox => sharedInboxesException.includes(sharedInbox) === false)
+}
+
+async function buildSharedInboxesException (actorsException: MActorWithInboxes[]) {
+  const serverActor = await getServerActor()
+
+  return actorsException
+    .map(f => f.getSharedInbox())
+    .concat([ serverActor.sharedInboxUrl ])
+}

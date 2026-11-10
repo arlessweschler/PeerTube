@@ -1,83 +1,112 @@
-import { SortMeta } from 'primeng/api'
-import { Component, OnInit, ViewChild } from '@angular/core'
-import { ConfirmService, Notifier, RestPagination, RestTable } from '@app/core'
-import { InstanceFollowService } from '@app/shared/shared-instance'
-import { BatchDomainsModalComponent } from '@app/shared/shared-moderation'
-import { ActorFollow } from '@shared/models'
+import { Component, OnInit, inject, viewChild, ChangeDetectionStrategy } from '@angular/core'
+import { RouterLink } from '@angular/router'
+import { ConfirmService, Notifier } from '@app/core'
+import { formatICU } from '@app/helpers'
+import { InstanceFollowService } from '@app/shared/shared-instance/instance-follow.service'
+import { PTDatePipe } from '@app/shared/shared-main/common/date.pipe'
+import { ActorFollow, FollowState } from '@peertube/peertube-models'
+import { AdvancedFilterDef } from '../../../shared/shared-forms/advanced-input-filter.component'
+import { GlobalIconComponent } from '../../../shared/shared-icons/global-icon.component'
+import { DropdownAction } from '../../../shared/shared-main/buttons/action-dropdown.component'
+import { DeleteButtonComponent } from '../../../shared/shared-main/buttons/delete-button.component'
+import { NumberFormatterPipe } from '../../../shared/shared-main/common/number-formatter.pipe'
+import { DataLoaderOptionsBase, TableColumnInfo, TableComponent } from '../../../shared/shared-tables/table.component'
+import { RedundancyCheckboxComponent } from '../shared/redundancy-checkbox.component'
+import { FollowModalComponent } from './follow-modal.component'
+
+type DataLoaderParameter = Parameters<FollowingListComponent['_dataLoader']>[0]
 
 @Component({
   templateUrl: './following-list.component.html',
-  styleUrls: [ '../follows.component.scss', './following-list.component.scss' ]
+  styleUrls: [ './following-list.component.scss' ],
+  changeDetection: ChangeDetectionStrategy.Eager,
+  imports: [
+    RouterLink,
+    GlobalIconComponent,
+    DeleteButtonComponent,
+    RedundancyCheckboxComponent,
+    FollowModalComponent,
+    PTDatePipe,
+    TableComponent,
+    NumberFormatterPipe
+  ]
 })
-export class FollowingListComponent extends RestTable implements OnInit {
-  @ViewChild('batchDomainsModal') batchDomainsModal: BatchDomainsModalComponent
+export class FollowingListComponent implements OnInit {
+  private notifier = inject(Notifier)
+  private confirmService = inject(ConfirmService)
+  private followService = inject(InstanceFollowService)
 
-  following: ActorFollow[] = []
-  totalRecords = 0
-  sort: SortMeta = { field: 'createdAt', order: -1 }
-  pagination: RestPagination = { count: this.rowsPerPage, start: 0 }
+  readonly followModal = viewChild<FollowModalComponent>('followModal')
+  readonly table = viewChild<TableComponent<ActorFollow, DataLoaderParameter>>('table')
 
-  constructor (
-    private notifier: Notifier,
-    private confirmService: ConfirmService,
-    private followService: InstanceFollowService
-    ) {
-    super()
+  inputFilters: AdvancedFilterDef<DataLoaderParameter>[] = []
+
+  bulkActions: DropdownAction<ActorFollow[]>[] = []
+
+  columns: TableColumnInfo<string>[] = [
+    { id: 'following', label: $localize`Following`, sortable: false },
+    { id: 'state', label: $localize`State`, sortable: true },
+    { id: 'createdAt', label: $localize`Created`, sortable: true },
+    { id: 'redundancyAllowed', label: $localize`Redundancy allowed`, sortable: true }
+  ]
+
+  dataLoader: typeof this._dataLoader
+
+  constructor () {
+    this.dataLoader = this._dataLoader.bind(this)
   }
 
   ngOnInit () {
-    this.initialize()
+    this.inputFilters = this.followService.buildFollowsListFilters()
+
+    this.bulkActions = [
+      {
+        label: $localize`Delete`,
+        handler: follows => this.removeFollowing(follows)
+      }
+    ]
   }
 
-  getIdentifier () {
-    return 'FollowingListComponent'
+  openFollowModal () {
+    this.followModal().openModal()
   }
 
-  addDomainsToFollow () {
-    this.batchDomainsModal.openModal()
+  isInstanceFollowing (follow: ActorFollow) {
+    return follow.following.name === 'peertube'
   }
 
-  httpEnabled () {
-    return window.location.protocol === 'https:'
+  buildFollowingName (follow: ActorFollow) {
+    return follow.following.name + '@' + follow.following.host
   }
 
-  async addFollowing (hosts: string[]) {
-    this.followService.follow(hosts).subscribe(
-      () => {
-        this.notifier.success($localize`Follow request(s) sent!`)
-        this.reloadData()
-      },
+  async removeFollowing (follows: ActorFollow[]) {
+    const icuParams = { count: follows.length, entryName: this.buildFollowingName(follows[0]) }
 
-      err => this.notifier.error(err.message)
+    const message = formatICU(
+      $localize`Do you really want to unfollow {count, plural, =1 {{entryName}?} other {{count} entries?}}`,
+      icuParams
     )
-  }
 
-  async removeFollowing (follow: ActorFollow) {
-    const res = await this.confirmService.confirm(
-      $localize`Do you really want to unfollow ${follow.following.host}?`,
-      $localize`Unfollow`
-    )
+    const res = await this.confirmService.confirm(message, $localize`Unfollow`)
     if (res === false) return
 
-    this.followService.unfollow(follow).subscribe(
-      () => {
-        this.notifier.success($localize`You are not following ${follow.following.host} anymore.`)
-        this.reloadData()
-      },
+    this.followService.unfollow(follows)
+      .subscribe({
+        next: () => {
+          const message = formatICU(
+            $localize`You are not following {count, plural, =1 {{entryName} anymore.} other {these {count} entries anymore.}}`,
+            icuParams
+          )
 
-      err => this.notifier.error(err.message)
-    )
+          this.notifier.success(message)
+          this.table().loadData()
+        },
+
+        error: err => this.notifier.handleError(err)
+      })
   }
 
-  protected reloadData () {
-    this.followService.getFollowing({ pagination: this.pagination, sort: this.sort, search: this.search })
-                      .subscribe(
-                        resultList => {
-                          this.following = resultList.data
-                          this.totalRecords = resultList.total
-                        },
-
-                        err => this.notifier.error(err.message)
-                      )
+  private _dataLoader (options: DataLoaderOptionsBase & { state?: FollowState }) {
+    return this.followService.listSubscriptions(options)
   }
 }

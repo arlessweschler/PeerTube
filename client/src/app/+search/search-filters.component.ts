@@ -1,28 +1,32 @@
-import { Component, EventEmitter, Input, OnInit, Output } from '@angular/core'
+import { Component, OnInit, inject, input, output, ChangeDetectionStrategy } from '@angular/core'
+import { FormsModule } from '@angular/forms'
 import { ServerService } from '@app/core'
-import { AdvancedSearch } from '@app/shared/shared-search'
-import { ServerConfig, VideoConstant } from '@shared/models'
+import { AdvancedSearch } from '@app/shared/shared-search/advanced-search.model'
+import { HTMLServerConfig, ConstantLabel } from '@peertube/peertube-models'
+import { SelectCategoriesComponent } from '../shared/shared-forms/select/select-categories.component'
+import { SelectLanguagesComponent } from '../shared/shared-forms/select/select-languages.component'
+import { SelectTagsComponent } from '../shared/shared-forms/select/select-tags.component'
 
 type FormOption = { id: string, label: string }
 
 @Component({
   selector: 'my-search-filters',
   styleUrls: [ './search-filters.component.scss' ],
-  templateUrl: './search-filters.component.html'
+  templateUrl: './search-filters.component.html',
+  changeDetection: ChangeDetectionStrategy.Eager,
+  imports: [ FormsModule, SelectTagsComponent, SelectCategoriesComponent, SelectLanguagesComponent ]
 })
 export class SearchFiltersComponent implements OnInit {
-  @Input() advancedSearch: AdvancedSearch = new AdvancedSearch()
+  private serverService = inject(ServerService)
 
-  @Output() filtered = new EventEmitter<AdvancedSearch>()
+  advancedSearch = input<AdvancedSearch>(new AdvancedSearch())
+  filtered = output<AdvancedSearch>()
 
-  videoCategories: VideoConstant<number>[] = []
-  videoLicences: VideoConstant<number>[] = []
-  videoLanguages: VideoConstant<string>[] = []
+  videoLicences: ConstantLabel<number>[] = []
 
   publishedDateRanges: FormOption[] = []
   sorts: FormOption[] = []
   durationRanges: FormOption[] = []
-  videoType: FormOption[] = []
 
   publishedDateRange: string
   durationRange: string
@@ -30,11 +34,9 @@ export class SearchFiltersComponent implements OnInit {
   originallyPublishedStartYear: string
   originallyPublishedEndYear: string
 
-  private serverConfig: ServerConfig
+  private serverConfig: HTMLServerConfig
 
-  constructor (
-    private serverService: ServerService
-  ) {
+  constructor () {
     this.publishedDateRanges = [
       {
         id: 'today',
@@ -51,17 +53,6 @@ export class SearchFiltersComponent implements OnInit {
       {
         id: 'last_365days',
         label: $localize`Last 365 days`
-      }
-    ]
-
-    this.videoType = [
-      {
-        id: 'vod',
-        label: $localize`VOD videos`
-      },
-      {
-        id: 'live',
-        label: $localize`Live videos`
       }
     ]
 
@@ -97,52 +88,49 @@ export class SearchFiltersComponent implements OnInit {
   }
 
   ngOnInit () {
-    this.serverConfig = this.serverService.getTmpConfig()
-    this.serverService.getConfig()
-        .subscribe(config => this.serverConfig = config)
+    this.serverConfig = this.serverService.getHTMLConfig()
 
-    this.serverService.getVideoCategories().subscribe(categories => this.videoCategories = categories)
     this.serverService.getVideoLicences().subscribe(licences => this.videoLicences = licences)
-    this.serverService.getVideoLanguages().subscribe(languages => this.videoLanguages = languages)
 
     this.loadFromDurationRange()
     this.loadFromPublishedRange()
     this.loadOriginallyPublishedAtYears()
   }
 
-  onInputUpdated () {
+  onDurationOrPublishedUpdated () {
     this.updateModelFromDurationRange()
     this.updateModelFromPublishedRange()
     this.updateModelFromOriginallyPublishedAtYears()
   }
 
   formUpdated () {
-    this.onInputUpdated()
-    this.filtered.emit(this.advancedSearch)
+    this.onDurationOrPublishedUpdated()
+    this.filtered.emit(this.advancedSearch())
   }
 
   reset () {
-    this.advancedSearch.reset()
+    this.advancedSearch().reset()
 
     this.resetOriginalPublicationYears()
 
     this.durationRange = undefined
     this.publishedDateRange = undefined
 
-    this.onInputUpdated()
+    this.onDurationOrPublishedUpdated()
   }
 
-  resetField (fieldName: string, value?: any) {
-    this.advancedSearch[fieldName] = value
+  resetField (fieldName: keyof AdvancedSearch, value?: any) {
+    ;(this.advancedSearch() as any)[fieldName] = value
   }
 
-  resetLocalField (fieldName: string, value?: any) {
+  resetLocalField (fieldName: keyof SearchFiltersComponent, value?: any) {
     this[fieldName] = value
-    this.onInputUpdated()
+    this.onDurationOrPublishedUpdated()
   }
 
   resetOriginalPublicationYears () {
-    this.originallyPublishedStartYear = this.originallyPublishedEndYear = undefined
+    this.originallyPublishedStartYear = undefined
+    this.originallyPublishedEndYear = undefined
   }
 
   isSearchTargetEnabled () {
@@ -150,33 +138,37 @@ export class SearchFiltersComponent implements OnInit {
   }
 
   private loadOriginallyPublishedAtYears () {
-    this.originallyPublishedStartYear = this.advancedSearch.originallyPublishedStartDate
-      ? new Date(this.advancedSearch.originallyPublishedStartDate).getFullYear().toString()
-      : null
+    const advancedSearch = this.advancedSearch()
+    this.originallyPublishedStartYear = advancedSearch.originallyPublishedStartDate
+      ? new Date(advancedSearch.originallyPublishedStartDate).getFullYear().toString()
+      : undefined
 
-    this.originallyPublishedEndYear = this.advancedSearch.originallyPublishedEndDate
-      ? new Date(this.advancedSearch.originallyPublishedEndDate).getFullYear().toString()
-      : null
+    const advancedSearchValue = this.advancedSearch()
+    this.originallyPublishedEndYear = advancedSearchValue.originallyPublishedEndDate
+      ? new Date(advancedSearchValue.originallyPublishedEndDate).getFullYear().toString()
+      : undefined
   }
 
   private loadFromDurationRange () {
-    if (this.advancedSearch.durationMin || this.advancedSearch.durationMax) {
+    const advancedSearch = this.advancedSearch()
+    if (advancedSearch.durationMin || advancedSearch.durationMax) {
       const fourMinutes = 60 * 4
       const tenMinutes = 60 * 10
 
-      if (this.advancedSearch.durationMin === fourMinutes && this.advancedSearch.durationMax === tenMinutes) {
+      if (advancedSearch.durationMin === fourMinutes && advancedSearch.durationMax === tenMinutes) {
         this.durationRange = 'medium'
-      } else if (this.advancedSearch.durationMax === fourMinutes) {
+      } else if (advancedSearch.durationMax === fourMinutes) {
         this.durationRange = 'short'
-      } else if (this.advancedSearch.durationMin === tenMinutes) {
+      } else if (advancedSearch.durationMin === tenMinutes) {
         this.durationRange = 'long'
       }
     }
   }
 
   private loadFromPublishedRange () {
-    if (this.advancedSearch.startDate) {
-      const date = new Date(this.advancedSearch.startDate)
+    const advancedSearch = this.advancedSearch()
+    if (advancedSearch.startDate) {
+      const date = new Date(advancedSearch.startDate)
       const now = new Date()
 
       const diff = Math.abs(date.getTime() - now.getTime())
@@ -196,14 +188,15 @@ export class SearchFiltersComponent implements OnInit {
     baseDate.setHours(0, 0, 0, 0)
     baseDate.setMonth(0, 1)
 
+    const advancedSearch = this.advancedSearch()
     if (this.originallyPublishedStartYear) {
       const year = parseInt(this.originallyPublishedStartYear, 10)
       const start = new Date(baseDate)
       start.setFullYear(year)
 
-      this.advancedSearch.originallyPublishedStartDate = start.toISOString()
+      advancedSearch.originallyPublishedStartDate = start.toISOString()
     } else {
-      this.advancedSearch.originallyPublishedStartDate = null
+      advancedSearch.originallyPublishedStartDate = undefined
     }
 
     if (this.originallyPublishedEndYear) {
@@ -211,32 +204,40 @@ export class SearchFiltersComponent implements OnInit {
       const end = new Date(baseDate)
       end.setFullYear(year)
 
-      this.advancedSearch.originallyPublishedEndDate = end.toISOString()
+      advancedSearch.originallyPublishedEndDate = end.toISOString()
     } else {
-      this.advancedSearch.originallyPublishedEndDate = null
+      advancedSearch.originallyPublishedEndDate = undefined
     }
   }
 
   private updateModelFromDurationRange () {
-    if (!this.durationRange) return
+    if (!this.durationRange) {
+      const advancedSearch = this.advancedSearch()
+      advancedSearch.durationMin = undefined
+      advancedSearch.durationMax = undefined
+      return
+    }
 
     const fourMinutes = 60 * 4
     const tenMinutes = 60 * 10
 
+    const advancedSearch = this.advancedSearch()
+    const advancedSearchValue = this.advancedSearch()
+    const advancedSearchVal = this.advancedSearch()
     switch (this.durationRange) {
       case 'short':
-        this.advancedSearch.durationMin = undefined
-        this.advancedSearch.durationMax = fourMinutes
+        advancedSearch.durationMin = undefined
+        advancedSearch.durationMax = fourMinutes
         break
 
       case 'medium':
-        this.advancedSearch.durationMin = fourMinutes
-        this.advancedSearch.durationMax = tenMinutes
+        advancedSearchValue.durationMin = fourMinutes
+        advancedSearchValue.durationMax = tenMinutes
         break
 
       case 'long':
-        this.advancedSearch.durationMin = tenMinutes
-        this.advancedSearch.durationMax = undefined
+        advancedSearchVal.durationMin = tenMinutes
+        advancedSearchVal.durationMax = undefined
         break
     }
   }
@@ -262,6 +263,6 @@ export class SearchFiltersComponent implements OnInit {
         break
     }
 
-    this.advancedSearch.startDate = date.toISOString()
+    this.advancedSearch().startDate = date.toISOString()
   }
 }

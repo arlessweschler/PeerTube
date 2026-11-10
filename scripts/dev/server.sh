@@ -5,7 +5,7 @@ set -eu
 if [ ! -f "./client/dist/en-US/index.html" ]; then
   if [ -z ${1+x} ] || [ "$1" != "--skip-client" ]; then
     echo "client/dist/en-US/index.html does not exist, compile client files..."
-    npm run build:client -- --light
+    npm run build:client
   fi
 fi
 
@@ -14,15 +14,11 @@ mkdir -p "./client/dist"
 rm -rf "./client/dist/locale"
 cp -r "./client/src/locale" "./client/dist/locale"
 
-rm -rf "./dist"
+mkdir -p "./dist/core/lib"
 
-mkdir "./dist"
-cp "./tsconfig.json" "./dist"
+npm run tsc -- -b -v --incremental server/tsconfig.json
+npm run tsc-alias:server
 
-npm run tsc -- --incremental --sourceMap
-cp -r ./server/static ./server/assets ./dist/server
-cp -r "./server/lib/emails" "./dist/server/lib"
+bash ./scripts/build/server-assets.sh
 
-NODE_ENV=test node node_modules/.bin/concurrently -k \
-  "node_modules/.bin/nodemon --delay 1 --watch ./dist dist/server" \
-  "node_modules/.bin/tsc --incremental --sourceMap --preserveWatchOutput -w"
+./node_modules/.bin/tsc-watch --build --preserveWatchOutput --verbose --onSuccess 'sh -c "npm run tsc-alias:server && bash ./scripts/build/server-assets.sh && NODE_ENV=dev node --inspect --enable-source-maps dist/server"' server/tsconfig.json

@@ -2,7 +2,6 @@ listen:
   port: 9005
 
 webserver:
-  hostname: 'localhost'
   port: 9005
 
 database:
@@ -11,21 +10,30 @@ database:
 # From the project root directory
 storage:
   tmp: 'test5/tmp/'
+  tmp_persistent: 'test5/tmp-persistent/'
+  bin: 'test5/bin/'
   avatars: 'test5/avatars/'
-  videos: 'test5/videos/'
+  web_videos: 'test5/web-videos/'
   streaming_playlists: 'test5/streaming-playlists/'
+  original_video_files: 'test5/original-video-files/'
   redundancy: 'test5/redundancy/'
   logs: 'test5/logs/'
   previews: 'test5/previews/'
   thumbnails: 'test5/thumbnails/'
+  storyboards: 'test5/storyboards/'
   torrents: 'test5/torrents/'
   captions: 'test5/captions/'
   cache: 'test5/cache/'
   plugins: 'test5/plugins/'
+  well_known: 'test5/well-known/'
+  uploads: 'test5/uploads/'
   client_overrides: 'test5/client-overrides/'
 
 admin:
   email: 'admin5@example.com'
 
 transcoding:
+  enabled: false
+
+video_studio:
   enabled: false

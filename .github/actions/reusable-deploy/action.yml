@@ -1,0 +1,58 @@
+name: "Reusable deploy on builds.joinpeertube.org"
+
+description: "Reusable deploy on builds.joinpeertube.org"
+
+inputs:
+  source:
+    required: true
+    description: "Source file/files/directory/directories to deploy"
+  destination:
+    required: true
+    description: "Destination directory on builds.joinpeertube.org"
+  knownHosts:
+    required: true
+    description: "Known hosts"
+  deployKey:
+    required: true
+    description: "Deploy key"
+  deployUser:
+    required: true
+    description: "Deploy user"
+  deployHost:
+    required: true
+    description: "Deploy host"
+
+
+runs:
+  using: "composite"
+
+  steps:
+    - name: "Deploy"
+      shell: bash
+      env:
+        SOURCE: ${{ inputs.source }}
+        DESTINATION: ${{ inputs.destination }}
+        KNOWN_HOSTS: ${{ inputs.knownHosts }}
+        DEPLOY_KEY: ${{ inputs.deployKey }}
+        DEPLOY_USER: ${{ inputs.deployUser }}
+        DEPLOY_HOST: ${{ inputs.deployHost }}
+      run: |
+        set -euo pipefail
+
+        mkdir -p ~/.ssh
+        chmod 700 ~/.ssh
+
+        echo "Adding ssh key to known hosts"
+        echo -e "$KNOWN_HOSTS" > ~/.ssh/known_hosts
+
+        eval "$(ssh-agent -s)"
+        trap 'ssh-agent -k > /dev/null' EXIT
+
+        echo "Adding ssh deploy key"
+        ssh-add <(echo "$DEPLOY_KEY")
+
+        echo "Uploading files"
+
+        # SOURCE is intentionally unquoted: it can contain several space separated paths and globs
+        # shellcheck disable=SC2086
+        scp $SOURCE "$DEPLOY_USER@$DEPLOY_HOST:../../web/$DESTINATION"

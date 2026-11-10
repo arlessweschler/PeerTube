@@ -1,31 +1,66 @@
-import { forkJoin } from 'rxjs'
-import { map, switchMap } from 'rxjs/operators'
-import { Injectable } from '@angular/core'
-import { ActivatedRouteSnapshot, Resolve } from '@angular/router'
+import { inject, Injectable } from '@angular/core'
 import { ServerService } from '@app/core'
-import { InstanceService } from '@app/shared/shared-instance'
-import { About, ServerConfig } from '@shared/models/server'
+import { CustomMarkupService } from '@app/shared/shared-custom-markup/custom-markup.service'
+import { AboutHTML, InstanceService } from '@app/shared/shared-main/instance/instance.service'
+import { About, ServerConfig, ServerStats } from '@peertube/peertube-models'
+import { forkJoin, Observable } from 'rxjs'
+import { map, switchMap } from 'rxjs/operators'
 
-export type ResolverData = { about: About, languages: string[], categories: string[], serverConfig: ServerConfig }
+export type ResolverData = {
+  serverConfig: ServerConfig
+  serverStats: ServerStats
+  about: About
+  languages: string[]
+  categories: string[]
+  aboutHTML: AboutHTML
+  descriptionElement: HTMLDivElement
+}
 
 @Injectable()
-export class AboutInstanceResolver implements Resolve<any> {
+export class AboutInstanceResolver {
+  private instanceService = inject(InstanceService)
+  private customMarkupService = inject(CustomMarkupService)
+  private serverService = inject(ServerService)
 
-  constructor (
-    private instanceService: InstanceService,
-    private serverService: ServerService
-  ) {}
+  resolve (): Observable<ResolverData> {
+    return forkJoin([
+      this.buildInstanceAboutObservable(),
+      this.serverService.getServerStats(),
+      this.serverService.getConfig()
+    ]).pipe(
+      map(([
+        [ about, languages, categories, aboutHTML, { rootElement } ],
+        serverStats,
+        serverConfig
+      ]) => {
+        return {
+          serverStats,
+          serverConfig,
+          about,
+          languages,
+          categories,
+          aboutHTML,
+          descriptionElement: rootElement
+        }
+      })
+    )
+  }
 
-  resolve (route: ActivatedRouteSnapshot) {
-    return this.instanceService.getAbout()
-               .pipe(
-                 switchMap(about => {
-                   return forkJoin([
-                     this.instanceService.buildTranslatedLanguages(about),
-                     this.instanceService.buildTranslatedCategories(about),
-                     this.serverService.getConfig()
-                   ]).pipe(map(([ languages, categories, serverConfig ]) => ({ about, languages, categories, serverConfig })))
-                 })
-               )
+  private buildInstanceAboutObservable () {
+    return this.instanceService.getAboutWithCache()
+      .pipe(
+        switchMap(about => {
+          return forkJoin([
+            Promise.resolve(about),
+            this.instanceService.buildTranslatedLanguages(about),
+            this.instanceService.buildTranslatedCategories(about),
+            this.instanceService.buildHtml(about),
+
+            about.instance.description
+              ? this.customMarkupService.buildElement(about.instance.description)
+              : Promise.resolve({ rootElement: undefined })
+          ])
+        })
+      )
   }
 }

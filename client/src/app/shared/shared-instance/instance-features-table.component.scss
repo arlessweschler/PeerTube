@@ -1,19 +1,21 @@
-@import '_variables';
-@import '_mixins';
+@use '_variables' as *;
+@use '_mixins' as *;
 
 table {
   font-size: 14px;
-  color: pvar(--mainForegroundColor);
+  color: pvar(--fg);
+  width: 100%;
 
-  .label,
-  .sub-label {
-    &.label {
+  .t-label,
+  .t-sub-label {
+    &.t-label {
       font-weight: $font-semibold;
     }
 
-    &.sub-label {
+    &.t-sub-label {
       font-weight: $font-regular;
-      padding-left: 30px;
+
+      @include padding-left(30px);
     }
 
     .more-info {
@@ -23,16 +25,22 @@ table {
     }
   }
 
+  th,
   td {
-    vertical-align: middle;
+    padding: 0.75rem;
+    border-top: 1px solid #dee2e6;
   }
 
   caption {
     caption-side: top;
-    font-size: 15px;
     font-weight: $font-semibold;
-    color: pvar(--mainForegroundColor);
+    color: pvar(--fg);
+  }
+
+  .plugin,
+  .theme {
+    &:not(:last-child)::after {
+      content: '•';
+    }
   }
 }
-
-

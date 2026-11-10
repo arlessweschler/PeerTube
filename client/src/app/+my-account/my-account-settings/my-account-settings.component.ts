@@ -1,25 +1,58 @@
 import { ViewportScroller } from '@angular/common'
 import { HttpErrorResponse } from '@angular/common/http'
-import { AfterViewChecked, Component, OnInit } from '@angular/core'
-import { AuthService, Notifier, User, UserService } from '@app/core'
+import { AfterViewChecked, ChangeDetectionStrategy, Component, OnInit, inject } from '@angular/core'
+import { AuthService, Notifier, ServerService, User, UserService } from '@app/core'
 import { genericUploadErrorHandler } from '@app/helpers'
+import { shallowCopy } from '@peertube/peertube-core-utils'
+import { ActorAvatarEditComponent } from '../../shared/shared-actor-image-edit/actor-avatar-edit.component'
+import { UserQuotaComponent } from '../../shared/shared-main/users/user-quota.component'
+import { UserInterfaceSettingsComponent } from '../../shared/shared-user-settings/user-interface-settings.component'
+import { UserContentPreferencesComponent } from '../../shared/shared-user-settings/user-content-preferences.component'
+import { UserPlayerSettingsComponent } from '../../shared/shared-user-settings/user-player-settings.component'
+import { UserSensitiveContentSettingsComponent } from '../../shared/shared-user-settings/user-sensitive-content-settings.component'
+import { UserAIContentSettingsComponent } from '../../shared/shared-user-settings/user-ai-content-settings.component'
+import { AccountTokenSessionsComponent } from '../../shared/shared-users/account-token-sessions.component'
+import { MyAccountChangeEmailComponent } from './my-account-change-email/my-account-change-email.component'
+import { MyAccountChangePasswordComponent } from './my-account-change-password/my-account-change-password.component'
+import { MyAccountDangerZoneComponent } from './my-account-danger-zone/my-account-danger-zone.component'
+import {
+  MyAccountNotificationPreferencesComponent
+} from './my-account-notification-preferences/my-account-notification-preferences.component'
+import { MyAccountProfileComponent } from './my-account-profile/my-account-profile.component'
+import { MyAccountTwoFactorButtonComponent } from './my-account-two-factor/my-account-two-factor-button.component'
 
 @Component({
   selector: 'my-account-settings',
   templateUrl: './my-account-settings.component.html',
-  styleUrls: [ './my-account-settings.component.scss' ]
+  styleUrls: [ './my-account-settings.component.scss' ],
+  changeDetection: ChangeDetectionStrategy.Eager,
+  imports: [
+    ActorAvatarEditComponent,
+    UserQuotaComponent,
+    MyAccountProfileComponent,
+    UserInterfaceSettingsComponent,
+    UserSensitiveContentSettingsComponent,
+    UserAIContentSettingsComponent,
+    UserContentPreferencesComponent,
+    UserPlayerSettingsComponent,
+    MyAccountNotificationPreferencesComponent,
+    MyAccountChangePasswordComponent,
+    MyAccountTwoFactorButtonComponent,
+    MyAccountChangeEmailComponent,
+    MyAccountDangerZoneComponent,
+    AccountTokenSessionsComponent
+  ]
 })
 export class MyAccountSettingsComponent implements OnInit, AfterViewChecked {
-  user: User = null
+  private viewportScroller = inject(ViewportScroller)
+  private userService = inject(UserService)
+  private authService = inject(AuthService)
+  private serverService = inject(ServerService)
+  private notifier = inject(Notifier)
+
+  user: User
 
   private lastScrollHash: string
-
-  constructor (
-    private viewportScroller: ViewportScroller,
-    private userService: UserService,
-    private authService: AuthService,
-    private notifier: Notifier
-    ) {}
 
   get userInformationLoaded () {
     return this.authService.userInformationLoaded
@@ -27,6 +60,13 @@ export class MyAccountSettingsComponent implements OnInit, AfterViewChecked {
 
   ngOnInit () {
     this.user = this.authService.getUser()
+  }
+
+  canManageTwoFactor () {
+    if (this.user.pluginAuth === null) return true
+
+    // 2FA is only supported by id and password auth plugins
+    return this.serverService.getHTMLConfig().plugin.registeredIdAndPassAuths.some(a => a.npmName === this.user.pluginAuth)
   }
 
   ngAfterViewChecked () {
@@ -39,31 +79,38 @@ export class MyAccountSettingsComponent implements OnInit, AfterViewChecked {
 
   onAvatarChange (formData: FormData) {
     this.userService.changeAvatar(formData)
-      .subscribe(
-        data => {
+      .subscribe({
+        next: data => {
           this.notifier.success($localize`Avatar changed.`)
 
-          this.user.updateAccountAvatar(data.avatar)
+          this.user.updateAccountAvatar(data.avatars)
+
+          // So my-actor-avatar component detects changes
+          this.user.account = shallowCopy(this.user.account)
         },
 
-        (err: HttpErrorResponse) => genericUploadErrorHandler({
-          err,
-          name: $localize`avatar`,
-          notifier: this.notifier
-        })
-      )
+        error: (err: HttpErrorResponse) =>
+          genericUploadErrorHandler({
+            err,
+            name: $localize`avatar`,
+            notifier: this.notifier
+          })
+      })
   }
 
   onAvatarDelete () {
     this.userService.deleteAvatar()
-      .subscribe(
-        data => {
+      .subscribe({
+        next: () => {
           this.notifier.success($localize`Avatar deleted.`)
 
           this.user.updateAccountAvatar()
+
+          // So my-actor-avatar component detects changes
+          this.user.account = shallowCopy(this.user.account)
         },
 
-        (err: HttpErrorResponse) => this.notifier.error(err.message)
-      )
+        error: (err: HttpErrorResponse) => this.notifier.error(err.message)
+      })
   }
 }

@@ -1,0 +1,2503 @@
+import { buildVideoEmbedPath, buildVideoWatchPath, forceNumber, maxBy, minBy, pick, wait } from '@peertube/peertube-core-utils'
+import {
+  FileStorage,
+  ResultList,
+  ThumbnailAspectRatio,
+  UserRight,
+  Video,
+  VideoDetails,
+  VideoFile,
+  VideoFileStream,
+  VideoFileStreamType,
+  VideoInclude,
+  VideoIncludeType,
+  VideoObject,
+  VideoPrivacy,
+  VideoRateType,
+  VideoAIUsage,
+  VideoCommercialContent,
+  VideoRecommendationScope,
+  VideoState,
+  VideoStreamingPlaylistType,
+  VideoSummary,
+  type VideoAIUsageType,
+  type VideoCommercialContentType,
+  type VideoCommentPolicyType,
+  type VideoEmbedPrivacyPolicyType,
+  type VideoPrivacyType,
+  type VideoRecommendationScopeType,
+  type VideoStateType
+} from '@peertube/peertube-models'
+import { peertubeTruncate, uuidToShort } from '@peertube/peertube-node-utils'
+import { AttributesOnly } from '@peertube/peertube-typescript-utils'
+import { afterCommitIfTransaction } from '@server/helpers/database-utils.js'
+import { Memoize } from '@server/helpers/memoize.js'
+import { getPrivaciesForFederation } from '@server/helpers/video.js'
+import { MVideoToFederate, isPrivacyForFederation } from '@server/lib/activitypub/videos/federate.js'
+import { InternalEventEmitter } from '@server/lib/internal-event-emitter.js'
+import { LiveManager } from '@server/lib/live/live-manager.js'
+import {
+  removeHLSFileObjectStorageByFilename,
+  removeHLSObjectStorage,
+  removeOriginalFileObjectStorage,
+  removeWebVideoObjectStorage
+} from '@server/lib/object-storage/index.js'
+import { tracer } from '@server/lib/opentelemetry/tracing.js'
+import { getHLSDirectory, getHLSResolutionPlaylistFilename } from '@server/lib/paths.js'
+import { Hooks } from '@server/lib/plugins/hooks.js'
+import { buildLocalTrackerUrls } from '@server/lib/tracker-urls.js'
+import { VideoPathManager } from '@server/lib/video-path-manager.js'
+import { isVideoInPrivateDirectory } from '@server/lib/video-privacy.js'
+import { getServerActor } from '@server/models/application/application.js'
+import { ModelCache } from '@server/models/shared/model-cache.js'
+import { MVideoSource } from '@server/types/models/video/video-source.js'
+import { remove } from 'fs-extra/esm'
+import { FindOptions, Includeable, Op, QueryTypes, Sequelize, Transaction } from 'sequelize'
+import {
+  AfterCreate,
+  AfterDestroy,
+  AfterUpdate,
+  AllowNull,
+  BeforeDestroy,
+  BelongsTo,
+  BelongsToMany,
+  Column,
+  CreatedAt,
+  DataType,
+  Default,
+  ForeignKey,
+  HasMany,
+  HasOne,
+  Is,
+  IsInt,
+  IsUUID,
+  Min,
+  Scopes,
+  Table,
+  UpdatedAt
+} from 'sequelize-typescript'
+import { isActivityPubUrlValid } from '../../helpers/custom-validators/activitypub/misc.js'
+import { isBooleanValid, isUUIDValid } from '../../helpers/custom-validators/misc.js'
+import {
+  isNSFWFlagsValid,
+  isNSFWSummaryValid,
+  isVideoDescriptionValid,
+  isVideoDurationValid,
+  isVideoNameValid,
+  isVideoPrivacyValid,
+  isVideoStateValid,
+  isVideoSupportValid
+} from '../../helpers/custom-validators/videos.js'
+import { createLogger } from '../../helpers/logger.js'
+import { CONFIG } from '../../initializers/config.js'
+import { ACTIVITY_PUB, CONSTRAINTS_FIELDS, MEMOIZE_LENGTH, MEMOIZE_TTL, WEBSERVER } from '../../initializers/constants.js'
+import { sendDeleteVideo } from '../../lib/activitypub/send/index.js'
+import type {
+  MAccountId,
+  MChannel,
+  MChannelId,
+  MStreamingPlaylist,
+  MStreamingPlaylistFilesVideo,
+  MUserAccountId,
+  MVideo,
+  MVideoAP,
+  MVideoAccountLight,
+  MVideoAccountLightBlacklistAllFiles,
+  MVideoDetails,
+  MVideoFileVideo,
+  MVideoFormattable,
+  MVideoFormattableDetails,
+  MVideoFull,
+  MVideoId,
+  MVideoImmutable,
+  MVideoOutbox,
+  MVideoOwned,
+  MVideoSeo,
+  MVideoSummary,
+  MVideoThumbnails,
+  MVideoThumbnailsBlacklist,
+  MVideoWithAllFiles,
+  MVideoWithBlacklist,
+  MVideoWithFile,
+  MVideoWithRights
+} from '../../types/models/index.js'
+import { MThumbnail } from '../../types/models/video/thumbnail.js'
+import { MVideoFile, MVideoFileStreamingPlaylistVideo } from '../../types/models/video/video-file.js'
+import { VideoAbuseModel } from '../abuse/video-abuse.js'
+import { AccountVideoRateModel } from '../account/account-video-rate.js'
+import { AccountModel } from '../account/account.js'
+import { ActorImageModel } from '../actor/actor-image.js'
+import { ActorModel } from '../actor/actor.js'
+import { VideoAutomaticTagModel } from '../automatic-tag/video-automatic-tag.js'
+import { ServerModel } from '../server/server.js'
+import { TrackerModel } from '../server/tracker.js'
+import { VideoTrackerModel } from '../server/video-tracker.js'
+import {
+  SequelizeModel,
+  buildSQLAttributes,
+  buildTrigramSearchIndex,
+  buildWhereIdOrUUID,
+  bumpUpdatedAt,
+  doesExist,
+  getVideoSort,
+  isOutdated,
+  setAsUpdated,
+  throwIfNotValid
+} from '../shared/index.js'
+import { VideoStatModel } from '../stat/video-stat.js'
+import { UserVideoHistoryModel } from '../user/user-video-history.js'
+import { UserModel } from '../user/user.js'
+import { videoModelToActivityPubObject } from './formatter/video-activity-pub-format.js'
+import {
+  VideoFormattingJSONOptions,
+  videoFilesModelToFormattedJSON,
+  videoModelToFormattedDetailsJSON,
+  videoModelToFormattedJSON
+} from './formatter/video-api-format.js'
+import { ScheduleVideoUpdateModel } from './schedule-video-update.js'
+import {
+  BuildVideosListQueryOptions,
+  DisplayOnlyForFollowerOptions,
+  QueryVideosListOptions,
+  VideoModelGetQueryBuilder,
+  VideosIdListQueryBuilder,
+  VideosModelListQueryBuilder
+} from './sql/video/index.js'
+import { StoryboardModel } from './storyboard.js'
+import { TagModel } from './tag.js'
+import { ThumbnailModel, thumbnailAPIAttributes } from './thumbnail.js'
+import { VideoBlacklistModel } from './video-blacklist.js'
+import { VideoCaptionModel } from './video-caption.js'
+import { VideoChannelModel, ScopeNames as VideoChannelScopeNames } from './video-channel.js'
+import { VideoCommentModel } from './video-comment.js'
+import { VideoFileModel } from './video-file.js'
+import { VideoImportModel } from './video-import.js'
+import { VideoJobInfoModel } from './video-job-info.js'
+import { VideoLiveModel } from './video-live.js'
+import { VideoPasswordModel } from './video-password.js'
+import { VideoPlaylistElementModel } from './video-playlist-element.js'
+import { VideoShareModel } from './video-share.js'
+import { VideoSourceModel } from './video-source.js'
+import { VideoStreamingPlaylistModel } from './video-streaming-playlist.js'
+import { VideoTagModel } from './video-tag.js'
+
+const logger = createLogger('video')
+
+const videoSummaryAttributes = [
+  'id',
+  'name',
+  'uuid',
+  'nsfw',
+  'url',
+  'channelId',
+  'remote',
+  'state',
+  'isLive',
+  'publishedAt'
+] as const satisfies (keyof AttributesOnly<VideoModel>)[]
+
+export enum ScopeNames {
+  FOR_API = 'FOR_API',
+  WITH_ACCOUNT_DETAILS = 'WITH_ACCOUNT_DETAILS',
+  WITH_TAGS = 'WITH_TAGS',
+  WITH_WEB_VIDEO_FILES = 'WITH_WEB_VIDEO_FILES',
+  WITH_BLACKLISTED = 'WITH_BLACKLISTED',
+  WITH_STREAMING_PLAYLISTS = 'WITH_STREAMING_PLAYLISTS',
+  WITH_IMMUTABLE_ATTRIBUTES = 'WITH_IMMUTABLE_ATTRIBUTES',
+  WITH_USER_HISTORY = 'WITH_USER_HISTORY',
+  WITH_THUMBNAILS = 'WITH_THUMBNAILS'
+}
+
+export type ForAPIOptions = {
+  ids?: number[]
+
+  videoPlaylistId?: number
+
+  withAccountBlockerIds?: number[]
+}
+
+@Scopes(() => ({
+  [ScopeNames.WITH_IMMUTABLE_ATTRIBUTES]: {
+    attributes: [ 'id', 'url', 'uuid', 'remote' ]
+  },
+  [ScopeNames.FOR_API]: (options: ForAPIOptions) => {
+    const include: Includeable[] = [
+      {
+        model: VideoChannelModel.scope({
+          method: [
+            VideoChannelScopeNames.SUMMARY,
+            {
+              withAccount: true,
+              withAccountBlockerIds: options.withAccountBlockerIds
+            }
+          ]
+        }),
+        required: true
+      },
+      {
+        attributes: thumbnailAPIAttributes,
+        model: ThumbnailModel,
+        required: false
+      }
+    ]
+
+    const query: FindOptions = {}
+
+    if (options.ids) {
+      query.where = {
+        id: {
+          [Op.in]: options.ids
+        }
+      }
+    }
+
+    if (options.videoPlaylistId) {
+      include.push({
+        model: VideoPlaylistElementModel.unscoped(),
+        required: true,
+        where: {
+          videoPlaylistId: options.videoPlaylistId
+        }
+      })
+    }
+
+    query.include = include
+
+    return query
+  },
+  [ScopeNames.WITH_THUMBNAILS]: {
+    include: [
+      {
+        model: ThumbnailModel,
+        required: false
+      }
+    ]
+  },
+  [ScopeNames.WITH_ACCOUNT_DETAILS]: {
+    include: [
+      {
+        model: VideoChannelModel.unscoped(),
+        required: true,
+        include: [
+          {
+            attributes: {
+              exclude: [ 'privateKey', 'publicKey' ]
+            },
+            model: ActorModel.unscoped(),
+            required: true,
+            include: [
+              {
+                attributes: [ 'host' ],
+                model: ServerModel.unscoped(),
+                required: false
+              },
+              {
+                model: ActorImageModel,
+                as: 'Avatars',
+                required: false
+              }
+            ]
+          },
+          {
+            model: AccountModel.unscoped(),
+            required: true,
+            include: [
+              {
+                model: ActorModel.unscoped(),
+                attributes: {
+                  exclude: [ 'privateKey', 'publicKey' ]
+                },
+                required: true,
+                include: [
+                  {
+                    attributes: [ 'host' ],
+                    model: ServerModel.unscoped(),
+                    required: false
+                  },
+                  {
+                    model: ActorImageModel,
+                    as: 'Avatars',
+                    required: false
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      }
+    ]
+  },
+  [ScopeNames.WITH_TAGS]: {
+    include: [ TagModel ]
+  },
+  [ScopeNames.WITH_BLACKLISTED]: {
+    include: [
+      {
+        attributes: [ 'id', 'reason', 'unfederated' ],
+        model: VideoBlacklistModel,
+        required: false
+      }
+    ]
+  },
+  [ScopeNames.WITH_WEB_VIDEO_FILES]: () => {
+    return {
+      include: [
+        {
+          model: VideoFileModel,
+          separate: true,
+          required: false
+        }
+      ]
+    }
+  },
+  [ScopeNames.WITH_STREAMING_PLAYLISTS]: () => {
+    return {
+      include: [
+        {
+          model: VideoStreamingPlaylistModel.unscoped(),
+          required: false,
+          separate: true,
+          include: [
+            {
+              model: VideoFileModel,
+              required: false
+            }
+          ]
+        }
+      ]
+    }
+  },
+  [ScopeNames.WITH_USER_HISTORY]: (userId: number) => {
+    return {
+      include: [
+        {
+          attributes: [ 'currentTime' ],
+          model: UserVideoHistoryModel.unscoped(),
+          required: false,
+          where: {
+            userId
+          }
+        }
+      ]
+    }
+  }
+}))
+@Table({
+  tableName: 'video',
+  indexes: [
+    buildTrigramSearchIndex('video_name_trigram', 'name'),
+
+    { fields: [ 'createdAt' ] },
+    {
+      fields: [
+        { name: 'publishedAt', order: 'DESC' },
+        { name: 'id', order: 'ASC' }
+      ]
+    },
+    {
+      // Must match the "-originallyPublishedAt" sort expression of VideosIdListQueryBuilder
+      name: 'video_published_at_for_order',
+      fields: [
+        Sequelize.literal('(COALESCE("originallyPublishedAt", "publishedAt")) DESC') as any,
+        { name: 'id', order: 'ASC' }
+      ]
+    },
+    { fields: [ 'duration' ] },
+    {
+      fields: [
+        { name: 'views', order: 'DESC' },
+        { name: 'id', order: 'ASC' }
+      ]
+    },
+    {
+      // Channel videos are sorted by publishedAt by default (with id tie-break)
+      name: 'video_channel_id_published_at_id',
+      fields: [ 'channelId', { name: 'publishedAt', order: 'DESC' }, { name: 'id', order: 'ASC' } ]
+    },
+    {
+      fields: [ 'originallyPublishedAt' ],
+      where: {
+        originallyPublishedAt: {
+          [Op.ne]: null
+        }
+      }
+    },
+    {
+      fields: [ 'category' ], // We don't care videos with an unknown category
+      where: {
+        category: {
+          [Op.ne]: null
+        }
+      }
+    },
+    {
+      fields: [ 'licence' ], // We don't care videos with an unknown licence
+      where: {
+        licence: {
+          [Op.ne]: null
+        }
+      }
+    },
+    {
+      fields: [ 'language' ], // We don't care videos with an unknown language
+      where: {
+        language: {
+          [Op.ne]: null
+        }
+      }
+    },
+    {
+      fields: [ 'nsfw' ], // Most of the videos are not NSFW
+      where: {
+        nsfw: true
+      }
+    },
+    {
+      fields: [ 'isLive' ], // Most of the videos are VOD
+      where: {
+        isLive: true
+      }
+    },
+    {
+      fields: [ 'remote' ], // Only index local videos
+      where: {
+        remote: false
+      }
+    },
+    {
+      fields: [ 'uuid' ],
+      unique: true
+    },
+    {
+      fields: [ 'url' ],
+      unique: true
+    }
+  ]
+})
+export class VideoModel extends SequelizeModel<VideoModel> {
+  @AllowNull(false)
+  @Default(DataType.UUIDV4)
+  @IsUUID(4)
+  @Column(DataType.UUID)
+  declare uuid: string
+
+  @AllowNull(false)
+  @Is('VideoName', value => throwIfNotValid(value, isVideoNameValid, 'name'))
+  @Column
+  declare name: string
+
+  @AllowNull(true)
+  @Default(null)
+  @Column
+  declare category: number
+
+  @AllowNull(true)
+  @Default(null)
+  @Column
+  declare licence: number
+
+  @AllowNull(true)
+  @Default(null)
+  @Column(DataType.STRING(CONSTRAINTS_FIELDS.VIDEOS.LANGUAGE.max))
+  declare language: string
+
+  @AllowNull(false)
+  @Is('VideoPrivacy', value => throwIfNotValid(value, isVideoPrivacyValid, 'privacy'))
+  @Column(DataType.INTEGER)
+  declare privacy: VideoPrivacyType
+
+  @AllowNull(false)
+  @Is('VideoNSFW', value => throwIfNotValid(value, isBooleanValid, 'NSFW boolean'))
+  @Column
+  declare nsfw: boolean
+
+  @AllowNull(false)
+  @Default(0)
+  @Is('VideoNSFWFlags', value => throwIfNotValid(value, isNSFWFlagsValid, 'NSFW flags'))
+  @Column
+  declare nsfwFlags: number // NSFWFlagType
+
+  @AllowNull(true)
+  @Default(null)
+  @Is('VideoNSFWSummary', value => throwIfNotValid(value, isNSFWSummaryValid, 'NSFW summary'))
+  @Column
+  declare nsfwSummary: string
+
+  @AllowNull(true)
+  @Default(null)
+  @Is('VideoDescription', value => throwIfNotValid(value, isVideoDescriptionValid, 'description', true))
+  @Column(DataType.STRING(CONSTRAINTS_FIELDS.VIDEOS.DESCRIPTION.max))
+  declare description: string
+
+  @AllowNull(true)
+  @Default(null)
+  @Is('VideoSupport', value => throwIfNotValid(value, isVideoSupportValid, 'support', true))
+  @Column(DataType.STRING(CONSTRAINTS_FIELDS.VIDEOS.SUPPORT.max))
+  declare support: string
+
+  @AllowNull(false)
+  @Is('VideoDuration', value => throwIfNotValid(value, isVideoDurationValid, 'duration'))
+  @Column
+  declare duration: number
+
+  @AllowNull(false)
+  @Default(0)
+  @IsInt
+  @Min(0)
+  @Column
+  declare views: number
+
+  @AllowNull(false)
+  @Default(0)
+  @IsInt
+  @Min(0)
+  @Column
+  declare downloads: number
+
+  @AllowNull(false)
+  @Default(0)
+  @IsInt
+  @Min(0)
+  @Column
+  declare likes: number
+
+  @AllowNull(false)
+  @Default(0)
+  @IsInt
+  @Min(0)
+  @Column
+  declare dislikes: number
+
+  @AllowNull(false)
+  @Default(0)
+  @IsInt
+  @Min(0)
+  @Column
+  declare comments: number
+
+  @AllowNull(false)
+  @Column
+  declare remote: boolean
+
+  @AllowNull(false)
+  @Default(false)
+  @Column
+  declare isLive: boolean
+
+  @AllowNull(false)
+  @Is('VideoUrl', value => throwIfNotValid(value, isActivityPubUrlValid, 'url'))
+  @Column(DataType.STRING(CONSTRAINTS_FIELDS.VIDEOS.URL.max))
+  declare url: string
+
+  @AllowNull(false)
+  @Column
+  declare commentsPolicy: VideoCommentPolicyType
+
+  @AllowNull(false)
+  @Column
+  declare downloadEnabled: boolean
+
+  @AllowNull(false)
+  @Column
+  declare embedPrivacyPolicy: VideoEmbedPrivacyPolicyType
+
+  @AllowNull(false)
+  @Default(VideoRecommendationScope.ALL)
+  @Column
+  declare recommendationScope: VideoRecommendationScopeType
+
+  @AllowNull(false)
+  @Default(VideoAIUsage.NOT_SPECIFIED)
+  @Column
+  declare aiUsage: VideoAIUsageType
+
+  @AllowNull(false)
+  @Default(VideoCommercialContent.NONE)
+  @Column
+  declare commercialContent: VideoCommercialContentType
+
+  @AllowNull(false)
+  @Column
+  declare waitTranscoding: boolean
+
+  @AllowNull(false)
+  @Default(null)
+  @Is('VideoState', value => throwIfNotValid(value, isVideoStateValid, 'state'))
+  @Column
+  declare state: VideoStateType
+
+  @AllowNull(true)
+  @Column(DataType.FLOAT)
+  declare aspectRatio: number
+
+  // We already have the information in videoSource table for local videos, but we prefer to normalize it for performance
+  // And also to store the info from remote instances
+  @AllowNull(true)
+  @Column
+  declare inputFileUpdatedAt: Date
+
+  // To skip updates older than the stored state
+  @AllowNull(true)
+  @Column
+  declare remoteUpdatedAt: Date
+
+  @CreatedAt
+  declare createdAt: Date
+
+  @UpdatedAt
+  declare updatedAt: Date
+
+  @AllowNull(false)
+  @Default(DataType.NOW)
+  @Column
+  declare publishedAt: Date
+
+  @AllowNull(true)
+  @Default(null)
+  @Column
+  declare originallyPublishedAt: Date
+
+  @AllowNull(true)
+  @Default(null)
+  @Column
+  declare firstPublishedAt: Date
+
+  @AllowNull(true)
+  @Default(null)
+  @Column
+  declare sitemapContentUpdatedAt: Date
+
+  @ForeignKey(() => VideoChannelModel)
+  @Column
+  declare channelId: number
+
+  @BelongsTo(() => VideoChannelModel, {
+    foreignKey: {
+      allowNull: true
+    },
+    onDelete: 'cascade'
+  })
+  declare VideoChannel: Awaited<VideoChannelModel>
+
+  @BelongsToMany(() => TagModel, {
+    foreignKey: 'videoId',
+    through: () => VideoTagModel,
+    onDelete: 'CASCADE'
+  })
+  declare Tags: Awaited<TagModel>[]
+
+  @BelongsToMany(() => TrackerModel, {
+    foreignKey: 'videoId',
+    through: () => VideoTrackerModel,
+    onDelete: 'CASCADE'
+  })
+  declare Trackers: Awaited<TrackerModel>[]
+
+  @HasMany(() => ThumbnailModel, {
+    foreignKey: {
+      name: 'videoId',
+      allowNull: true
+    },
+    hooks: true,
+    onDelete: 'cascade'
+  })
+  declare Thumbnails: Awaited<ThumbnailModel>[]
+
+  @HasMany(() => VideoPlaylistElementModel, {
+    foreignKey: {
+      name: 'videoId',
+      allowNull: true
+    },
+    onDelete: 'set null'
+  })
+  declare VideoPlaylistElements: Awaited<VideoPlaylistElementModel>[]
+
+  @HasOne(() => VideoSourceModel, {
+    foreignKey: {
+      name: 'videoId',
+      allowNull: false
+    },
+    onDelete: 'CASCADE'
+  })
+  declare VideoSource: Awaited<VideoSourceModel>
+
+  @HasMany(() => VideoAbuseModel, {
+    foreignKey: {
+      name: 'videoId',
+      allowNull: true
+    },
+    onDelete: 'set null'
+  })
+  declare VideoAbuses: Awaited<VideoAbuseModel>[]
+
+  @HasMany(() => VideoFileModel, {
+    foreignKey: {
+      name: 'videoId',
+      allowNull: true
+    },
+    onDelete: 'cascade'
+  })
+  declare VideoFiles: Awaited<VideoFileModel>[]
+
+  @HasMany(() => VideoStreamingPlaylistModel, {
+    foreignKey: {
+      name: 'videoId',
+      allowNull: false
+    },
+    onDelete: 'cascade',
+    hooks: true // To destroy files too
+  })
+  declare VideoStreamingPlaylists: Awaited<VideoStreamingPlaylistModel>[]
+
+  @HasMany(() => VideoShareModel, {
+    foreignKey: {
+      name: 'videoId',
+      allowNull: false
+    },
+    onDelete: 'cascade'
+  })
+  declare VideoShares: Awaited<VideoShareModel>[]
+
+  @HasMany(() => AccountVideoRateModel, {
+    foreignKey: {
+      name: 'videoId',
+      allowNull: false
+    },
+    onDelete: 'cascade'
+  })
+  declare AccountVideoRates: Awaited<AccountVideoRateModel>[]
+
+  @HasMany(() => VideoCommentModel, {
+    foreignKey: {
+      name: 'videoId',
+      allowNull: false
+    },
+    onDelete: 'cascade',
+    hooks: true
+  })
+  declare VideoComments: Awaited<VideoCommentModel>[]
+
+  @HasMany(() => VideoStatModel, {
+    foreignKey: {
+      name: 'videoId',
+      allowNull: false
+    },
+    onDelete: 'cascade'
+  })
+  declare VideoStats: Awaited<VideoStatModel>[]
+
+  @HasMany(() => UserVideoHistoryModel, {
+    foreignKey: {
+      name: 'videoId',
+      allowNull: false
+    },
+    onDelete: 'cascade'
+  })
+  declare UserVideoHistories: Awaited<UserVideoHistoryModel>[]
+
+  @HasOne(() => ScheduleVideoUpdateModel, {
+    foreignKey: {
+      name: 'videoId',
+      allowNull: false
+    },
+    onDelete: 'cascade'
+  })
+  declare ScheduleVideoUpdate: Awaited<ScheduleVideoUpdateModel>
+
+  @HasOne(() => VideoBlacklistModel, {
+    foreignKey: {
+      name: 'videoId',
+      allowNull: false
+    },
+    onDelete: 'cascade'
+  })
+  declare VideoBlacklist: Awaited<VideoBlacklistModel>
+
+  @HasOne(() => VideoLiveModel, {
+    foreignKey: {
+      name: 'videoId',
+      allowNull: false
+    },
+    hooks: true,
+    onDelete: 'cascade'
+  })
+  declare VideoLive: Awaited<VideoLiveModel>
+
+  @HasOne(() => VideoImportModel, {
+    foreignKey: {
+      name: 'videoId',
+      allowNull: true
+    },
+    onDelete: 'set null'
+  })
+  declare VideoImport: Awaited<VideoImportModel>
+
+  @HasMany(() => VideoCaptionModel, {
+    foreignKey: {
+      name: 'videoId',
+      allowNull: false
+    },
+    onDelete: 'cascade',
+    hooks: true,
+    // oxlint-disable-next-line no-useless-computed-key
+    ['separate' as any]: true
+  })
+  declare VideoCaptions: Awaited<VideoCaptionModel>[]
+
+  @HasMany(() => VideoPasswordModel, {
+    foreignKey: {
+      name: 'videoId',
+      allowNull: false
+    },
+    onDelete: 'cascade'
+  })
+  declare VideoPasswords: Awaited<VideoPasswordModel>[]
+
+  @HasMany(() => VideoAutomaticTagModel, {
+    foreignKey: 'videoId',
+    onDelete: 'CASCADE'
+  })
+  declare VideoAutomaticTags: Awaited<VideoAutomaticTagModel>[]
+
+  @HasOne(() => VideoJobInfoModel, {
+    foreignKey: {
+      name: 'videoId',
+      allowNull: false
+    },
+    onDelete: 'cascade'
+  })
+  declare VideoJobInfo: Awaited<VideoJobInfoModel>
+
+  @HasOne(() => StoryboardModel, {
+    foreignKey: {
+      name: 'videoId',
+      allowNull: false
+    },
+    onDelete: 'cascade',
+    hooks: true
+  })
+  declare Storyboard: Awaited<StoryboardModel>
+
+  // Not a column: languages of the video captions, only set when listing videos
+  declare captionLanguages?: string[]
+
+  @AfterCreate
+  static notifyCreate (video: MVideo) {
+    InternalEventEmitter.Instance.emit('video-created', { video })
+  }
+
+  @AfterUpdate
+  static notifyUpdate (video: MVideo) {
+    InternalEventEmitter.Instance.emit('video-updated', { video })
+  }
+
+  @AfterDestroy
+  static notifyDestroy (video: MVideo) {
+    InternalEventEmitter.Instance.emit('video-deleted', { video })
+  }
+
+  // ---------------------------------------------------------------------------
+
+  @BeforeDestroy
+  static beforeDestroyHook (instance: VideoModel, options: { transaction: Transaction }) {
+    return logger.withContext([ instance.uuid ], async () => {
+      // We need infohashes to save the magnet URIs of the video in its abuses
+      const video = await this.loadAP(instance.id, options.transaction)
+
+      this.stopLiveIfNeeded(video)
+
+      afterCommitIfTransaction(options.transaction, () => this.invalidateCache(video))
+
+      await this.sendDelete(video, options.transaction)
+      await this.saveEssentialDataToAbuses(video, options.transaction)
+      await this.removeFiles(video, options.transaction)
+    })
+  }
+
+  static stopLiveIfNeeded (instance: MVideo) {
+    if (!instance.isLive) return
+
+    logger.info('Stopping live of video %s after video deletion.', instance.uuid)
+
+    LiveManager.Instance.stopSessionOfVideo({ videoUUID: instance.uuid, error: null })
+      .catch(err => logger.error('Cannot stop session of video %s.', instance.uuid, { err }))
+  }
+
+  static invalidateCache (instance: MVideo) {
+    ModelCache.Instance.invalidateCache('video', instance.id)
+  }
+
+  static async sendDelete (instance: MVideoAccountLight, transaction: Transaction) {
+    if (!instance.isLocal()) return undefined
+    if (!isPrivacyForFederation(instance.privacy)) return undefined
+
+    return sendDeleteVideo({ video: instance, transaction })
+  }
+
+  static async removeFiles (instance: MVideoWithAllFiles, transaction: Transaction) {
+    if (!instance.isLocal()) return undefined
+
+    // Load them now, they will not exist anymore after the commit
+    if (!Array.isArray(instance.VideoFiles)) {
+      instance.VideoFiles = await instance.$get('VideoFiles', { transaction })
+    }
+
+    if (!Array.isArray(instance.VideoStreamingPlaylists)) {
+      instance.VideoStreamingPlaylists = await instance.$get('VideoStreamingPlaylists', { transaction })
+    }
+
+    for (const playlist of instance.VideoStreamingPlaylists as MStreamingPlaylistFilesVideo[]) {
+      if (!Array.isArray(playlist.VideoFiles)) {
+        playlist.VideoFiles = await playlist.$get('VideoFiles', { transaction })
+      }
+    }
+
+    const sources = await VideoSourceModel.listAll(instance.id, transaction)
+
+    afterCommitIfTransaction(transaction, () => {
+      this.removeFilesOfDeletedVideo(instance, sources)
+        .then(() => logger.info('Removed files of video %s.', instance.url))
+        .catch(err => logger.error('Some errors when removing files of deleted video %s.', instance.uuid, { err }))
+    })
+
+    return undefined
+  }
+
+  private static async removeFilesOfDeletedVideo (instance: MVideoWithAllFiles, sources: MVideoSource[]) {
+    // A job of another process may be writing files of this video: wait for it before removing them
+    const videoFileMutexReleaser = await VideoPathManager.Instance.lockFiles(instance.uuid)
+
+    try {
+      logger.info('Removing files of video ' + instance.url)
+
+      await Promise.all([
+        // Remove physical files and torrents
+        ...instance.VideoFiles.map(file => instance.removeWebVideoFile(file)),
+
+        // Remove playlists file (captions will be automatically deleted)
+        // The whole HLS directory is removed, including files added by a job while we were waiting for the lock
+        ...instance.VideoStreamingPlaylists.map(p =>
+          instance.removeAllStreamingPlaylistFiles({ playlist: p, deleteCaptionPlaylists: false })
+        ),
+
+        // Remove source files
+        ...sources.map(s => instance.removeOriginalFile(s))
+      ])
+    } finally {
+      videoFileMutexReleaser()
+    }
+  }
+
+  static async saveEssentialDataToAbuses (instance: MVideoFormattableDetails, transaction: Transaction) {
+    const tasks: Promise<any>[] = []
+
+    const videoAbuses = await instance.$get('VideoAbuses', { transaction })
+    if (videoAbuses.length === 0) return undefined
+
+    logger.info('Saving video abuses details of video %s.', instance.url, { instance })
+
+    if (!instance.Trackers) instance.Trackers = await instance.$get('Trackers', { transaction })
+    const details = instance.toFormattedDetailsJSON()
+
+    for (const abuse of videoAbuses) {
+      abuse.deletedVideo = details
+      tasks.push(abuse.save({ transaction }))
+    }
+
+    await Promise.all(tasks)
+  }
+
+  // ---------------------------------------------------------------------------
+
+  static getSQLSummaryAttributes (tableName: string, aliasPrefix = '') {
+    return buildSQLAttributes({
+      model: this,
+      tableName,
+      aliasPrefix,
+      includeAttributes: videoSummaryAttributes
+    })
+  }
+
+  static getSQLAttributes (tableName: string, aliasPrefix = '') {
+    return buildSQLAttributes({
+      model: this,
+      tableName,
+      aliasPrefix
+    })
+  }
+
+  // ---------------------------------------------------------------------------
+
+  static listLocalIds (): Promise<number[]> {
+    const query = {
+      attributes: [ 'id' ],
+      raw: true,
+      where: {
+        remote: false
+      }
+    }
+
+    return VideoModel.findAll(query)
+      .then(rows => rows.map(r => r.id))
+  }
+
+  static async batchListIds (options: {
+    lastId: number
+    batchSize: number
+  }) {
+    const { lastId, batchSize } = options
+
+    const rows = await this.sequelize.query<{ id: number }>(
+      'SELECT "video"."id" FROM "video" WHERE "video"."id" > :lastId ORDER BY "video"."id" ASC LIMIT :batchSize',
+      { replacements: { lastId, batchSize }, type: QueryTypes.SELECT }
+    )
+
+    return rows.map(r => r.id)
+  }
+
+  // Returns partially loaded videos: only what is needed to build outbox activities
+  static listAllAndSharedByActorForOutbox (
+    actorIdArg: number,
+    start: number,
+    count: number
+  ): Promise<{ data: MVideoOutbox[], total: number }> {
+    const actorId = forceNumber(actorIdArg)
+
+    function getRawQuery (select: string) {
+      const queryVideo = 'SELECT ' + select + ' FROM "video" AS "Video" ' +
+        'INNER JOIN "videoChannel" AS "VideoChannel" ON "VideoChannel"."id" = "Video"."channelId" ' +
+        'INNER JOIN "account" AS "Account" ON "Account"."id" = "VideoChannel"."accountId" ' +
+        'INNER JOIN "actor" AS "Actor" ON "Actor"."accountId" = "Account"."id" ' +
+        'WHERE "Actor"."id" = ' + actorId
+      const queryVideoShare = 'SELECT ' + select + ' FROM "videoShare" AS "VideoShare" ' +
+        'INNER JOIN "video" AS "Video" ON "Video"."id" = "VideoShare"."videoId" ' +
+        'WHERE "VideoShare"."actorId" = ' + actorId
+
+      return { queryVideo, queryVideoShare }
+    }
+
+    const rawQuery = getRawQuery('"Video"."id"')
+    const rawCountQuery = getRawQuery('COUNT("Video"."id") as "total"')
+
+    // Outbox activities only reference the video URL: only include what is needed to build them (audience, actor, share URL)
+    const query = {
+      distinct: true,
+      offset: start,
+      limit: count,
+      order: getVideoSort('-createdAt'),
+      where: {
+        id: {
+          [Op.in]: Sequelize.literal(`((${rawQuery.queryVideo}) UNION (${rawQuery.queryVideoShare}))`)
+        },
+        [Op.or]: getPrivaciesForFederation()
+      },
+      include: [
+        {
+          attributes: [ 'id', 'url' ],
+          model: VideoShareModel.unscoped(),
+          required: false,
+          // We only want videos shared by this actor
+          where: {
+            [Op.and]: [
+              {
+                id: {
+                  [Op.not]: null
+                }
+              },
+              {
+                actorId
+              }
+            ]
+          }
+        },
+        {
+          model: VideoChannelModel.unscoped(),
+          required: true,
+          include: [
+            {
+              attributes: [ 'name' ],
+              model: AccountModel.unscoped(),
+              required: true,
+              include: [
+                {
+                  attributes: [ 'id', 'url', 'followersUrl' ],
+                  model: ActorModel.unscoped(),
+                  required: true
+                }
+              ]
+            },
+            {
+              attributes: [ 'id', 'url', 'followersUrl' ],
+              model: ActorModel.unscoped(),
+              required: true
+            }
+          ]
+        }
+      ]
+    }
+
+    return Promise.all([
+      VideoModel.findAll(query),
+      // UNION ALL to not merge the 2 count rows if they have the same total
+      VideoModel.sequelize.query<{ total: string }>(
+        `(${rawCountQuery.queryVideo}) UNION ALL (${rawCountQuery.queryVideoShare})`,
+        { type: QueryTypes.SELECT }
+      )
+    ]).then(([ rows, totals ]) => {
+      // Sum of the videos and video shares counts
+      const total = totals.reduce((acc, r) => acc + parseInt(r.total, 10), 0)
+
+      return {
+        data: rows,
+        total
+      }
+    })
+  }
+
+  static async listPublishedLiveUUIDs () {
+    const options = {
+      attributes: [ 'uuid' ],
+      where: {
+        isLive: true,
+        remote: false,
+        state: VideoState.PUBLISHED
+      }
+    }
+
+    const result = await VideoModel.findAll(options)
+
+    return result.map(v => v.uuid)
+  }
+
+  static async listForApi (
+    options:
+      & {
+        start: number
+        count: number
+        sort: string
+
+        nsfw: boolean
+
+        countVideos?: boolean
+
+        skipPrivateIncludeCheck?: boolean
+      }
+      & Pick<
+        QueryVideosListOptions,
+        | 'nsfwFlagsIncluded'
+        | 'nsfwFlagsExcluded'
+        | 'isLive'
+        | 'categoryOneOf'
+        | 'licenceOneOf'
+        | 'languageOneOf'
+        | 'aiUsageOneOf'
+        | 'host'
+        | 'autoTagOneOf'
+        | 'stateOneOf'
+        | 'tagsOneOf'
+        | 'tagsAllOf'
+        | 'privacyOneOf'
+        | 'isLocal'
+        | 'include'
+        | 'includeScheduledLive'
+        | 'displayOnlyForFollower'
+        | 'hasFiles'
+        | 'accountId'
+        | 'includeCollaborations'
+        | 'videoChannelId'
+        | 'channelNameOneOf'
+        | 'videoPlaylistId'
+        | 'user'
+        | 'historyOfUser'
+        | 'hasHLSFiles'
+        | 'hasWebVideoFiles'
+        | 'search'
+        | 'excludeAlreadyWatched'
+        | 'excludeVideoIds'
+        | 'hasRedundancy'
+        | 'redundancyStrategy'
+        | 'includeRedundancy'
+        | 'localRedundancy'
+        | 'tableAttributes'
+        | 'idRange'
+      >
+  ) {
+    if (options.skipPrivateIncludeCheck !== true) {
+      VideoModel.throwIfPrivateIncludeWithoutUser(options)
+      VideoModel.throwIfPrivacyOneOfWithoutUser(options)
+    }
+
+    const serverActor = await getServerActor()
+
+    const queryOptions = {
+      ...pick(options, [
+        'start',
+        'count',
+        'sort',
+        'nsfw',
+        'nsfwFlagsIncluded',
+        'nsfwFlagsExcluded',
+        'isLive',
+        'categoryOneOf',
+        'licenceOneOf',
+        'languageOneOf',
+        'aiUsageOneOf',
+        'host',
+        'autoTagOneOf',
+        'stateOneOf',
+        'tagsOneOf',
+        'tagsAllOf',
+        'privacyOneOf',
+        'isLocal',
+        'include',
+        'includeScheduledLive',
+        'displayOnlyForFollower',
+        'hasFiles',
+        'accountId',
+        'includeCollaborations',
+        'videoChannelId',
+        'channelNameOneOf',
+        'videoPlaylistId',
+        'user',
+        'historyOfUser',
+        'hasHLSFiles',
+        'hasWebVideoFiles',
+        'search',
+        'excludeAlreadyWatched',
+        'excludeVideoIds',
+        'redundancyStrategy',
+        'hasRedundancy',
+        'localRedundancy',
+        'includeRedundancy',
+        'tableAttributes',
+        'idRange'
+      ]),
+
+      serverAccountIdForBlock: serverActor.Account.id,
+      trendingDays: CONFIG.TRENDING.VIDEOS.INTERVAL_DAYS
+    }
+
+    return VideoModel.getAvailableForApi(queryOptions, options.countVideos)
+  }
+
+  static async searchAndPopulateAccountAndServer (options: {
+    start: number
+    count: number
+    sort: string
+
+    nsfw?: boolean
+    nsfwFlagsIncluded?: number
+    nsfwFlagsExcluded?: number
+
+    isLive?: boolean
+    isLocal?: boolean
+    include?: VideoIncludeType
+
+    categoryOneOf?: number[]
+    licenceOneOf?: number[]
+    languageOneOf?: string[]
+    aiUsageOneOf?: VideoAIUsageType[]
+    tagsOneOf?: string[]
+    tagsAllOf?: string[]
+    privacyOneOf?: VideoPrivacyType[]
+    stateOneOf?: VideoStateType[]
+    includeScheduledLive?: boolean
+
+    displayOnlyForFollower: DisplayOnlyForFollowerOptions | null
+
+    user?: MUserAccountId
+
+    hasWebVideoFiles?: boolean
+
+    hasHLSFiles?: boolean
+
+    search?: string
+
+    host?: string
+    startDate?: string // ISO 8601
+    endDate?: string // ISO 8601
+    originallyPublishedStartDate?: string
+    originallyPublishedEndDate?: string
+
+    durationMin?: number // seconds
+    durationMax?: number // seconds
+    uuids?: string[]
+
+    excludeAlreadyWatched?: boolean
+
+    countVideos?: boolean
+
+    autoTagOneOf?: string[]
+  }) {
+    VideoModel.throwIfPrivateIncludeWithoutUser(options)
+    VideoModel.throwIfPrivacyOneOfWithoutUser(options)
+
+    const serverActor = await getServerActor()
+
+    const queryOptions = {
+      ...pick(options, [
+        'include',
+        'nsfw',
+        'nsfwFlagsIncluded',
+        'nsfwFlagsExcluded',
+        'isLive',
+        'categoryOneOf',
+        'licenceOneOf',
+        'languageOneOf',
+        'aiUsageOneOf',
+        'autoTagOneOf',
+        'tagsOneOf',
+        'tagsAllOf',
+        'stateOneOf',
+        'privacyOneOf',
+        'user',
+        'isLocal',
+        'host',
+        'start',
+        'count',
+        'sort',
+        'startDate',
+        'endDate',
+        'originallyPublishedStartDate',
+        'originallyPublishedEndDate',
+        'durationMin',
+        'durationMax',
+        'hasHLSFiles',
+        'hasWebVideoFiles',
+        'uuids',
+        'search',
+        'displayOnlyForFollower',
+        'excludeAlreadyWatched'
+      ]),
+
+      trendingDays: CONFIG.TRENDING.VIDEOS.INTERVAL_DAYS,
+      serverAccountIdForBlock: serverActor.Account.id
+    }
+
+    return VideoModel.getAvailableForApi(queryOptions, options.countVideos)
+  }
+
+  static countLives (options: {
+    remote: boolean
+    mode: 'published' | 'not-ended'
+  }) {
+    const query = {
+      where: {
+        remote: options.remote,
+        isLive: true,
+        state: options.mode === 'not-ended'
+          ? { [Op.ne]: VideoState.LIVE_ENDED }
+          : { [Op.eq]: VideoState.PUBLISHED }
+      }
+    }
+
+    return VideoModel.count(query)
+  }
+
+  static countVideosUploadedByUserSince (userId: number, since: Date) {
+    const options = {
+      include: [
+        {
+          model: VideoChannelModel.unscoped(),
+          required: true,
+          include: [
+            {
+              model: AccountModel.unscoped(),
+              required: true,
+              include: [
+                {
+                  model: UserModel.unscoped(),
+                  required: true,
+                  where: {
+                    id: userId
+                  }
+                }
+              ]
+            }
+          ]
+        }
+      ],
+      where: {
+        createdAt: {
+          [Op.gte]: since
+        }
+      }
+    }
+
+    return VideoModel.unscoped().count(options)
+  }
+
+  static countLivesOfAccount (accountId: number) {
+    const options = {
+      where: {
+        remote: false,
+        isLive: true,
+        state: {
+          [Op.ne]: VideoState.LIVE_ENDED
+        }
+      },
+      include: [
+        {
+          required: true,
+          model: VideoChannelModel.unscoped(),
+          where: {
+            accountId
+          }
+        }
+      ]
+    }
+
+    return VideoModel.count(options)
+  }
+
+  static load (id: number | string, transaction?: Transaction): Promise<MVideo> {
+    const queryBuilder = new VideoModelGetQueryBuilder(VideoModel.sequelize)
+
+    return queryBuilder.queryVideo({ id, transaction, type: 'video' })
+  }
+
+  static loadWithThumbnails (id: number | string, transaction?: Transaction): Promise<MVideoThumbnails> {
+    const queryBuilder = new VideoModelGetQueryBuilder(VideoModel.sequelize)
+
+    return queryBuilder.queryVideo({ id, transaction, type: 'thumbnails' })
+  }
+
+  static loadWithThumbnailsAndBlacklist (id: number | string, transaction?: Transaction): Promise<MVideoThumbnailsBlacklist> {
+    const queryBuilder = new VideoModelGetQueryBuilder(VideoModel.sequelize)
+
+    return queryBuilder.queryVideo({ id, transaction, type: 'thumbnails-blacklist' })
+  }
+
+  static loadWithBlacklist (id: number | string, transaction?: Transaction): Promise<MVideoWithBlacklist> {
+    const queryBuilder = new VideoModelGetQueryBuilder(VideoModel.sequelize)
+
+    return queryBuilder.queryVideo({ id, transaction, type: 'blacklist' })
+  }
+
+  // Watch/embed page HTML is rebuilt on every request: cache the video so a burst of hits on the same video
+  // doesn't replay the SEO queries (video + web video files + streaming playlist files)
+  @Memoize({ promise: true, max: MEMOIZE_LENGTH.VIDEO_SEO, maxAge: MEMOIZE_TTL.VIDEO_SEO })
+  static loadForSEO (id: number | string): Promise<MVideoSeo> {
+    const queryBuilder = new VideoModelGetQueryBuilder(VideoModel.sequelize)
+
+    return queryBuilder.queryVideo({ id, type: 'seo' })
+  }
+
+  static loadImmutableAttributes (id: number | string, t?: Transaction): Promise<MVideoImmutable> {
+    const fun = () => {
+      const query = {
+        where: buildWhereIdOrUUID(id),
+        transaction: t
+      }
+
+      return VideoModel.scope(ScopeNames.WITH_IMMUTABLE_ATTRIBUTES).findOne(query)
+    }
+
+    return ModelCache.Instance.doCache({
+      cacheType: 'load-video-immutable-id',
+      key: '' + id,
+      deleteKey: 'video',
+      fun
+    })
+  }
+
+  static loadByUrlImmutableAttributes (url: string, transaction?: Transaction): Promise<MVideoImmutable> {
+    const fun = () => {
+      const query: FindOptions = {
+        where: {
+          url
+        },
+        transaction
+      }
+
+      return VideoModel.scope(ScopeNames.WITH_IMMUTABLE_ATTRIBUTES).findOne(query)
+    }
+
+    return ModelCache.Instance.doCache({
+      cacheType: 'load-video-immutable-url',
+      key: url,
+      deleteKey: 'video',
+      fun
+    })
+  }
+
+  static loadOnlyId (id: number | string, transaction?: Transaction): Promise<MVideoId> {
+    const queryBuilder = new VideoModelGetQueryBuilder(VideoModel.sequelize)
+
+    return queryBuilder.queryVideo({ id, transaction, type: 'id' })
+  }
+
+  static loadWithFiles (id: number | string, transaction?: Transaction, logging?: boolean): Promise<MVideoWithAllFiles> {
+    const queryBuilder = new VideoModelGetQueryBuilder(VideoModel.sequelize)
+
+    return queryBuilder.queryVideo({ id, transaction, type: 'all-files', logging })
+  }
+
+  static loadByUrl (url: string, transaction?: Transaction): Promise<MVideoThumbnails> {
+    const queryBuilder = new VideoModelGetQueryBuilder(VideoModel.sequelize)
+
+    return queryBuilder.queryVideo({ url, transaction, type: 'thumbnails' })
+  }
+
+  static loadByUrlWithBlacklist (url: string, transaction?: Transaction): Promise<MVideoWithBlacklist> {
+    const queryBuilder = new VideoModelGetQueryBuilder(VideoModel.sequelize)
+
+    return queryBuilder.queryVideo({ url, transaction, type: 'blacklist' })
+  }
+
+  static loadByUrlAndPopulateAccount (url: string, transaction?: Transaction): Promise<MVideoAccountLight> {
+    const queryBuilder = new VideoModelGetQueryBuilder(VideoModel.sequelize)
+
+    return queryBuilder.queryVideo({ url, transaction, type: 'account' })
+  }
+
+  static loadByUrlAndPopulateAccountAndFiles (url: string, transaction?: Transaction): Promise<MVideoAccountLightBlacklistAllFiles> {
+    const queryBuilder = new VideoModelGetQueryBuilder(VideoModel.sequelize)
+
+    return queryBuilder.queryVideo({ url, transaction, type: 'account-blacklist-files' })
+  }
+
+  static loadFull (id: number | string, t?: Transaction): Promise<MVideoFull> {
+    const queryBuilder = new VideoModelGetQueryBuilder(VideoModel.sequelize)
+
+    return queryBuilder.queryVideo({ id, transaction: t, type: 'full' })
+  }
+
+  // Contains everything needed to build the ActivityPub object of the video
+  static loadAP (id: number | string, t?: Transaction): Promise<MVideoAP> {
+    const queryBuilder = new VideoModelGetQueryBuilder(VideoModel.sequelize)
+
+    return queryBuilder.queryVideo({ id, transaction: t, type: 'ap' })
+  }
+
+  static loadWithRights (id: number | string, t?: Transaction, userId?: number): Promise<MVideoWithRights> {
+    const queryBuilder = new VideoModelGetQueryBuilder(VideoModel.sequelize)
+
+    return queryBuilder.queryVideo({ id, transaction: t, type: 'account-blacklist', userId })
+  }
+
+  static loadForGetAPI (parameters: {
+    id: number | string
+    transaction?: Transaction
+    userId?: number
+  }): Promise<MVideoDetails> {
+    const { id, transaction, userId } = parameters
+    const queryBuilder = new VideoModelGetQueryBuilder(VideoModel.sequelize)
+
+    return queryBuilder.queryVideo({ id, transaction, type: 'api', userId })
+  }
+
+  // ---------------------------------------------------------------------------
+
+  static async getStats () {
+    const serverActor = await getServerActor()
+
+    let totalLocalVideoViews = await VideoModel.sum('views', {
+      where: {
+        remote: false
+      }
+    })
+
+    let totalLocalVideoDownloads = await VideoModel.sum('downloads', {
+      where: {
+        remote: false
+      }
+    })
+
+    // Sequelize can return null
+    if (!totalLocalVideoViews) totalLocalVideoViews = 0
+    if (!totalLocalVideoDownloads) totalLocalVideoDownloads = 0
+
+    const baseOptions = {
+      start: 0,
+      count: 0,
+      sort: '-publishedAt',
+      nsfw: null,
+      displayOnlyForFollower: {
+        actorId: serverActor.id,
+        orLocalVideos: true
+      }
+    }
+
+    const { total: totalVideos } = await VideoModel.listForApi(baseOptions)
+
+    const totalLocalVideos = await VideoModel.getTotalLocalVideosByPrivacy(VideoPrivacy.PUBLIC)
+
+    return {
+      totalLocalVideos,
+      totalLocalVideoViews,
+      totalLocalVideoDownloads,
+      totalVideos
+    }
+  }
+
+  static async getTotalLocalVideosByPrivacy (videoPrivacy: VideoPrivacyType) {
+    const { total } = await VideoModel.listForApi({
+      start: 0,
+      count: 0,
+      sort: '-publishedAt',
+      nsfw: null,
+      isLocal: true,
+      displayOnlyForFollower: null,
+      privacyOneOf: [ videoPrivacy ],
+      skipPrivateIncludeCheck: true
+    })
+
+    return total
+  }
+
+  // ---------------------------------------------------------------------------
+
+  static loadByNameAndChannel (channel: MChannelId, name: string): Promise<MVideo> {
+    return VideoModel.unscoped().findOne({
+      where: {
+        name,
+        channelId: channel.id
+      }
+    })
+  }
+
+  static incrementStats (column: 'views' | 'downloads', id: number, by: number) {
+    return VideoModel.increment(column, {
+      by,
+      where: {
+        id
+      }
+    })
+  }
+
+  static updateRatesOf (videoId: number, type: VideoRateType, count: number, t: Transaction) {
+    const field = type === 'like'
+      ? 'likes'
+      : 'dislikes'
+
+    const rawQuery = `UPDATE "video" SET "${field}" = :count WHERE "video"."id" = :videoId`
+
+    return AccountVideoRateModel.sequelize.query(rawQuery, {
+      transaction: t,
+      replacements: { videoId, rateType: type, count },
+      type: QueryTypes.UPDATE
+    })
+  }
+
+  static syncLocalRates (videoId: number, type: VideoRateType, t: Transaction) {
+    const field = type === 'like'
+      ? 'likes'
+      : 'dislikes'
+
+    const rawQuery = `UPDATE "video" SET "${field}" = ` +
+      '(' +
+      'SELECT COUNT(id) FROM "accountVideoRate" WHERE "accountVideoRate"."videoId" = "video"."id" AND type = :rateType' +
+      ') ' +
+      'WHERE "video"."id" = :videoId'
+
+    return AccountVideoRateModel.sequelize.query(rawQuery, {
+      transaction: t,
+      replacements: { videoId, rateType: type },
+      type: QueryTypes.UPDATE
+    })
+  }
+
+  static async checkVideoHasInstanceFollow (videoId: number) {
+    const serverActor = await getServerActor()
+
+    const query = 'SELECT 1 FROM "videoShare" ' + // Instances/channels we follow that shared the video
+      'INNER JOIN "actorFollow" ON "actorFollow"."targetActorId" = "videoShare"."actorId" ' +
+      'WHERE "actorFollow"."actorId" = $serverActorId AND "actorFollow"."state" = \'accepted\' AND "videoShare"."videoId" = $videoId ' +
+      'UNION ' +
+      'SELECT 1 FROM "video" ' + // Accounts we follow that published the video
+      'INNER JOIN "videoChannel" ON "videoChannel"."id" = "video"."channelId" ' +
+      'INNER JOIN "account" ON "account"."id" = "videoChannel"."accountId" ' +
+      'INNER JOIN "actor" ON "actor"."accountId" = "account"."id" ' +
+      'INNER JOIN "actorFollow" ON "actorFollow"."targetActorId" = "actor"."id" ' +
+      'WHERE "actorFollow"."actorId" = $serverActorId AND "actorFollow"."state" = \'accepted\' AND "video"."id" = $videoId ' +
+      'LIMIT 1'
+
+    const options = {
+      type: QueryTypes.SELECT as QueryTypes.SELECT,
+      bind: { serverActorId: serverActor.id, videoId },
+      raw: true
+    }
+
+    return VideoModel.sequelize.query(query, options)
+      .then(results => results.length === 1)
+  }
+
+  static bulkUpdateSupportField (ofChannel: MChannel, t: Transaction) {
+    const options = {
+      where: {
+        channelId: ofChannel.id
+      },
+      transaction: t
+    }
+
+    return VideoModel.update({ support: ofChannel.support }, options)
+  }
+
+  // Only the attributes needed to know if these videos have to be federated
+  static listForFederationFromChannel (options: {
+    videoChannel: MChannelId
+    count: number
+  }): Promise<MVideoToFederate[]> {
+    const { videoChannel, count } = options
+
+    return VideoModel.findAll({
+      attributes: [ 'uuid', 'privacy', 'state' ],
+      where: {
+        channelId: videoChannel.id
+      },
+      limit: count
+    })
+  }
+
+  static async getAllIdsByAccount (options: {
+    account: MAccountId
+    start: number
+    count: number
+  }): Promise<number[]> {
+    const { account, start, count } = options
+
+    const videos = await VideoModel.findAll({
+      attributes: [ 'id' ],
+      include: [
+        {
+          attributes: [ 'accountId' ],
+          model: VideoChannelModel.unscoped(),
+          required: true,
+          where: {
+            accountId: account.id
+          }
+        }
+      ],
+      offset: start,
+      limit: count
+    })
+
+    return videos.map(v => v.id)
+  }
+
+  // ---------------------------------------------------------------------------
+
+  // threshold corresponds to how many video the field should have to be returned
+  static async getRandomFieldSamples (field: 'category' | 'channelId', threshold: number, count: number) {
+    const serverActor = await getServerActor()
+
+    const queryOptions: BuildVideosListQueryOptions = {
+      attributes: [ `"${field}"` ],
+      group: `GROUP BY "${field}"`,
+      having: `HAVING COUNT("${field}") >= ${threshold}`,
+      start: 0,
+      sort: 'random',
+      count,
+      serverAccountIdForBlock: serverActor.Account.id,
+      displayOnlyForFollower: {
+        actorId: serverActor.id,
+        orLocalVideos: true
+      },
+      trendingDays: CONFIG.TRENDING.VIDEOS.INTERVAL_DAYS
+    }
+
+    const queryBuilder = new VideosIdListQueryBuilder(VideoModel.sequelize)
+
+    return queryBuilder.queryVideoIds(queryOptions)
+      .then(rows => rows.map(r => r[field]))
+  }
+
+  // Group available videos by ranges of idsPerPage ids, so pages don't shift when a video is deleted
+  static async listIdRangePages (
+    options:
+      & Pick<BuildVideosListQueryOptions, 'nsfw' | 'nsfwFlagsIncluded' | 'nsfwFlagsExcluded' | 'isLocal' | 'displayOnlyForFollower'>
+      & {
+        idsPerPage: number
+      }
+  ): Promise<{ page: number, lastUpdatedAt: Date }[]> {
+    const serverActor = await getServerActor()
+    const idsPerPage = forceNumber(options.idsPerPage)
+
+    const queryOptions: BuildVideosListQueryOptions = {
+      ...pick(options, [ 'nsfw', 'nsfwFlagsIncluded', 'nsfwFlagsExcluded', 'isLocal', 'displayOnlyForFollower' ]),
+
+      attributes: [
+        `("video"."id" - 1) / ${idsPerPage} + 1 AS "page"`,
+        `MAX(COALESCE("video"."sitemapContentUpdatedAt", "video"."publishedAt")) AS "lastUpdatedAt"`
+      ],
+      group: 'GROUP BY "page"',
+      // Aggregate on all videos: no sort/pagination, and use the follower filter adapted to aggregations
+      isCount: true,
+      start: undefined,
+      count: undefined,
+      sort: undefined,
+      serverAccountIdForBlock: serverActor.Account.id,
+      trendingDays: CONFIG.TRENDING.VIDEOS.INTERVAL_DAYS
+    }
+
+    const queryBuilder = new VideosIdListQueryBuilder(VideoModel.sequelize)
+
+    const rows = await queryBuilder.queryVideoIds(queryOptions)
+
+    return rows
+      .map(r => ({ page: forceNumber(r.page), lastUpdatedAt: new Date(r.lastUpdatedAt) }))
+      .sort((a, b) => a.page - b.page)
+  }
+
+  static buildTrendingQuery (trendingDays: number) {
+    return {
+      attributes: [],
+      subQuery: false,
+      model: VideoStatModel,
+      required: false,
+      where: {
+        startDate: {
+          // FIXME: ts error
+          [Op.gte as any]: new Date(new Date().getTime() - (24 * 3600 * 1000) * trendingDays)
+        }
+      }
+    }
+  }
+
+  // ---------------------------------------------------------------------------
+
+  static guessLanguageOrCategoryOf (type: 'category', options: { videoChannelId?: number, videoPlaylistId?: number }): Promise<number>
+  static guessLanguageOrCategoryOf (type: 'language', options: { videoChannelId?: number, videoPlaylistId?: number }): Promise<string>
+  static guessLanguageOrCategoryOf (type: 'language' | 'category', options: { videoChannelId?: number, videoPlaylistId?: number }) {
+    const { videoChannelId, videoPlaylistId } = options
+
+    const queryOptions: BuildVideosListQueryOptions = {
+      attributes: [ `COUNT("${type}") AS "total"`, `"${type}"` ],
+      group: `GROUP BY "${type}"`,
+      having: `HAVING COUNT("${type}") > 0`,
+      start: 0,
+      count: 1,
+      sort: '-total',
+      videoChannelId,
+      videoPlaylistId,
+      displayOnlyForFollower: null,
+      serverAccountIdForBlock: null,
+      trendingDays: CONFIG.TRENDING.VIDEOS.INTERVAL_DAYS
+    }
+
+    const queryBuilder = new VideosIdListQueryBuilder(VideoModel.sequelize)
+
+    return queryBuilder.queryVideoIds(queryOptions)
+      .then(rows => {
+        const result = rows[0]?.[type]
+        if (!result) return undefined
+
+        if (type === 'category') return parseInt(result, 10)
+
+        return result as string
+      })
+  }
+
+  static channelHasNSFWContent (channelId: number) {
+    const query = 'SELECT 1 FROM "video" WHERE "nsfw" = true AND "channelId" = $channelId AND privacy = $privacy LIMIT 1'
+
+    return doesExist({ sequelize: this.sequelize, query, bind: { channelId, privacy: VideoPrivacy.PUBLIC } })
+  }
+
+  static playlistHasPublicNSFWContent (playlistId: number) {
+    const query = 'SELECT 1 FROM "video" ' +
+      'INNER JOIN "videoPlaylistElement" ON "videoPlaylistElement"."videoId" = "video"."id" ' +
+      'WHERE "video"."nsfw" = true AND "videoPlaylistElement"."videoPlaylistId" = $playlistId AND privacy = $privacy ' +
+      'LIMIT 1'
+
+    return doesExist({ sequelize: this.sequelize, query, bind: { playlistId, privacy: VideoPrivacy.PUBLIC } })
+  }
+
+  // ---------------------------------------------------------------------------
+
+  private static async getAvailableForApi (
+    options: QueryVideosListOptions,
+    countVideos = true
+  ): Promise<ResultList<VideoModel>> {
+    const span = tracer.startSpan('peertube.VideoModel.getAvailableForApi')
+
+    function getCount () {
+      if (countVideos !== true) return Promise.resolve(undefined)
+
+      const countOptions = Object.assign({}, options, { isCount: true })
+      const queryBuilder = new VideosIdListQueryBuilder(VideoModel.sequelize)
+
+      return queryBuilder.countVideoIds(countOptions)
+    }
+
+    function getModels () {
+      if (options.count === 0) return Promise.resolve([])
+
+      const queryBuilder = new VideosModelListQueryBuilder(VideoModel.sequelize)
+
+      return queryBuilder.queryVideos(options)
+    }
+
+    const [ count, rows ] = await Promise.all([ getCount(), getModels() ])
+
+    span.end()
+
+    return {
+      data: rows,
+      total: count
+    }
+  }
+
+  private static throwIfPrivateIncludeWithoutUser (options: {
+    include?: VideoIncludeType
+    user?: MUserAccountId
+    accountId?: number
+  }) {
+    const { include, user, accountId } = options
+
+    if (!VideoModel.isPrivateInclude(include)) return
+    if (user?.hasRight(UserRight.SEE_ALL_VIDEOS)) return
+    if (accountId && user?.Account.id === accountId) return
+
+    throw new Error('Try to include protected videos but user cannot see all videos')
+  }
+
+  private static throwIfPrivacyOneOfWithoutUser (options: {
+    user?: MUserAccountId
+    privacyOneOf?: VideoPrivacyType[]
+    accountId?: number
+  }) {
+    const { user, privacyOneOf, accountId } = options
+
+    if (!privacyOneOf) return
+    if (user?.hasRight(UserRight.SEE_ALL_VIDEOS)) return
+    if (accountId && user?.Account.id === accountId) return
+
+    throw new Error('Try to choose video privacies but user cannot see all videos')
+  }
+
+  private static isPrivateInclude (include: VideoIncludeType) {
+    return !!(
+      include & VideoInclude.BLACKLISTED ||
+      include & VideoInclude.BLOCKED_OWNER ||
+      include & VideoInclude.NOT_PUBLISHED_STATE
+    )
+  }
+
+  isBlacklisted () {
+    return !!this.VideoBlacklist
+  }
+
+  isBlocked () {
+    return this.VideoChannel.Account.Actor.Server?.isBlocked() || this.VideoChannel.Account.isBlocked()
+  }
+
+  // ---------------------------------------------------------------------------
+
+  getMaxQualityAudioAndVideoFiles<T extends MVideoWithFile> (this: T) {
+    const videoFile = this.getMaxQualityFile(VideoFileStream.VIDEO)
+
+    if (!videoFile) {
+      const audioOnly = this.getMaxQualityFile(VideoFileStream.AUDIO)
+      if (audioOnly) return { videoFile: audioOnly }
+
+      return { videoFile: undefined }
+    }
+
+    // File also has audio, we can return it
+    if (videoFile.hasAudio()) return { videoFile }
+
+    const separatedAudioFile = this.getMaxQualityFile(VideoFileStream.AUDIO)
+    if (!separatedAudioFile) return { videoFile }
+
+    return { videoFile, separatedAudioFile }
+  }
+
+  getMaxQualityFile<T extends MVideoWithFile> (
+    this: T,
+    streamFilter: VideoFileStreamType
+  ): MVideoFileVideo | MVideoFileStreamingPlaylistVideo {
+    return this.getQualityFileBy(streamFilter, maxBy)
+  }
+
+  getMaxQualityBytes<T extends MVideoWithFile> (this: T) {
+    const { videoFile, separatedAudioFile } = this.getMaxQualityAudioAndVideoFiles()
+
+    let size = videoFile?.size || 0
+    if (separatedAudioFile) size += separatedAudioFile.size
+
+    return size
+  }
+
+  getQualityFileBy<T extends MVideoWithFile> (
+    this: T,
+    streamFilter: VideoFileStreamType,
+    fun: (files: MVideoFile[], property: 'resolution') => MVideoFile
+  ) {
+    const files = this.getAllFiles().filter(f => f.streams & streamFilter)
+    const file = fun(files, 'resolution')
+    if (!file) return undefined
+
+    if (file.videoId) {
+      return Object.assign(file, { Video: this })
+    }
+
+    if (file.videoStreamingPlaylistId) {
+      const streamingPlaylistWithVideo = Object.assign(this.VideoStreamingPlaylists[0], { Video: this })
+
+      return Object.assign(file, { VideoStreamingPlaylist: streamingPlaylistWithVideo })
+    }
+
+    throw new Error('File is not associated to a video of a playlist')
+  }
+
+  // ---------------------------------------------------------------------------
+
+  getMaxFPS<T extends MVideoWithFile> (this: T) {
+    return this.getMaxQualityFile(VideoFileStream.VIDEO)?.fps || 0
+  }
+
+  getMaxResolution<T extends MVideoWithFile> (this: T) {
+    return this.getMaxQualityFile(VideoFileStream.VIDEO)?.resolution || this.getMaxQualityFile(VideoFileStream.AUDIO)?.resolution
+  }
+
+  hasAudio<T extends MVideoWithFile> (this: T) {
+    return !!this.getMaxQualityFile(VideoFileStream.AUDIO)
+  }
+
+  hasVideo<T extends MVideoWithFile> (this: T) {
+    return !!this.getMaxQualityFile(VideoFileStream.VIDEO)
+  }
+
+  getStreamTypes<T extends MVideoWithFile> (this: T) {
+    const streamTypes: VideoFileStreamType[] = []
+
+    if (this.hasAudio()) streamTypes.push(VideoFileStream.AUDIO)
+    if (this.hasVideo()) streamTypes.push(VideoFileStream.VIDEO)
+
+    return streamTypes
+  }
+
+  static loadHasStream (videoId: number, stream: VideoFileStreamType) {
+    const query = 'SELECT 1 FROM "videoFile" WHERE "videoId" = $videoId AND ("streams" & $stream) = $stream ' +
+      'UNION ALL ' +
+      'SELECT 1 FROM "videoStreamingPlaylist" ' +
+      'INNER JOIN "videoFile" ON "videoFile"."videoStreamingPlaylistId" = "videoStreamingPlaylist"."id" ' +
+      'WHERE "videoStreamingPlaylist"."videoId" = $videoId AND ("videoFile"."streams" & $stream) = $stream ' +
+      'LIMIT 1'
+
+    return doesExist({
+      sequelize: this.sequelize,
+      query,
+      bind: { videoId, stream }
+    })
+  }
+
+  // ---------------------------------------------------------------------------
+
+  getWebVideoFileResolution<T extends MVideoWithFile> (this: T, resolution: number): MVideoFileVideo {
+    if (Array.isArray(this.VideoFiles) === false) return undefined
+
+    const file = this.VideoFiles.find(f => f.resolution === resolution)
+    if (!file) return undefined
+
+    return Object.assign(file, { Video: this })
+  }
+
+  hasWebVideoFiles () {
+    return Array.isArray(this.VideoFiles) === true && this.VideoFiles.length !== 0
+  }
+
+  // ---------------------------------------------------------------------------
+
+  async replaceAndSaveThumbnails (thumbnails: MThumbnail[], transaction?: Transaction) {
+    this.Thumbnails = await ThumbnailModel.replaceAllOf({ thumbnails, videoId: this.id, transaction })
+  }
+
+  // ---------------------------------------------------------------------------
+
+  getBestThumbnail (this: Pick<MVideoThumbnails, 'Thumbnails' | 'filterThumbnails'>, ratio: ThumbnailAspectRatio, maxWidth?: number) {
+    if (!this.Thumbnails || this.Thumbnails.length === 0) return undefined
+
+    return maxBy(this.filterThumbnails(ratio, maxWidth), 'width')
+  }
+
+  // Deprecated, use getBestThumbnailUrl instead
+  getBestThumbnailStaticPath (
+    this: Pick<MVideoThumbnails, 'Thumbnails' | 'filterThumbnails' | 'getBestThumbnail'>,
+    ratio: ThumbnailAspectRatio,
+    maxWidth?: number
+  ) {
+    const thumbnail = this.getBestThumbnail(ratio, maxWidth)
+    if (!thumbnail) return null
+
+    return thumbnail.getFileStaticPath()
+  }
+
+  getSmallestThumbnail (this: Pick<MVideoThumbnails, 'Thumbnails' | 'filterThumbnails'>, ratio: ThumbnailAspectRatio) {
+    if (!this.Thumbnails || this.Thumbnails.length === 0) return undefined
+
+    return minBy(this.filterThumbnails(ratio), 'width')
+  }
+
+  // Deprecated, use getSmallestThumbnailUrl instead
+  getSmallestThumbnailStaticPath (
+    this: Pick<MVideoThumbnails, 'Thumbnails' | 'filterThumbnails' | 'getSmallestThumbnail'>,
+    ratio: ThumbnailAspectRatio
+  ) {
+    const thumbnail = this.getSmallestThumbnail(ratio)
+    if (!thumbnail) return null
+
+    return thumbnail.getFileStaticPath()
+  }
+
+  getBestThumbnailUrl (
+    this: Pick<MVideoThumbnails, 'Thumbnails' | 'filterThumbnails' | 'getBestThumbnail'>,
+    ratio: ThumbnailAspectRatio,
+    maxWidth?: number
+  ) {
+    const thumbnail = this.getBestThumbnail(ratio, maxWidth)
+    if (!thumbnail) return null
+
+    return thumbnail.getLocalFileUrl()
+  }
+
+  getSmallestThumbnailUrl (
+    this: Pick<MVideoThumbnails, 'Thumbnails' | 'filterThumbnails' | 'getSmallestThumbnail'>,
+    ratio: ThumbnailAspectRatio
+  ) {
+    const thumbnail = this.getSmallestThumbnail(ratio)
+    if (!thumbnail) return null
+
+    return thumbnail.getLocalFileUrl()
+  }
+
+  filterThumbnails (this: Pick<MVideoThumbnails, 'Thumbnails'>, ratio: ThumbnailAspectRatio, maxWidth?: number) {
+    if (!this.Thumbnails) return []
+
+    return this.Thumbnails.filter(t => t.aspectRatio === ratio && (!maxWidth || t.width <= maxWidth))
+  }
+
+  // ---------------------------------------------------------------------------
+
+  isLocal (this: MVideoOwned) {
+    return this.remote === false
+  }
+
+  getWatchStaticPath () {
+    return buildVideoWatchPath({ shortUUID: uuidToShort(this.uuid) })
+  }
+
+  getEmbedStaticPath () {
+    return buildVideoEmbedPath({ shortUUID: uuidToShort(this.uuid) })
+  }
+
+  getEmbedStaticUrl () {
+    return WEBSERVER.URL + buildVideoEmbedPath({ shortUUID: uuidToShort(this.uuid) })
+  }
+
+  toFormattedSummaryJSON (this: MVideoSummary): VideoSummary {
+    return {
+      id: this.id,
+      uuid: this.uuid,
+      name: this.name,
+      nsfw: this.nsfw,
+      isLive: this.isLive,
+      shortUUID: uuidToShort(this.uuid),
+      publishedAt: this.publishedAt,
+      thumbnails: this.Thumbnails.map(t => t.toFormattedJSON()),
+      channel: this.VideoChannel.toFormattedSummaryJSON()
+    }
+  }
+
+  toFormattedJSON (this: MVideoFormattable, options?: VideoFormattingJSONOptions): Video {
+    return videoModelToFormattedJSON(this, options)
+  }
+
+  toFormattedDetailsJSON (this: MVideoFormattableDetails): VideoDetails {
+    return videoModelToFormattedDetailsJSON(this)
+  }
+
+  getFormattedWebVideoFilesJSON (includeMagnet = true): VideoFile[] {
+    return videoFilesModelToFormattedJSON(this, this.VideoFiles, { includeMagnet })
+  }
+
+  getFormattedHLSVideoFilesJSON (includeMagnet = true): VideoFile[] {
+    let acc: VideoFile[] = []
+
+    for (const p of this.VideoStreamingPlaylists) {
+      acc = acc.concat(videoFilesModelToFormattedJSON(this, p.VideoFiles, { includeMagnet }))
+    }
+
+    return acc
+  }
+
+  getFormattedAllVideoFilesJSON (includeMagnet = true): VideoFile[] {
+    let files: VideoFile[] = []
+
+    if (Array.isArray(this.VideoFiles)) {
+      files = files.concat(this.getFormattedWebVideoFilesJSON(includeMagnet))
+    }
+
+    if (Array.isArray(this.VideoStreamingPlaylists)) {
+      files = files.concat(this.getFormattedHLSVideoFilesJSON(includeMagnet))
+    }
+
+    return files
+  }
+
+  toActivityPubObject (this: MVideoAP): Promise<VideoObject> {
+    return Hooks.wrapObject(
+      videoModelToActivityPubObject(this),
+      'filter:activity-pub.video.json-ld.build.result',
+      { video: this }
+    )
+  }
+
+  getTruncatedDescription () {
+    if (!this.description) return null
+
+    const maxLength = CONSTRAINTS_FIELDS.VIDEOS.TRUNCATED_DESCRIPTION.max
+    return peertubeTruncate(this.description, { length: maxLength })
+  }
+
+  getAllFiles () {
+    let files: MVideoFile[] = []
+
+    if (Array.isArray(this.VideoFiles)) {
+      files = files.concat(this.VideoFiles)
+    }
+
+    if (Array.isArray(this.VideoStreamingPlaylists)) {
+      for (const p of this.VideoStreamingPlaylists) {
+        if (Array.isArray(p.VideoFiles)) {
+          files = files.concat(p.VideoFiles)
+        }
+      }
+    }
+
+    return files
+  }
+
+  getHLSPlaylist (): MStreamingPlaylistFilesVideo {
+    if (!this.VideoStreamingPlaylists) return undefined
+
+    const playlist = this.VideoStreamingPlaylists.find(p => p.type === VideoStreamingPlaylistType.HLS)
+    if (!playlist) return undefined
+
+    return playlist.withVideo(this)
+  }
+
+  setHLSPlaylist (playlist: MStreamingPlaylist) {
+    const toAdd = [ playlist ] as [VideoStreamingPlaylistModel]
+
+    if (Array.isArray(this.VideoStreamingPlaylists) === false || this.VideoStreamingPlaylists.length === 0) {
+      this.VideoStreamingPlaylists = toAdd
+      return
+    }
+
+    this.VideoStreamingPlaylists = this.VideoStreamingPlaylists
+      .filter(s => s.type !== VideoStreamingPlaylistType.HLS)
+      .concat(toAdd)
+  }
+
+  // ---------------------------------------------------------------------------
+
+  removeWebVideoFile (videoFile: MVideoFile) {
+    const filePath = VideoPathManager.Instance.getFSVideoFileOutputPath(this, videoFile)
+
+    const promises: Promise<any>[] = [
+      remove(filePath),
+      videoFile.removeTorrent()
+    ]
+
+    if (videoFile.storage === FileStorage.OBJECT_STORAGE) {
+      promises.push(removeWebVideoObjectStorage(videoFile))
+    }
+
+    logger.debug(`Removing files associated to web video ${videoFile.filename}`, { videoFile })
+
+    return Promise.all(promises)
+  }
+
+  async removeAllStreamingPlaylistFiles (options: {
+    playlist: MStreamingPlaylist
+    deleteCaptionPlaylists?: boolean // default true
+  }) {
+    const { playlist, deleteCaptionPlaylists = true } = options
+
+    const directoryPath = getHLSDirectory(this)
+
+    const removeDirectory = async () => {
+      try {
+        await remove(directoryPath)
+      } catch (err) {
+        // If it's a live, ffmpeg may have added another file while fs-extra is removing the directory
+        // So wait a little bit and retry
+        if (err.code === 'ENOTEMPTY') {
+          await wait(1000)
+          await remove(directoryPath)
+
+          return
+        }
+
+        throw err
+      }
+    }
+
+    if (deleteCaptionPlaylists) {
+      const captions = await VideoCaptionModel.listVideoCaptions(playlist.videoId)
+
+      // Remove playlist files associated to captions
+      for (const caption of captions) {
+        try {
+          await caption.removeCaptionPlaylist()
+          await caption.save()
+        } catch (err) {
+          logger.error(
+            `Cannot remove caption ${caption.filename} (${caption.language}) playlist files associated to video ${this.name}`,
+            { video: this }
+          )
+        }
+      }
+    }
+
+    await removeDirectory()
+
+    const playlistWithFiles = playlist as MStreamingPlaylistFilesVideo
+    playlistWithFiles.Video = this
+
+    if (!Array.isArray(playlistWithFiles.VideoFiles)) {
+      playlistWithFiles.VideoFiles = await playlistWithFiles.$get('VideoFiles')
+    }
+
+    // Remove physical files and torrents
+    await Promise.all(
+      playlistWithFiles.VideoFiles.map(file => file.removeTorrent())
+    )
+
+    if (playlist.storage === FileStorage.OBJECT_STORAGE) {
+      await removeHLSObjectStorage(this)
+    }
+
+    logger.debug(`Removing files associated to streaming playlist of video ${this.url}`, { playlist })
+  }
+
+  async removeStreamingPlaylistVideoFile (streamingPlaylist: MStreamingPlaylist, videoFile: MVideoFile) {
+    const filePath = VideoPathManager.Instance.getFSHLSOutputPath(this, videoFile.filename)
+    await videoFile.removeTorrent()
+    await remove(filePath)
+
+    const resolutionFilename = getHLSResolutionPlaylistFilename(videoFile.filename)
+    await remove(VideoPathManager.Instance.getFSHLSOutputPath(this, resolutionFilename))
+
+    if (videoFile.storage === FileStorage.OBJECT_STORAGE) {
+      await removeHLSFileObjectStorageByFilename(this, videoFile.filename)
+      await removeHLSFileObjectStorageByFilename(this, resolutionFilename)
+    }
+
+    logger.debug(`Removing files associated to streaming playlist video file ${videoFile.filename}`, { streamingPlaylist })
+  }
+
+  async removeStreamingPlaylistFile (streamingPlaylist: MStreamingPlaylist, filename: string) {
+    const filePath = VideoPathManager.Instance.getFSHLSOutputPath(this, filename)
+    await remove(filePath)
+
+    if (streamingPlaylist.storage === FileStorage.OBJECT_STORAGE) {
+      await removeHLSFileObjectStorageByFilename(this, filename)
+    }
+
+    logger.debug(`Removing streaming playlist file ${filename}`)
+  }
+
+  async removeOriginalFile (videoSource: MVideoSource) {
+    if (!videoSource.keptOriginalFilename) return
+
+    const filePath = VideoPathManager.Instance.getFSOriginalVideoFilePath(videoSource.keptOriginalFilename)
+    await remove(filePath)
+
+    if (videoSource.storage === FileStorage.OBJECT_STORAGE) {
+      await removeOriginalFileObjectStorage(videoSource)
+    }
+
+    logger.debug(`Removing original video file ${videoSource.keptOriginalFilename}`)
+  }
+
+  // ---------------------------------------------------------------------------
+
+  isOutdated () {
+    if (this.isLocal()) return false
+
+    return isOutdated(this, ACTIVITY_PUB.VIDEO_REFRESH_INTERVAL)
+  }
+
+  setAsRefreshed (transaction?: Transaction) {
+    return setAsUpdated({ sequelize: this.sequelize, table: 'video', id: this.id, transaction })
+  }
+
+  async bumpUpdatedAt (transaction: Transaction) {
+    this.updatedAt = await bumpUpdatedAt({
+      sequelize: this.sequelize,
+      table: 'video',
+      id: this.id,
+      transaction
+    })
+  }
+
+  // ---------------------------------------------------------------------------
+
+  requiresUserAuth (options: {
+    urlParamId: string
+    checkBlacklist: boolean
+  }) {
+    const { urlParamId, checkBlacklist } = options
+
+    if (checkBlacklist && this.VideoBlacklist) return true
+
+    if (this.privacy === VideoPrivacy.PRIVATE || this.privacy === VideoPrivacy.INTERNAL) {
+      return true
+    }
+
+    if (this.privacy === VideoPrivacy.UNLISTED) {
+      if (urlParamId && !isUUIDValid(urlParamId)) return true
+
+      return false
+    }
+
+    if (this.privacy === VideoPrivacy.PUBLIC || this.privacy === VideoPrivacy.PASSWORD_PROTECTED) {
+      return false
+    }
+
+    throw new Error(`Unknown video privacy ${this.privacy} to know if the video requires auth`)
+  }
+
+  hasPrivateStaticPath () {
+    return isVideoInPrivateDirectory(this.privacy)
+  }
+
+  // ---------------------------------------------------------------------------
+
+  async setNewStateAndPublishedAt (options: {
+    newState: VideoStateType
+    transaction: Transaction
+    keepPublishedAt?: boolean // default false
+  }) {
+    const { newState, transaction, keepPublishedAt = false } = options
+
+    if (this.state === newState) throw new Error('Cannot use same state ' + newState)
+
+    this.state = newState
+
+    // A private video is published for the first time when its privacy changes (see LocalVideoUpdater)
+    if (this.state === VideoState.PUBLISHED && !this.firstPublishedAt && this.privacy !== VideoPrivacy.PRIVATE) {
+      if (!keepPublishedAt) this.publishedAt = new Date()
+
+      this.firstPublishedAt = this.publishedAt
+    }
+
+    await this.save({ transaction })
+  }
+
+  getBandwidthBits (this: MVideo, videoFile: MVideoFile) {
+    if (!this.duration) return videoFile.size
+
+    return Math.ceil((videoFile.size * 8) / this.duration)
+  }
+
+  getTrackerUrls () {
+    if (this.isLocal()) return buildLocalTrackerUrls()
+
+    return this.Trackers.map(t => t.url)
+  }
+}

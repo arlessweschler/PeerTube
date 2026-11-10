@@ -1,3 +1,4 @@
+/.angular/cache
 /dist/
 /node_modules
 /compiled
@@ -8,3 +9,12 @@
 /src/locale/target/iso639_*.xml
 /src/locale/target/player_*.xml
 /src/locale/target/server_*.xml
+/e2e/local.log
+/e2e/browserstack.err
+/e2e/screenshots
+/e2e/logs
+/e2e/log
+/src/standalone/player/build
+/src/standalone/player/dist
+/src/standalone/embed-player-api/build
+/src/standalone/embed-player-api/dist

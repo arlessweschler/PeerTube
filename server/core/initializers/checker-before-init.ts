@@ -1,0 +1,395 @@
+import { promisify0 } from '@peertube/peertube-core-utils'
+import { parseSemVersion } from '@peertube/peertube-node-utils'
+import { createLogger } from '../helpers/logger.js'
+import { getConfigModule } from './config.js'
+
+const logger = createLogger()
+
+// ONLY USE CORE MODULES IN THIS FILE!
+
+// Check the config files
+export function checkMissedConfig () {
+  const config = getConfigModule()
+
+  const required = [
+    'listen.port',
+    'listen.hostname',
+    'webserver.https',
+    'webserver.hostname',
+    'webserver.port',
+    'secrets.peertube',
+    'http_timeouts.request',
+    'trust_proxy',
+    'oauth2.token_lifetime.access_token',
+    'oauth2.token_lifetime.refresh_token',
+    'database.hostname',
+    'database.port',
+    'database.username',
+    'database.password',
+    'database.pool.max',
+    'database.ssl_settings.reject_unauthorized',
+    'database.ssl_settings.ca',
+    'database.ssl_settings.cert',
+    'database.ssl_settings.key',
+    'database.read_replicas.max_lag',
+    'database.read_replicas.hosts',
+    'smtp.hostname',
+    'smtp.port',
+    'smtp.username',
+    'smtp.password',
+    'smtp.tls',
+    'smtp.from_address',
+    'email.body.signature',
+    'email.subject.prefix',
+    'storage.avatars',
+    'storage.web_videos',
+    'storage.logs',
+    'storage.previews',
+    'storage.thumbnails',
+    'storage.torrents',
+    'storage.cache',
+    'storage.redundancy',
+    'storage.tmp',
+    'storage.streaming_playlists',
+    'storage.plugins',
+    'storage.well_known',
+    'storage.uploads',
+    'log.level',
+    'log.rotation.enabled',
+    'log.rotation.max_file_size',
+    'log.rotation.max_files',
+    'log.audit.enabled',
+    'log.audit.max_age',
+    'log.anonymize_ip',
+    'log.tag_requests',
+    'log.log_ping_requests',
+    'log.log_tracker_unknown_infohash',
+    'log.prettify_sql',
+    'log.accept_client_log',
+    'open_telemetry.metrics.enabled',
+    'open_telemetry.metrics.playback_stats_interval',
+    'open_telemetry.metrics.prometheus_exporter.hostname',
+    'open_telemetry.metrics.prometheus_exporter.port',
+    'open_telemetry.tracing.enabled',
+    'open_telemetry.tracing.otlp_exporter.endpoint',
+    'open_telemetry.metrics.http_request_duration.enabled',
+    'user.history.videos.enabled',
+    'user.disable_root_auth',
+    'user.video_quota',
+    'user.video_quota_daily',
+    'user.password_constraints.min_length',
+    'video_channels.max_per_user',
+    'csp.enabled',
+    'csp.report_only',
+    'csp.report_uri',
+    'security.frameguard.enabled',
+    'security.powered_by_header.enabled',
+    'admin.email',
+    'contact_form.enabled',
+    'signup.enabled',
+    'signup.limit',
+    'signup.requires_approval',
+    'signup.requires_email_verification',
+    'signup.minimum_age',
+    'signup.filters.cidr.whitelist',
+    'signup.filters.cidr.blacklist',
+    'redundancy.videos.strategies',
+    'redundancy.videos.check_interval',
+    'redundancy.videos.timeout',
+    'transcoding.enabled',
+    'transcoding.original_file.keep',
+    'transcoding.threads',
+    'transcoding.allow_additional_extensions',
+    'transcoding.always_transcode_podcast_optimized_audio',
+    'transcoding.web_videos.enabled',
+    'transcoding.hls.enabled',
+    'transcoding.profile',
+    'transcoding.concurrency',
+    'transcoding.resolutions.0p',
+    'transcoding.resolutions.144p',
+    'transcoding.resolutions.240p',
+    'transcoding.resolutions.360p',
+    'transcoding.resolutions.480p',
+    'transcoding.resolutions.720p',
+    'transcoding.resolutions.1080p',
+    'transcoding.resolutions.1440p',
+    'transcoding.resolutions.2160p',
+    'transcoding.always_transcode_original_resolution',
+    'transcoding.remote_runners.enabled',
+    'transcoding.fps.max',
+    'video_studio.enabled',
+    'video_studio.remote_runners.enabled',
+    'video_file.update.enabled',
+    'video_file.lifecycle.enabled',
+    'video_file.lifecycle.check_interval',
+    'video_file.lifecycle.dry_run',
+    'video_file.lifecycle.max_videos_per_run',
+    'video_file.lifecycle.policies',
+    'remote_runners.stalled_jobs.vod',
+    'remote_runners.stalled_jobs.live',
+    'thumbnails.generation_from_video.frames_to_analyze',
+    'thumbnails.sizes',
+    'import.videos.http.enabled',
+    'import.videos.torrent.enabled',
+    'import.videos.concurrency',
+    'import.videos.timeout',
+    'import.videos.http.force_ipv4',
+    'import.videos.http.proxies',
+    'import.videos.http.cookies.enabled',
+    'import.video_channel_synchronization.enabled',
+    'import.video_channel_synchronization.max_per_user',
+    'import.video_channel_synchronization.check_interval',
+    'import.video_channel_synchronization.videos_limit_per_synchronization',
+    'import.video_channel_synchronization.full_sync_videos_limit',
+    'auto_blacklist.videos.of_users.enabled',
+    'trending.videos.interval_days',
+    'client.videos.miniature.prefer_author_display_name',
+    'client.browse_videos.default_sort',
+    'client.browse_videos.default_scope',
+    'client.menu.login.redirect_on_single_external_auth',
+    'client.header.hide_instance_name',
+    'defaults.publish.download_enabled',
+    'defaults.publish.comments_policy',
+    'defaults.publish.recommendation_scope',
+    'defaults.publish.privacy',
+    'defaults.publish.licence',
+    'defaults.player.auto_play',
+    'defaults.player.theme',
+    'instance.name',
+    'instance.short_description',
+    'instance.default_language',
+    'instance.description',
+    'instance.terms',
+    'instance.default_client_route',
+    'instance.is_nsfw',
+    'instance.default_nsfw_policy',
+    'instance.robots',
+    'instance.securitytxt',
+    'instance.server_country',
+    'instance.support.text',
+    'instance.social.external_link',
+    'instance.social.mastodon_link',
+    'instance.social.bluesky_link',
+    'instance.social.x_link',
+    'services.twitter.username',
+    'followers.instance.enabled',
+    'followers.instance.manual_approval',
+    'followers.channels.enabled',
+    'tracker.enabled',
+    'tracker.private',
+    'tracker.reject_too_many_announces',
+    'history.videos.max_age',
+    'views.videos.remote.max_age',
+    'views.videos.local_buffer_update_interval',
+    'views.videos.view_expiration',
+    'views.videos.watching_interval.anonymous',
+    'views.videos.watching_interval.users',
+    'rates_limit.api.window',
+    'rates_limit.api.max',
+    'rates_limit.login.window',
+    'rates_limit.login.max',
+    'rates_limit.signup.window',
+    'rates_limit.signup.max',
+    'rates_limit.ask_send_email.window',
+    'rates_limit.ask_send_email.max',
+    'rates_limit.confirm_token.window',
+    'rates_limit.confirm_token.max',
+    'rates_limit.receive_client_log.window',
+    'rates_limit.receive_client_log.max',
+    'rates_limit.plugins.window',
+    'rates_limit.plugins.max',
+    'rates_limit.well_known.window',
+    'rates_limit.well_known.max',
+    'rates_limit.feeds.window',
+    'rates_limit.feeds.max',
+    'rates_limit.activity_pub.window',
+    'rates_limit.activity_pub.max',
+    'rates_limit.client.window',
+    'rates_limit.client.max',
+    'static_files.private_files_require_auth',
+    'object_storage.enabled',
+    'object_storage.endpoint',
+    'object_storage.region',
+    'object_storage.force_path_style',
+    'object_storage.upload_acl.public',
+    'object_storage.upload_acl.private',
+    'object_storage.proxy.proxify_private_files',
+    'object_storage.credentials.access_key_id',
+    'object_storage.credentials.secret_access_key',
+    'object_storage.max_upload_part',
+    'object_storage.streaming_playlists.bucket_name',
+    'object_storage.streaming_playlists.prefix',
+    'object_storage.streaming_playlists.base_url',
+    'object_storage.web_videos.bucket_name',
+    'object_storage.web_videos.prefix',
+    'object_storage.web_videos.base_url',
+    'object_storage.original_video_files.bucket_name',
+    'object_storage.original_video_files.prefix',
+    'object_storage.original_video_files.base_url',
+    'object_storage.max_request_attempts',
+    'object_storage.captions.bucket_name',
+    'object_storage.captions.prefix',
+    'object_storage.captions.base_url',
+    'object_storage.user_exports.bucket_name',
+    'object_storage.user_exports.prefix',
+    'object_storage.user_exports.base_url',
+    'object_storage.avatars.bucket_name',
+    'object_storage.avatars.prefix',
+    'object_storage.avatars.base_url',
+    'object_storage.thumbnails.bucket_name',
+    'object_storage.thumbnails.prefix',
+    'object_storage.thumbnails.base_url',
+    'object_storage.storyboards.bucket_name',
+    'object_storage.storyboards.prefix',
+    'object_storage.storyboards.base_url',
+    'object_storage.torrents.bucket_name',
+    'object_storage.torrents.prefix',
+    'object_storage.torrents.base_url',
+    'object_storage.uploads.bucket_name',
+    'object_storage.uploads.prefix',
+    'object_storage.uploads.base_url',
+    'object_storage.staging.bucket_name',
+    'object_storage.staging.prefix',
+    'object_storage.cache.bucket_name',
+    'object_storage.cache.prefix',
+    'object_storage.cache.base_url',
+    'theme.default',
+    'feeds.videos.count',
+    'feeds.comments.count',
+    'geo_ip.enabled',
+    'geo_ip.country.database_url',
+    'geo_ip.city.database_url',
+    'remote_redundancy.videos.accept_from',
+    'federation.enabled',
+    'federation.prevent_ssrf',
+    'federation.videos.federate_unlisted',
+    'federation.videos.cleanup_remote_interactions',
+    'peertube.check_latest_version.enabled',
+    'peertube.check_latest_version.url',
+    'search.remote_uri.users',
+    'search.remote_uri.anonymous',
+    'search.search_index.enabled',
+    'search.search_index.url',
+    'search.search_index.disable_local_search',
+    'search.search_index.is_default_search',
+    'live.enabled',
+    'live.allow_replay',
+    'live.latency_setting.enabled',
+    'live.max_duration',
+    'live.max_user_lives',
+    'live.max_instance_lives',
+    'live.rtmp.enabled',
+    'live.rtmp.port',
+    'live.rtmp.hostname',
+    'live.rtmp.public_hostname',
+    'live.rtmp.ping',
+    'live.rtmp.ping_timeout',
+    'live.rtmps.enabled',
+    'live.rtmps.port',
+    'live.rtmps.hostname',
+    'live.rtmps.public_hostname',
+    'live.rtmps.key_file',
+    'live.rtmps.cert_file',
+    'live.transcoding.enabled',
+    'live.transcoding.threads',
+    'live.transcoding.profile',
+    'live.transcoding.resolutions.144p',
+    'live.transcoding.resolutions.240p',
+    'live.transcoding.resolutions.360p',
+    'live.transcoding.resolutions.480p',
+    'live.transcoding.resolutions.720p',
+    'live.transcoding.resolutions.1080p',
+    'live.transcoding.resolutions.1440p',
+    'live.transcoding.resolutions.2160p',
+    'live.transcoding.always_transcode_original_resolution',
+    'live.transcoding.fps.max',
+    'live.transcoding.remote_runners.enabled',
+    'live.dvr.max_window',
+    'storyboards.enabled',
+    'webrtc.stun_servers',
+    'nsfw_flags_settings.enabled',
+    'download.max_total_bytes_per_second',
+    'download.max_bytes_per_ip_per_second',
+    'download_generate_video.max_parallel_downloads',
+    'video_comments.accept_remote_comments'
+  ]
+
+  const requiredAlternatives = [
+    [ // set
+      [ 'redis.hostname', 'redis.port' ], // alternative
+      [ 'redis.socket' ],
+      [ 'redis.sentinel.master_name', 'redis.sentinel.sentinels[0].host', 'redis.sentinel.sentinels[0].port' ]
+    ]
+  ]
+  const miss: string[] = []
+
+  for (const key of required) {
+    if (!config.has(key)) {
+      miss.push(key)
+    }
+  }
+
+  const redundancyVideos = config.get<any>('redundancy.videos.strategies')
+
+  if (Array.isArray(redundancyVideos)) {
+    for (const r of redundancyVideos) {
+      if (!r.size) miss.push('redundancy.videos.strategies.size')
+      if (!r.min_lifetime) miss.push('redundancy.videos.strategies.min_lifetime')
+    }
+  }
+
+  const lifecyclePolicies = config.get<any>('video_file.lifecycle.policies')
+
+  if (Array.isArray(lifecyclePolicies)) {
+    for (const p of lifecyclePolicies) {
+      if (!p?.name) miss.push('video_file.lifecycle.policies.name')
+      if (!p?.criteria) miss.push('video_file.lifecycle.policies.criteria')
+      if (!p?.action) miss.push('video_file.lifecycle.policies.action')
+    }
+  }
+
+  const missingAlternatives = requiredAlternatives.filter(
+    set => !set.find(alternative => !alternative.find(key => !config.has(key)))
+  )
+
+  missingAlternatives
+    .forEach(set => set[0].forEach(key => miss.push(key)))
+
+  return miss
+}
+
+// Check the available codecs
+// We get CONFIG by param to not import it in this file (import orders)
+export async function checkFFmpeg (CONFIG: { TRANSCODING: { ENABLED: boolean } }) {
+  if (CONFIG.TRANSCODING.ENABLED === false) return undefined
+
+  const Ffmpeg = (await import('fluent-ffmpeg')).default
+  const getAvailableCodecsPromise = promisify0(Ffmpeg.getAvailableCodecs)
+  const codecs = await getAvailableCodecsPromise()
+  const canEncode = [ 'libx264' ]
+
+  for (const codec of canEncode) {
+    if (codecs[codec] === undefined) {
+      throw new Error(`Codec ${codec} not found in FFmpeg.`)
+    }
+
+    if (codecs[codec].canEncode !== true) {
+      throw new Error(`Unavailable encode codec ${codec} in FFmpeg`)
+    }
+  }
+}
+
+export function checkNodeVersion () {
+  const v = process.version
+  const { major, minor } = parseSemVersion(v)
+
+  logger.debug(`Checking NodeJS version ${v}`)
+
+  if (major < 22) {
+    throw new Error(`Your NodeJS version ${v} is not supported. Please upgrade to NodeJS 22 or NodeJS 24`)
+  }
+
+  if (major === 22 && minor < 22) {
+    throw new Error(`NodeJS >= v22.22 or NodeJS 24 is required`)
+  }
+}

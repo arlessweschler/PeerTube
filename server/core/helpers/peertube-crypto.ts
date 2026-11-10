@@ -1,0 +1,179 @@
+import { ParsedDraftSignature, parseRequestSignature, verifyDraftSignature } from '@misskey-dev/node-http-message-signatures'
+import { HttpStatusCode } from '@peertube/peertube-models'
+import { generateRSAKeyPairPromise, sha256 } from '@peertube/peertube-node-utils'
+import { timingSafeEqual } from 'crypto'
+import { Request } from 'express'
+import PQueue from 'p-queue'
+import { BCRYPT_SALT_SIZE, CRYPTO_QUEUE, HTTP_SIGNATURE, PRIVATE_RSA_KEY_SIZE } from '../initializers/constants.js'
+import { MActor } from '../types/models/index.js'
+import { decrypt, encrypt } from './encryption.js'
+import { createLogger } from './logger.js'
+
+const logger = createLogger()
+
+const cryptoQueue = new PQueue({ concurrency: CRYPTO_QUEUE.CONCURRENCY })
+
+const CRYPTO_PRIORITY = {
+  PASSWORD_CHECK: 1,
+  DEFAULT: 0
+}
+
+class CryptoQueueFullError extends Error {
+  status = HttpStatusCode.SERVICE_UNAVAILABLE_503
+  code = HttpStatusCode.SERVICE_UNAVAILABLE_503
+}
+
+function runInCryptoQueue<T> (fn: () => Promise<T>, priority: number) {
+  // Fail fast if we have too many jobs
+  if (cryptoQueue.size >= CRYPTO_QUEUE.MAX_PENDING) {
+    return Promise.reject(new CryptoQueueFullError('Server is too busy, please try again later'))
+  }
+
+  return cryptoQueue.add(fn, { priority })
+}
+
+function createPrivateAndPublicKeys () {
+  return runInCryptoQueue(generateKeys, CRYPTO_PRIORITY.DEFAULT)
+}
+
+function createUserKeysAndPasswordHash (password: string | undefined) {
+  return runInCryptoQueue(async () => {
+    return {
+      accountKeys: await generateKeys(),
+      channelKeys: await generateKeys(),
+      passwordHash: password
+        ? await hashPassword(password)
+        : undefined
+    }
+  }, CRYPTO_PRIORITY.DEFAULT)
+}
+
+function generateKeys () {
+  logger.info('Generating a RSA key...')
+
+  return generateRSAKeyPairPromise(PRIVATE_RSA_KEY_SIZE)
+}
+
+// ---------------------------------------------------------------------------
+// User password checks
+// ---------------------------------------------------------------------------
+
+async function comparePassword (plainPassword: string, hashPassword: string) {
+  if (!plainPassword) return false
+
+  if (Buffer.byteLength(plainPassword, 'utf8') > 72) {
+    throw new Error('Cannot compare more than 72 bytes with bcrypt')
+  }
+
+  const { compare } = await import('bcrypt')
+
+  return runInCryptoQueue(() => compare(plainPassword, hashPassword), CRYPTO_PRIORITY.PASSWORD_CHECK)
+}
+
+function cryptPassword (password: string) {
+  return runInCryptoQueue(() => hashPassword(password), CRYPTO_PRIORITY.DEFAULT)
+}
+
+async function hashPassword (password: string) {
+  const { genSalt, hash } = await import('bcrypt')
+
+  return hash(password, await genSalt(BCRYPT_SALT_SIZE))
+}
+
+// ---------------------------------------------------------------------------
+// Secret comparison
+// ---------------------------------------------------------------------------
+
+// Prevent timing attacks when comparing secret tokens (email verification, password reset etc.)
+function isSecretEqual (a: string, b: string) {
+  if (typeof a !== 'string' || typeof b !== 'string') return false
+
+  const aBuffer = Buffer.from(a)
+  const bBuffer = Buffer.from(b)
+
+  if (aBuffer.length !== bBuffer.length) return false
+
+  return timingSafeEqual(aBuffer, bBuffer)
+}
+
+// ---------------------------------------------------------------------------
+// HTTP Signature
+// ---------------------------------------------------------------------------
+
+function isHTTPSignatureDigestValid (rawBody: Buffer, digest: string): boolean {
+  return buildDigest(rawBody) === digest
+}
+
+async function isHTTPSignatureVerified (httpSignatureParsed: ParsedDraftSignature, actor: MActor): Promise<boolean> {
+  const result = await verifyDraftSignature(
+    httpSignatureParsed.value,
+    actor.publicKey,
+    msg => logger.debug('Error in verify draft signature: ' + msg)
+  )
+
+  return result === true
+}
+
+function parseHTTPSignature (req: Request, clockSkewSeconds = HTTP_SIGNATURE.CLOCK_SKEW_SECONDS): ParsedDraftSignature {
+  const requiredHeaders = req.method === 'POST'
+    ? [ '(request-target)', 'host', 'digest' ]
+    : [ '(request-target)', 'host' ]
+
+  const clockSkew = clockSkewSeconds * 1000
+
+  const parsed = parseRequestSignature(req, {
+    requiredComponents: {
+      draft: requiredHeaders
+    },
+    clockSkew: {
+      delay: clockSkew
+    }
+  })
+
+  if (parsed.version !== 'draft') {
+    throw new Error(`Only draft version of HTTP signature is supported`)
+  }
+
+  const parsedHeaders = parsed.value.params.headers
+  if (!parsedHeaders.includes('date') && !parsedHeaders.includes('(created)')) {
+    throw new Error(`date or (created) must be included in signature`)
+  }
+
+  // The library only checks the age of the Date header, that can be unsigned
+  const signedAt = parsedHeaders.includes('date')
+    ? new Date(req.headers['date'] ?? req.headers['x-date'] as string).getTime()
+    : parseInt((parsed.value.params as { created?: string }).created) * 1000
+
+  if (isNaN(signedAt) || signedAt < new Date().getTime() - clockSkew) {
+    throw new Error(`Signature date is missing or too old`)
+  }
+
+  return parsed
+}
+
+// ---------------------------------------------------------------------------
+
+function buildDigest (body: any) {
+  const rawBody = typeof body === 'string' || Buffer.isBuffer(body)
+    ? body
+    : JSON.stringify(body)
+
+  return 'SHA-256=' + sha256(rawBody, 'base64')
+}
+
+// ---------------------------------------------------------------------------
+
+export {
+  buildDigest,
+  comparePassword,
+  createPrivateAndPublicKeys,
+  createUserKeysAndPasswordHash,
+  CryptoQueueFullError,
+  cryptPassword,
+  decrypt,
+  encrypt,
+  isHTTPSignatureDigestValid,
+  isHTTPSignatureVerified,
+  isSecretEqual,
+  parseHTTPSignature
+}

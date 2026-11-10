@@ -1,10 +1,109 @@
-@import '_variables';
-@import '_mixins';
+@use "sass:math";
+@use "_variables" as *;
+@use "_button-mixins" as *;
+@use "_mixins" as *;
 
-input {
-  @include peertube-input-text(250px);
+// ---------------------------------------------------------------------------
+// Toggle button
+// ---------------------------------------------------------------------------
+
+.filter-toggle {
+  my-global-icon {
+    @include global-icon-size(20px);
+  }
+
+  .active-counter {
+    background-color: var(--primary);
+    color: var(--on-primary);
+    font-weight: $font-bold;
+    font-size: 11px;
+    border-radius: 100%;
+    padding: 2px 6px;
+    position: relative;
+    top: -1px;
+  }
+
+  &::after {
+    display: none;
+  }
 }
 
-.input-group-text {
-  background-color: transparent;
+// ---------------------------------------------------------------------------
+// Dropdown panel
+// ---------------------------------------------------------------------------
+
+.filter-panel {
+  min-width: 280px;
+  max-width: 360px;
+  border: 1px solid pvar(--input-border-color);
+  border-radius: pvar(--input-border-radius);
+}
+
+.filter-header {
+  border-bottom: 1px solid pvar(--input-border-color);
+  background-color: pvar(--bg-secondary-350);
+
+  padding-top: 0.25rem;
+  padding-bottom: 0.25rem;
+
+  @include padding-left(1rem);
+
+  // Align button with form controls
+  @include padding-right(6px);
+}
+
+.filter-header-title {
+  font-size: 1rem;
+  font-weight: $font-bold;
+  text-transform: uppercase;
+  color: pvar(--fg-300);
+}
+
+.filter-panel-body {
+  max-height: 60vh;
+  overflow: auto;
+}
+
+// ---------------------------------------------------------------------------
+// Filter groups
+// ---------------------------------------------------------------------------
+
+.filter-title {
+  display: block;
+  font-size: 12px;
+  font-weight: $font-bold;
+  text-transform: uppercase;
+  color: pvar(--fg-300);
+  margin-bottom: 0.5rem;
+  margin-top: 0.75rem;
+}
+
+// ---------------------------------------------------------------------------
+// Option inputs
+// ---------------------------------------------------------------------------
+
+.filter-options {
+  display: flex;
+  flex-direction: column;
+}
+
+my-select-options {
+  display: block;
+  margin-bottom: 1.5rem;
+}
+
+.pt-input-text {
+  padding: pvar(--input-y-padding) calc(#{pvar(--input-x-padding)} / 2);
+
+  @include font-size(14px);
+}
+
+// ---------------------------------------------------------------------------
+// Footer
+// ---------------------------------------------------------------------------
+
+.filter-footer {
+  border-top: 1px solid pvar(--input-border-color);
+  background-color: pvar(--bg);
+  margin-top: 0.5rem;
 }

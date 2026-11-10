@@ -1,0 +1,167 @@
+import { VideoBlacklist, type VideoBlacklistType_Type } from '@peertube/peertube-models'
+import { MVideoBlacklist, MVideoBlacklistFormattable } from '@server/types/models/index.js'
+import { FindOptions, Transaction } from 'sequelize'
+import { AllowNull, BelongsTo, Column, CreatedAt, DataType, Default, ForeignKey, Is, Table, UpdatedAt } from 'sequelize-typescript'
+import {
+  isVideoBlacklistReasonValid,
+  isVideoBlacklistInternalNoteValid,
+  isVideoBlacklistTypeValid
+} from '../../helpers/custom-validators/video-blacklist.js'
+import { CONSTRAINTS_FIELDS } from '../../initializers/constants.js'
+import { getBlacklistSort, searchAttribute, SequelizeModel, throwIfNotValid } from '../shared/index.js'
+import { thumbnailAPIAttributes, ThumbnailModel } from './thumbnail.js'
+import { VideoChannelModel, ScopeNames as VideoChannelScopeNames } from './video-channel.js'
+import { VideoModel } from './video.js'
+
+@Table({
+  tableName: 'videoBlacklist',
+  indexes: [
+    {
+      fields: [ 'videoId' ],
+      unique: true
+    }
+  ]
+})
+export class VideoBlacklistModel extends SequelizeModel<VideoBlacklistModel> {
+  @AllowNull(true)
+  @Is('VideoBlacklistReason', value => throwIfNotValid(value, isVideoBlacklistReasonValid, 'reason', true))
+  @Column(DataType.STRING(CONSTRAINTS_FIELDS.VIDEO_BLACKLIST.REASON.max))
+  declare reason: string
+
+  @AllowNull(true)
+  @Is('VideoBlacklistInternalNote', value => throwIfNotValid(value, isVideoBlacklistInternalNoteValid, 'internalNote', true))
+  @Column(DataType.STRING(CONSTRAINTS_FIELDS.VIDEO_BLACKLIST.INTERNAL_NOTE.max))
+  declare internalNote: string
+
+  @AllowNull(false)
+  @Column
+  declare unfederated: boolean
+
+  @AllowNull(false)
+  @Default(null)
+  @Is('VideoBlacklistType', value => throwIfNotValid(value, isVideoBlacklistTypeValid, 'type'))
+  @Column
+  declare type: VideoBlacklistType_Type
+
+  @CreatedAt
+  declare createdAt: Date
+
+  @UpdatedAt
+  declare updatedAt: Date
+
+  @ForeignKey(() => VideoModel)
+  @Column
+  declare videoId: number
+
+  @BelongsTo(() => VideoModel, {
+    foreignKey: {
+      allowNull: false
+    },
+    onDelete: 'cascade'
+  })
+  declare Video: Awaited<VideoModel>
+
+  static listForApi (parameters: {
+    start: number
+    count: number
+    sort: string
+    search?: string
+    type?: VideoBlacklistType_Type
+  }) {
+    const { start, count, sort, search, type } = parameters
+
+    function buildBaseQuery (): FindOptions {
+      return {
+        offset: start,
+        limit: count,
+        order: getBlacklistSort(sort)
+      }
+    }
+
+    const countQuery = buildBaseQuery()
+
+    const findQuery = buildBaseQuery()
+    findQuery.include = [
+      {
+        model: VideoModel,
+        required: true,
+        where: searchAttribute(search, 'name'),
+        include: [
+          {
+            model: VideoChannelModel.scope({ method: [ VideoChannelScopeNames.SUMMARY, { withAccount: true } ] }),
+            required: true
+          },
+          {
+            model: ThumbnailModel,
+            attributes: thumbnailAPIAttributes,
+            required: false
+          }
+        ]
+      }
+    ]
+
+    if (type) {
+      countQuery.where = { type }
+      findQuery.where = { type }
+    }
+
+    return Promise.all([
+      VideoBlacklistModel.count(countQuery),
+      VideoBlacklistModel.findAll(findQuery)
+    ]).then(([ count, rows ]) => {
+      return {
+        data: rows,
+        total: count
+      }
+    })
+  }
+
+  static async listVideoIdsOfChannel (options: {
+    channelId: number
+    type: VideoBlacklistType_Type
+    transaction?: Transaction
+  }): Promise<number[]> {
+    const { channelId, type, transaction } = options
+
+    const rows = await VideoBlacklistModel.findAll({
+      attributes: [ 'videoId' ],
+      where: { type },
+      include: [
+        {
+          attributes: [],
+          model: VideoModel.unscoped(),
+          required: true,
+          where: { channelId }
+        }
+      ],
+      transaction
+    })
+
+    return rows.map(r => r.videoId)
+  }
+
+  static loadByVideoId (id: number, transaction?: Transaction): Promise<MVideoBlacklist> {
+    const query = {
+      where: {
+        videoId: id
+      },
+      transaction
+    }
+
+    return VideoBlacklistModel.findOne(query)
+  }
+
+  toFormattedJSON (this: MVideoBlacklistFormattable): VideoBlacklist {
+    return {
+      id: this.id,
+      createdAt: this.createdAt,
+      updatedAt: this.updatedAt,
+      reason: this.reason,
+      internalNote: this.internalNote,
+      unfederated: this.unfederated,
+      type: this.type,
+
+      video: this.Video.toFormattedJSON()
+    }
+  }
+}

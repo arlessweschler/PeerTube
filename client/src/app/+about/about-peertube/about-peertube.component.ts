@@ -1,18 +1,17 @@
-import { Component, AfterViewChecked } from '@angular/core'
+import { Component, AfterViewChecked, inject, ChangeDetectionStrategy } from '@angular/core'
 import { ViewportScroller } from '@angular/common'
 
 @Component({
   selector: 'my-about-peertube',
   templateUrl: './about-peertube.component.html',
-  styleUrls: [ './about-peertube.component.scss' ]
+  styleUrls: [ './about-peertube.component.scss' ],
+  changeDetection: ChangeDetectionStrategy.Eager,
+  standalone: true
 })
-
 export class AboutPeertubeComponent implements AfterViewChecked {
-  private lastScrollHash: string
+  private viewportScroller = inject(ViewportScroller)
 
-  constructor (
-    private viewportScroller: ViewportScroller
-  ) {}
+  private lastScrollHash: string
 
   ngAfterViewChecked () {
     if (window.location.hash && window.location.hash !== this.lastScrollHash) {

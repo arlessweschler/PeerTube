@@ -1,0 +1,252 @@
+import { HttpStatusCode, ServerFollowCreate, UserRight } from '@peertube/peertube-models'
+import { auditLog, buildFollowAuditEntity, getAuditActorFromRes } from '@server/lib/audit-log/index.js'
+import { MActorFollowActorsDefault } from '@server/types/models/index.js'
+import { getServerActor } from '@server/models/application/application.js'
+import express from 'express'
+import { createLogger } from '../../../helpers/logger.js'
+import { getFormattedObjects } from '../../../helpers/utils.js'
+import { runTransaction } from '../../../helpers/database-utils.js'
+import { autoFollowBackIfNeeded } from '../../../lib/activitypub/follow.js'
+import { sendAccept, sendReject, sendUndoFollow } from '../../../lib/activitypub/send/index.js'
+import { JobQueue } from '../../../lib/job-queue/index.js'
+import { removeRedundanciesOfServer } from '../../../lib/redundancy.js'
+import {
+  asyncMiddleware,
+  authenticate,
+  ensureUserHasRight,
+  paginationValidator,
+  setBodyHostsPort,
+  setDefaultPagination,
+  setDefaultSort
+} from '../../../middlewares/index.js'
+import {
+  acceptFollowerValidator,
+  followValidator,
+  getFollowerValidator,
+  instanceFollowersSortValidator,
+  instanceFollowingSortValidator,
+  listFollowsValidator,
+  rejectFollowerValidator,
+  removeFollowingValidator
+} from '../../../middlewares/validators/index.js'
+import { ActorFollowModel } from '../../../models/actor/actor-follow.js'
+
+const logger = createLogger()
+
+const serverFollowsRouter = express.Router()
+
+serverFollowsRouter.get(
+  '/following',
+  listFollowsValidator,
+  paginationValidator,
+  instanceFollowingSortValidator,
+  setDefaultSort,
+  setDefaultPagination,
+  asyncMiddleware(listFollowing)
+)
+
+serverFollowsRouter.post(
+  '/following',
+  authenticate,
+  ensureUserHasRight(UserRight.MANAGE_SERVER_FOLLOW),
+  followValidator,
+  setBodyHostsPort,
+  asyncMiddleware(addFollow)
+)
+
+serverFollowsRouter.delete(
+  '/following/:hostOrHandle',
+  authenticate,
+  ensureUserHasRight(UserRight.MANAGE_SERVER_FOLLOW),
+  asyncMiddleware(removeFollowingValidator),
+  asyncMiddleware(removeFollowing)
+)
+
+serverFollowsRouter.get(
+  '/followers',
+  listFollowsValidator,
+  paginationValidator,
+  instanceFollowersSortValidator,
+  setDefaultSort,
+  setDefaultPagination,
+  asyncMiddleware(listFollowers)
+)
+
+serverFollowsRouter.delete(
+  '/followers/:handle',
+  authenticate,
+  ensureUserHasRight(UserRight.MANAGE_SERVER_FOLLOW),
+  asyncMiddleware(getFollowerValidator),
+  asyncMiddleware(removeFollower)
+)
+
+serverFollowsRouter.post(
+  '/followers/:handle/reject',
+  authenticate,
+  ensureUserHasRight(UserRight.MANAGE_SERVER_FOLLOW),
+  asyncMiddleware(getFollowerValidator),
+  rejectFollowerValidator,
+  asyncMiddleware(rejectFollower)
+)
+
+serverFollowsRouter.post(
+  '/followers/:handle/accept',
+  authenticate,
+  ensureUserHasRight(UserRight.MANAGE_SERVER_FOLLOW),
+  asyncMiddleware(getFollowerValidator),
+  acceptFollowerValidator,
+  asyncMiddleware(acceptFollower)
+)
+
+// ---------------------------------------------------------------------------
+
+export {
+  serverFollowsRouter
+}
+
+// ---------------------------------------------------------------------------
+
+async function listFollowing (req: express.Request, res: express.Response) {
+  const serverActor = await getServerActor()
+  const resultList = await ActorFollowModel.listInstanceFollowingForApi({
+    followerId: serverActor.id,
+    start: req.query.start,
+    count: req.query.count,
+    sort: req.query.sort,
+    search: req.query.search,
+    actorType: req.query.actorType,
+    state: req.query.state
+  })
+
+  return res.json(getFormattedObjects(resultList.data, resultList.total))
+}
+
+async function listFollowers (req: express.Request, res: express.Response) {
+  const serverActor = await getServerActor()
+  const resultList = await ActorFollowModel.listFollowersForApi({
+    actorIds: [ serverActor.id ],
+    start: req.query.start,
+    count: req.query.count,
+    sort: req.query.sort,
+    search: req.query.search,
+    actorType: req.query.actorType,
+    state: req.query.state
+  })
+
+  return res.json(getFormattedObjects(resultList.data, resultList.total))
+}
+
+async function addFollow (req: express.Request, res: express.Response) {
+  const { hosts, handles } = req.body as ServerFollowCreate
+  const follower = await getServerActor()
+  const auditActor = getAuditActorFromRes(res)
+
+  for (const host of hosts) {
+    const payload = {
+      host,
+      followerActorId: follower.id
+    }
+
+    JobQueue.Instance.createJobAsync({ type: 'activitypub-follow', payload })
+
+    auditLog.create(
+      auditActor,
+      () => buildFollowAuditEntity({ id: null, follower: follower.getFullIdentifier(), following: host, state: 'pending' })
+    )
+  }
+
+  for (const handle of handles) {
+    const [ name, host ] = handle.split('@')
+
+    const payload = {
+      host,
+      name,
+      followerActorId: follower.id
+    }
+
+    JobQueue.Instance.createJobAsync({ type: 'activitypub-follow', payload })
+
+    auditLog.create(
+      auditActor,
+      () => buildFollowAuditEntity({ id: null, follower: follower.getFullIdentifier(), following: handle, state: 'pending' })
+    )
+  }
+
+  return res.status(HttpStatusCode.NO_CONTENT_204).end()
+}
+
+async function removeFollowing (req: express.Request, res: express.Response) {
+  const follow = res.locals.follow
+
+  await runTransaction(async t => {
+    if (follow.state === 'accepted') sendUndoFollow(follow, t)
+
+    // Disable redundancy on unfollowed instances
+    const server = follow.ActorFollowing.Server
+    server.redundancyAllowed = false
+    await server.save({ transaction: t })
+
+    // Async, could be long
+    removeRedundanciesOfServer(server.id)
+      .catch(err => logger.error('Cannot remove redundancy of %s.', server.host, { err }))
+
+    await follow.destroy({ transaction: t })
+  })
+
+  auditLog.delete(getAuditActorFromRes(res), () => buildFollowEntityOf(follow))
+
+  return res.status(HttpStatusCode.NO_CONTENT_204).end()
+}
+
+async function rejectFollower (req: express.Request, res: express.Response) {
+  const follow = res.locals.follow
+  const oldFollowAuditEntity = auditLog.snapshot(() => buildFollowEntityOf(follow))
+
+  follow.state = 'rejected'
+  await follow.save()
+
+  auditLog.update(getAuditActorFromRes(res), () => buildFollowEntityOf(follow), oldFollowAuditEntity)
+
+  sendReject(follow.url, follow.ActorFollower, follow.ActorFollowing)
+
+  return res.status(HttpStatusCode.NO_CONTENT_204).end()
+}
+
+async function removeFollower (req: express.Request, res: express.Response) {
+  const follow = res.locals.follow
+
+  if (follow.state === 'accepted' || follow.state === 'pending') {
+    sendReject(follow.url, follow.ActorFollower, follow.ActorFollowing)
+  }
+
+  await follow.destroy()
+
+  auditLog.delete(getAuditActorFromRes(res), () => buildFollowEntityOf(follow))
+
+  return res.status(HttpStatusCode.NO_CONTENT_204).end()
+}
+
+async function acceptFollower (req: express.Request, res: express.Response) {
+  const follow = res.locals.follow
+  const oldFollowAuditEntity = auditLog.snapshot(() => buildFollowEntityOf(follow))
+
+  sendAccept(follow)
+
+  follow.state = 'accepted'
+  await follow.save()
+
+  auditLog.update(getAuditActorFromRes(res), () => buildFollowEntityOf(follow), oldFollowAuditEntity)
+
+  await autoFollowBackIfNeeded(follow)
+
+  return res.status(HttpStatusCode.NO_CONTENT_204).end()
+}
+
+function buildFollowEntityOf (follow: MActorFollowActorsDefault) {
+  return buildFollowAuditEntity({
+    id: follow.id,
+    follower: follow.ActorFollower.getFullIdentifier(),
+    following: follow.ActorFollowing.getFullIdentifier(),
+    state: follow.state
+  })
+}

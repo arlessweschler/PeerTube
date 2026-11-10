@@ -1,0 +1,478 @@
+/* oxlint-disable @typescript-eslint/no-unused-expressions,@typescript-eslint/require-await */
+
+import { getAllPrivacies } from '@peertube/peertube-core-utils'
+import { StreamSyncState, VideoImportState, VideoInclude, VideoPrivacy } from '@peertube/peertube-models'
+import { areHttpImportTestsDisabled, areYoutubeImportTestsDisabled } from '@peertube/peertube-node-utils'
+import {
+  cleanupTests,
+  createMultipleServers,
+  getServerImportConfig,
+  PeerTubeServer,
+  setAccessTokensToServers,
+  setDefaultAccountAvatar,
+  setDefaultChannelAvatar,
+  setDefaultVideoChannel,
+  waitJobs
+} from '@peertube/peertube-server-commands'
+import { FIXTURE_URLS } from '@tests/shared/fixture-urls.js'
+import { SQLCommand } from '@tests/shared/sql-command.js'
+import { expect } from 'chai'
+
+describe('Test channel synchronizations', function () {
+  if (areHttpImportTestsDisabled()) return
+  if (areYoutubeImportTestsDisabled()) return
+
+  function runSuite (mode: 'youtube-dl' | 'yt-dlp') {
+    describe('Sync using ' + mode, function () {
+      let servers: PeerTubeServer[]
+      let sqlCommands: SQLCommand[] = []
+
+      let startTestDate: Date
+
+      let rootChannelSyncId: number
+      let videoToDelete: number
+
+      const userInfo = {
+        accessToken: '',
+        username: 'user1',
+        channelName: 'user1_channel',
+        channelId: -1,
+        syncId: -1
+      }
+
+      async function changeDateForSync (channelSyncId: number, newDate: string) {
+        await sqlCommands[0].updateQuery(
+          `UPDATE "videoChannelSync" ` +
+            `SET "createdAt"='${newDate}', "lastSyncAt"='${newDate}' ` +
+            `WHERE id=${channelSyncId}`
+        )
+      }
+
+      async function listAllVideosOfChannel (channelName: string) {
+        return servers[0].videos.listByChannel({
+          handle: channelName,
+          include: VideoInclude.NOT_PUBLISHED_STATE,
+          privacyOneOf: getAllPrivacies()
+        })
+      }
+
+      async function forceSyncAll (videoChannelSyncId: number, fromDate = '1970-01-01') {
+        await changeDateForSync(videoChannelSyncId, fromDate)
+
+        await servers[0].debug.sendCommand({
+          body: {
+            command: 'process-video-channel-sync-latest'
+          }
+        })
+
+        await waitJobs(servers)
+      }
+
+      before(async function () {
+        this.timeout(240_000)
+
+        startTestDate = new Date()
+
+        servers = await createMultipleServers(2, getServerImportConfig(mode))
+
+        await setAccessTokensToServers(servers)
+        await setDefaultVideoChannel(servers)
+        await setDefaultChannelAvatar(servers)
+        await setDefaultAccountAvatar(servers)
+
+        await servers[0].config.enableChannelSync()
+
+        {
+          userInfo.accessToken = await servers[0].users.generateUserAndToken(userInfo.username)
+
+          const { videoChannels } = await servers[0].users.getMyInfo({ token: userInfo.accessToken })
+          userInfo.channelId = videoChannels[0].id
+        }
+
+        sqlCommands = servers.map(s => new SQLCommand(s))
+      })
+
+      it('Should fetch the latest channel videos of a remote channel', async function () {
+        this.timeout(120_000)
+
+        {
+          const { video } = await servers[0].videoImports.importVideo({
+            attributes: {
+              channelId: servers[0].store.channel.id,
+              privacy: VideoPrivacy.PUBLIC,
+              targetUrl: FIXTURE_URLS.youtube
+            }
+          })
+
+          expect(video.name).to.equal('small video - youtube')
+          expect(video.waitTranscoding).to.be.true
+
+          const { total } = await listAllVideosOfChannel('root_channel')
+          expect(total).to.equal(1)
+        }
+
+        const { videoChannelSync } = await servers[0].channelSyncs.create({
+          attributes: {
+            externalChannelUrl: FIXTURE_URLS.youtubeChannel,
+            videoChannelId: servers[0].store.channel.id
+          }
+        })
+        rootChannelSyncId = videoChannelSync.id
+
+        await forceSyncAll(rootChannelSyncId)
+
+        {
+          const { total, data } = await listAllVideosOfChannel('root_channel')
+          expect(total).to.equal(2)
+          expect(data[0].name).to.equal('test')
+          expect(data[0].waitTranscoding).to.be.true
+        }
+      })
+
+      it('Should add another synchronization', async function () {
+        const externalChannelUrl = FIXTURE_URLS.youtubeChannel + '?foo=bar'
+
+        const { videoChannelSync } = await servers[0].channelSyncs.create({
+          attributes: {
+            externalChannelUrl,
+            videoChannelId: servers[0].store.channel.id
+          }
+        })
+
+        expect(videoChannelSync.externalChannelUrl).to.equal(externalChannelUrl)
+        expect(videoChannelSync.channel.id).to.equal(servers[0].store.channel.id)
+        expect(videoChannelSync.channel.name).to.equal('root_channel')
+        expect(videoChannelSync.state.id).to.equal(StreamSyncState.WAITING_FIRST_RUN)
+        expect(new Date(videoChannelSync.createdAt)).to.be.above(startTestDate).and.to.be.at.most(new Date())
+      })
+
+      it('Should add a synchronization for another user', async function () {
+        const { videoChannelSync } = await servers[0].channelSyncs.create({
+          attributes: {
+            externalChannelUrl: FIXTURE_URLS.youtubeChannel + '?baz=qux',
+            videoChannelId: userInfo.channelId
+          },
+          token: userInfo.accessToken
+        })
+        userInfo.syncId = videoChannelSync.id
+      })
+
+      it('Should not import a channel if not asked', async function () {
+        await waitJobs(servers)
+
+        const { data } = await servers[0].channelSyncs.listByAccount({ accountName: userInfo.username })
+
+        expect(data[0].state).to.contain({
+          id: StreamSyncState.WAITING_FIRST_RUN,
+          label: 'Waiting first run'
+        })
+      })
+
+      it('Should only fetch the videos newer than the creation date', async function () {
+        this.timeout(120_000)
+
+        await forceSyncAll(userInfo.syncId, '2019-03-01')
+
+        const { data, total } = await listAllVideosOfChannel(userInfo.channelName)
+
+        expect(total).to.equal(1)
+        expect(data[0].name).to.equal('test')
+      })
+
+      it('Should list channel synchronizations', async function () {
+        // Root
+        {
+          const { total, data } = await servers[0].channelSyncs.listByAccount({ accountName: 'root' })
+          expect(total).to.equal(2)
+
+          expect(data[0]).to.deep.contain({
+            externalChannelUrl: FIXTURE_URLS.youtubeChannel,
+            state: {
+              id: StreamSyncState.SYNCED,
+              label: 'Synchronized'
+            }
+          })
+
+          expect(new Date(data[0].lastSyncAt)).to.be.greaterThan(startTestDate)
+
+          expect(data[0].channel).to.contain({ id: servers[0].store.channel.id })
+          expect(data[1]).to.contain({ externalChannelUrl: FIXTURE_URLS.youtubeChannel + '?foo=bar' })
+        }
+
+        // User
+        {
+          const { total, data } = await servers[0].channelSyncs.listByAccount({ accountName: userInfo.username })
+          expect(total).to.equal(1)
+          expect(data[0]).to.deep.contain({
+            externalChannelUrl: FIXTURE_URLS.youtubeChannel + '?baz=qux',
+            state: {
+              id: StreamSyncState.SYNCED,
+              label: 'Synchronized'
+            }
+          })
+        }
+      })
+
+      it('Should list imports of a channel synchronization', async function () {
+        const { total, data } = await servers[0].videoImports.listMyVideoImports({ videoChannelSyncId: rootChannelSyncId })
+
+        expect(total).to.equal(1)
+        expect(data).to.have.lengthOf(1)
+        expect(data[0].video.name).to.equal('test')
+      })
+
+      it('Should remove user\'s channel synchronizations', async function () {
+        await servers[0].channelSyncs.delete({ channelSyncId: userInfo.syncId })
+
+        const { total } = await servers[0].channelSyncs.listByAccount({ accountName: userInfo.username })
+        expect(total).to.equal(0)
+      })
+
+      it('Should retry failed import jobs', async function () {
+        this.timeout(120_000)
+
+        const { data } = await servers[0].videoImports.listMyVideoImports({ videoChannelSyncId: rootChannelSyncId })
+        const importId = data[0].id
+
+        await sqlCommands[0].setImportUrl(importId, 'http://fail.example.com')
+        await sqlCommands[0].setImportState(importId, VideoImportState.FAILED)
+
+        for (let i = 2; i < 6; i++) {
+          await servers[0].debug.sendCommand({
+            body: {
+              command: 'process-video-channel-sync-latest'
+            }
+          })
+
+          await waitJobs(servers)
+
+          {
+            const { data } = await servers[0].videoImports.listMyVideoImports({ videoChannelSyncId: rootChannelSyncId })
+            const failedImport = data.find(i => i.id === importId)
+
+            expect(failedImport.state.id).to.equal(VideoImportState.FAILED)
+            expect(failedImport.error).to.include('fail.example.com')
+            expect(failedImport.attempts).to.equal(i)
+          }
+
+          {
+            const { data } = await servers[0].channelSyncs.listByAccount({ accountName: 'root' })
+            const sync = data.find(s => s.id === rootChannelSyncId)
+            expect(sync.state.id).to.equal(StreamSyncState.FAILED)
+          }
+        }
+
+        // Last one, sync stopped trying to import the failed job, so the sync is a success
+        await servers[0].debug.sendCommand({
+          body: {
+            command: 'process-video-channel-sync-latest'
+          }
+        })
+
+        await waitJobs(servers)
+
+        {
+          const { data } = await servers[0].channelSyncs.listByAccount({ accountName: 'root' })
+          const sync = data.find(s => s.id === rootChannelSyncId)
+          expect(sync.state.id).to.equal(StreamSyncState.SYNCED)
+        }
+      })
+
+      // FIXME: youtube-dl/yt-dlp doesn't work when speicifying a port after the hostname
+      // it('Should import a remote PeerTube channel', async function () {
+      //   this.timeout(240_000)
+
+      //   await servers[1].videos.quickUpload({ name: 'remote 1' })
+      //   await waitJobs(servers)
+
+      //   const { videoChannelSync } = await servers[0].channelSyncs.create({
+      //     attributes: {
+      //       externalChannelUrl: servers[1].url + '/c/root_channel',
+      //       videoChannelId: userInfo.channelId
+      //     },
+      //     token: userInfo.accessToken
+      //   })
+      //   await servers[0].channels.importVideos({
+      //     channelName: userInfo.channelName,
+      //     externalChannelUrl: servers[1].url + '/c/root_channel',
+      //     videoChannelSyncId: videoChannelSync.id,
+      //     token: userInfo.accessToken
+      //   })
+
+      //   await waitJobs(servers)
+
+      //   const { data, total } = await servers[0].videos.listByChannel({
+      //     handle: userInfo.channelName,
+      //     include: VideoInclude.NOT_PUBLISHED_STATE
+      //   })
+
+      //   expect(total).to.equal(2)
+      //   expect(data[0].name).to.equal('remote 1')
+      // })
+
+      // it('Should keep synced a remote PeerTube channel', async function () {
+      //   this.timeout(240_000)
+
+      //   await servers[1].videos.quickUpload({ name: 'remote 2' })
+      //   await waitJobs(servers)
+
+      //   await servers[0].debug.sendCommand({
+      //     body: {
+      //       command: 'process-video-channel-sync-latest'
+      //     }
+      //   })
+
+      //   await waitJobs(servers)
+
+      //   const { data, total } = await servers[0].videos.listByChannel({
+      //     handle: userInfo.channelName,
+      //     include: VideoInclude.NOT_PUBLISHED_STATE
+      //   })
+      //   expect(total).to.equal(2)
+      //   expect(data[0].name).to.equal('remote 2')
+      // })
+
+      it('Should fetch the latest videos of a youtube playlist', async function () {
+        this.timeout(120_000)
+
+        const { id: channelId } = await servers[0].channels.create({
+          attributes: {
+            name: 'channel2',
+            support: 'my support test'
+          }
+        })
+
+        const { videoChannelSync } = await servers[0].channelSyncs.create({
+          attributes: {
+            externalChannelUrl: FIXTURE_URLS.youtubePlaylist,
+            videoChannelId: channelId
+          }
+        })
+        rootChannelSyncId = videoChannelSync.id
+
+        await forceSyncAll(rootChannelSyncId)
+
+        {
+          const { total, data } = await listAllVideosOfChannel('channel2')
+          expect(total).to.equal(2)
+          expect(data[0].name).to.equal('test')
+          expect(data[1].name).to.equal('small video - youtube')
+
+          videoToDelete = data[1].id
+
+          for (const { uuid } of data) {
+            const video = await servers[0].videos.get({ id: uuid })
+            expect(video.support).to.equal('my support test')
+          }
+        }
+      })
+
+      it('Should not re-import deleted videos', async function () {
+        await servers[0].videos.remove({ id: videoToDelete })
+        await forceSyncAll(rootChannelSyncId)
+
+        {
+          const { total, data } = await listAllVideosOfChannel('channel2')
+          expect(total).to.equal(1)
+          expect(data[0].name).to.equal('test')
+        }
+      })
+
+      it('Should import videos with the sync default privacy', async function () {
+        this.timeout(120_000)
+
+        const { id: channelId } = await servers[0].channels.create({
+          attributes: {
+            name: 'channel3',
+            support: 'my support test'
+          }
+        })
+
+        const { videoChannelSync } = await servers[0].channelSyncs.create({
+          attributes: {
+            externalChannelUrl: FIXTURE_URLS.youtubePlaylist,
+            videoChannelId: channelId,
+            videoPrivacy: VideoPrivacy.UNLISTED
+          }
+        })
+
+        await forceSyncAll(videoChannelSync.id)
+
+        {
+          const { total, data } = await listAllVideosOfChannel('channel3')
+          expect(total).to.be.at.least(1)
+
+          for (const video of data) {
+            expect(video.privacy.id).to.equal(VideoPrivacy.UNLISTED)
+          }
+        }
+      })
+
+      it('Should keep the external channel order when an import is retried', async function () {
+        this.timeout(240_000)
+
+        await servers[0].config.enableMinimumTranscoding()
+
+        const { id: channelId } = await servers[0].channels.create({ attributes: { name: 'channel4' } })
+
+        const { videoChannelSync } = await servers[0].channelSyncs.create({
+          attributes: {
+            externalChannelUrl: FIXTURE_URLS.youtubePlaylist,
+            videoChannelId: channelId
+          }
+        })
+
+        await servers[0].jobs.pauseJobQueue()
+        await servers[0].debug.sendCommand({ body: { command: 'process-video-channel-sync-latest' } })
+
+        const { data: imports } = await servers[0].videoImports.listMyVideoImports({
+          videoChannelSyncId: videoChannelSync.id,
+          sort: 'createdAt'
+        })
+        expect(imports).to.have.length.at.least(2)
+
+        const [ firstImport, ...otherImports ] = imports
+
+        // Make the first import fail, so it's published after the other ones
+        await sqlCommands[0].setImportUrl(firstImport.id, 'http://fail.example.com')
+        await servers[0].jobs.resumeJobQueue()
+        await waitJobs(servers)
+
+        {
+          const { data } = await servers[0].videos.listByChannel({ handle: 'channel4' })
+          expect(data.map(v => v.name)).to.have.members(otherImports.map(i => i.video.name))
+        }
+
+        // Retry the failed import in a next synchronization of this channel only
+        await sqlCommands[0].setImportUrl(firstImport.id, firstImport.targetUrl)
+        await servers[0].channels.importVideos({
+          channelName: 'channel4',
+          externalChannelUrl: FIXTURE_URLS.youtubePlaylist,
+          videoChannelSyncId: videoChannelSync.id
+        })
+        await waitJobs(servers)
+
+        {
+          const { data } = await servers[0].videos.listByChannel({ handle: 'channel4', sort: '-publishedAt' })
+
+          expect(data.map(v => v.name)).to.deep.equal(imports.map(i => i.video.name).reverse())
+          expect(new Date(data[data.length - 1].publishedAt)).to.be.below(new Date(data[data.length - 2].publishedAt))
+        }
+
+        await servers[0].config.disableTranscoding()
+      })
+
+      after(async function () {
+        for (const sqlCommand of sqlCommands) {
+          await sqlCommand.cleanup()
+        }
+
+        await cleanupTests(servers)
+      })
+    })
+  }
+
+  // FIXME: suite is broken with youtube-dl
+  // runSuite('youtube-dl')
+  runSuite('yt-dlp')
+})

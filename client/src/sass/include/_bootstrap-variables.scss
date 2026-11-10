@@ -1,22 +1,26 @@
-$dropdown-link-active-bg: inherit;
+@use "sass:map";
+@use "_variables" as *;
 
 $modal-footer-border-width: 0;
 $modal-md: 600px;
+$modal-lg: 900px;
+$modal-content-border-radius: 14px;
+$modal-content-bg: pvar(--bg-secondary-350);
+$modal-inner-padding: 2rem;
 
 $grid-breakpoints: (
   // CLASSIC BREAKPOINTS GROUP
   // Extra small screen / phone
   xs: 0,
   // Small screen / phone
-  sm: 576px,
+  sm: $mobile-view,
   // Medium screen / tablet
-  md: 768px,
+  md: $small-view,
   // Large screen / desktop
   lg: 900px,
   // Extra large screens / wide desktops
   xl: 1200px,
   xxl: 1600px,
-
   // SCREEN GROUP
   fhd: 1800px,
   qhd: 2560px,
@@ -24,7 +28,7 @@ $grid-breakpoints: (
 );
 
 @function breakpoint($label) {
-  @return map-get($grid-breakpoints, $label);
+  @return map.get($grid-breakpoints, $label);
 }
 
 $container-max-widths: (
@@ -34,9 +38,39 @@ $container-max-widths: (
   xl: 1140px
 );
 
+$input-color: pvar(--input-fg);
+$input-bg: pvar(--input-bg);
+$input-focus-color: pvar(--input-fg);
+$input-focus-bg: pvar(--input-bg);
 $input-btn-focus-width: 0;
 $input-btn-focus-color: inherit;
-$input-focus-border-color: #ced4da;
+$input-focus-border-color: pvar(--input-border-color);
+$input-focus-box-shadow: #{$focus-box-shadow-form};
+$input-padding-y: pvar(--input-y-padding);
+$input-padding-x: pvar(--input-x-padding);
+$input-border-radius: pvar(--input-border-radius);
+$input-border-width: pvar(--input-border-width);
+$input-border-color: pvar(--input-border-color);
 
-$nav-pills-link-active-bg: #F0F0F0;
-$nav-pills-link-active-color: #000;
+$input-group-addon-color: pvar(--fg);
+$input-group-addon-bg: pvar(--bg-secondary-500);
+$input-group-addon-border-color: pvar(--input-border-color);
+
+$nav-link-transition: none;
+
+$dropdown-box-shadow: 0 2px 2px 0 rgba(0, 0, 0, 0.14), 0 1px 5px 0 rgba(0, 0, 0, 0.12), 0 3px 1px -2px rgba(0, 0, 0, 0.2);
+$dropdown-border-radius: 3px;
+$dropdown-link-active-color: pvar(--fg);
+$dropdown-link-active-bg: pvar(--bg-secondary-300);
+$dropdown-link-hover-color: pvar(--fg);
+$dropdown-link-hover-bg: pvar(--bg-secondary-300);
+$dropdown-color: pvar(--fg);
+$dropdown-bg: pvar(--bg);
+
+$accordion-button-active-bg: pvar(--primary-150);
+$accordion-button-active-color: pvar(--on-primary);
+$accordion-button-focus-border-color: pvar(--primary-100);
+$accordion-button-focus-box-shadow: #{$focus-box-shadow-form};
+$accordion-border-color: pvar(--input-border-color);
+
+$card-color: pvar(--fg);

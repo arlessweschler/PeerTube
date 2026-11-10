@@ -1,0 +1,147 @@
+@use "sass:color";
+@use "_badges" as *;
+@use "_icons" as *;
+@use "_variables" as *;
+@use "_mixins" as *;
+
+.red {
+  color: pvar(--red);
+}
+
+.green {
+  color: pvar(--green);
+}
+
+.text-fg {
+  color: pvar(--fg);
+}
+
+.fg-100 {
+  color: pvar(--fg-100);
+}
+
+// ---------------------------------------------------------------------------
+
+.fg-100 {
+  color: pvar(--fg-100);
+}
+
+.fg-150 {
+  color: pvar(--fg-150);
+}
+
+.fg-200 {
+  color: pvar(--fg-200);
+}
+
+.fg-250 {
+  color: pvar(--fg-250);
+}
+
+.fg-300 {
+  color: pvar(--fg-300);
+}
+
+.fg-350 {
+  color: pvar(--fg-350);
+}
+
+.fg-400 {
+  color: pvar(--fg-400);
+}
+
+.fg-450 {
+  color: pvar(--fg-450);
+}
+
+.fg-500 {
+  color: pvar(--fg-500);
+}
+
+.secondary-icon-color {
+  color: pvar(--secondary-icon-color);
+}
+
+// ---------------------------------------------------------------------------
+
+.total-items {
+  color: pvar(--fg-300);
+  font-weight: $font-bold;
+
+  @include font-size(22px);
+}
+
+.link-primary {
+  color: pvar(--fg);
+  font-weight: $font-semibold;
+  line-height: 1.1;
+
+  @include underline-primary;
+
+  &:hover {
+    color: pvar(--fg);
+    opacity: 0.8;
+
+    @include underline-primary;
+  }
+}
+
+.border-highlight {
+  &::after {
+    content: "";
+    display: block;
+    height: 4px;
+    background-color: pvar(--border-primary);
+    border-radius: 2px;
+    position: absolute;
+    width: 20px;
+  }
+}
+
+.section-label {
+  @include section-label;
+}
+
+// ---------------------------------------------------------------------------
+
+.muted,
+.muted-1 {
+  @include muted-1;
+}
+
+.muted-2 {
+  @include muted-2;
+}
+
+// ---------------------------------------------------------------------------
+
+@mixin ellipsis-multiline($number-of-lines) {
+  display: -webkit-box; /* stylelint-disable-line value-no-vendor-prefix */
+  -webkit-line-clamp: $number-of-lines;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+}
+
+.ellipsis-multiline-1 {
+  @include ellipsis-multiline(1);
+}
+
+.ellipsis-multiline-2 {
+  @include ellipsis-multiline(2);
+}
+
+.ellipsis-multiline-3 {
+  @include ellipsis-multiline(3);
+}
+
+// ---------------------------------------------------------------------------
+
+.ellipsis {
+  @include ellipsis;
+}
+
+// ---------------------------------------------------------------------------
+
+.inherit-color {
+  color: inherit;
+}

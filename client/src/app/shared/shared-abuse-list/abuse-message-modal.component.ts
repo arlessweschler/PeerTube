@@ -1,42 +1,49 @@
-import { Component, EventEmitter, Input, OnInit, Output, ViewChild } from '@angular/core'
+import { NgClass } from '@angular/common'
+import { ChangeDetectionStrategy, Component, OnInit, inject, input, output, viewChild } from '@angular/core'
+import { FormsModule, ReactiveFormsModule } from '@angular/forms'
+import { DomSanitizer, SafeHtml } from '@angular/platform-browser'
 import { AuthService, HtmlRendererService, Notifier } from '@app/core'
-import { FormReactive, FormValidatorService } from '@app/shared/shared-forms'
-import { NgbModal } from '@ng-bootstrap/ng-bootstrap'
-import { NgbModalRef } from '@ng-bootstrap/ng-bootstrap/modal/modal-ref'
-import { AbuseMessage, UserAbuse } from '@shared/models'
+import { FormReactive } from '@app/shared/shared-forms/form-reactive'
+import { FormReactiveService } from '@app/shared/shared-forms/form-reactive.service'
+import { NgbModal, NgbModalRef } from '@ng-bootstrap/ng-bootstrap'
+import { AbuseMessage, UserAbuse } from '@peertube/peertube-models'
 import { ABUSE_MESSAGE_VALIDATOR } from '../form-validators/abuse-validators'
-import { AbuseService } from '../shared-moderation'
+import { GlobalIconComponent } from '../shared-icons/global-icon.component'
+import { PTDatePipe } from '../shared-main/common/date.pipe'
+import { AbuseService } from '../shared-moderation/abuse.service'
 
 @Component({
   selector: 'my-abuse-message-modal',
   templateUrl: './abuse-message-modal.component.html',
-  styleUrls: [ './abuse-message-modal.component.scss' ]
+  styleUrls: [ './abuse-message-modal.component.scss' ],
+  changeDetection: ChangeDetectionStrategy.Eager,
+  imports: [ GlobalIconComponent, NgClass, FormsModule, ReactiveFormsModule, PTDatePipe ]
 })
 export class AbuseMessageModalComponent extends FormReactive implements OnInit {
-  @ViewChild('modal', { static: true }) modal: NgbModal
+  protected formReactiveService = inject(FormReactiveService)
+  private modalService = inject(NgbModal)
+  private htmlRenderer = inject(HtmlRendererService)
+  private domSanitizer = inject(DomSanitizer)
+  private auth = inject(AuthService)
+  private notifier = inject(Notifier)
+  private abuseService = inject(AbuseService)
 
-  @Input() isAdminView: boolean
+  readonly modal = viewChild<NgbModal>('modal')
 
-  @Output() countMessagesUpdated = new EventEmitter<{ abuseId: number, countMessages: number }>()
+  readonly isAdminView = input<boolean>(undefined)
 
-  abuseMessages: (AbuseMessage & { messageHtml: string })[] = []
+  readonly countMessagesUpdated = output<{
+    abuseId: number
+    countMessages: number
+  }>()
+
+  abuseMessages: (AbuseMessage & { messageHtml: SafeHtml })[] = []
   textareaMessage: string
   sendingMessage = false
   noResults = false
 
   private openedModal: NgbModalRef
   private abuse: UserAbuse
-
-  constructor (
-    protected formValidatorService: FormValidatorService,
-    private modalService: NgbModal,
-    private htmlRenderer: HtmlRendererService,
-    private auth: AuthService,
-    private notifier: Notifier,
-    private abuseService: AbuseService
-  ) {
-    super()
-  }
 
   ngOnInit () {
     this.buildForm({
@@ -47,7 +54,7 @@ export class AbuseMessageModalComponent extends FormReactive implements OnInit {
   openModal (abuse: UserAbuse) {
     this.abuse = abuse
 
-    this.openedModal = this.modalService.open(this.modal, { centered: true })
+    this.openedModal = this.modalService.open(this.modal(), { centered: true })
 
     this.loadMessages()
   }
@@ -61,8 +68,8 @@ export class AbuseMessageModalComponent extends FormReactive implements OnInit {
     this.sendingMessage = true
 
     this.abuseService.addAbuseMessage(this.abuse, this.form.value['message'])
-      .subscribe(
-        () => {
+      .subscribe({
+        next: () => {
           this.form.reset()
           this.sendingMessage = false
           this.countMessagesUpdated.emit({ abuseId: this.abuse.id, countMessages: this.abuseMessages.length + 1 })
@@ -70,25 +77,24 @@ export class AbuseMessageModalComponent extends FormReactive implements OnInit {
           this.loadMessages()
         },
 
-        err => {
+        error: err => {
           this.sendingMessage = false
-          console.error(err)
-          this.notifier.error('Sorry but you cannot send this message. Please retry later')
+          this.notifier.handleError(err)
         }
-      )
+      })
   }
 
   deleteMessage (abuseMessage: AbuseMessage) {
     this.abuseService.deleteAbuseMessage(this.abuse, abuseMessage)
-      .subscribe(
-        () => {
+      .subscribe({
+        next: () => {
           this.countMessagesUpdated.emit({ abuseId: this.abuse.id, countMessages: this.abuseMessages.length - 1 })
 
           this.abuseMessages = this.abuseMessages.filter(m => m.id !== abuseMessage.id)
         },
 
-        err => this.notifier.error(err.message)
-      )
+        error: err => this.notifier.handleError(err)
+      })
   }
 
   isMessageByMe (abuseMessage: AbuseMessage) {
@@ -96,7 +102,7 @@ export class AbuseMessageModalComponent extends FormReactive implements OnInit {
   }
 
   getPlaceholderMessage () {
-    if (this.isAdminView) {
+    if (this.isAdminView()) {
       return $localize`Add a message to communicate with the reporter`
     }
 
@@ -105,13 +111,14 @@ export class AbuseMessageModalComponent extends FormReactive implements OnInit {
 
   private loadMessages () {
     this.abuseService.listAbuseMessages(this.abuse)
-      .subscribe(
-        async res => {
+      .subscribe({
+        next: res => {
           this.abuseMessages = []
 
           for (const m of res.data) {
             this.abuseMessages.push(Object.assign(m, {
-              messageHtml: await this.htmlRenderer.convertToBr(m.message)
+              // Already sanitized by MarkdownService
+              messageHtml: this.domSanitizer.bypassSecurityTrustHtml(this.htmlRenderer.convertToBr(m.message))
             }))
           }
 
@@ -124,8 +131,7 @@ export class AbuseMessageModalComponent extends FormReactive implements OnInit {
           })
         },
 
-        err => this.notifier.error(err.message)
-      )
+        error: err => this.notifier.handleError(err)
+      })
   }
-
 }

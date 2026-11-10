@@ -1,96 +1,79 @@
-import { forkJoin, Subscription } from 'rxjs'
-import { first, tap } from 'rxjs/operators'
-import { Component, ComponentFactoryResolver, OnDestroy, OnInit } from '@angular/core'
-import { ActivatedRoute, Router } from '@angular/router'
-import { AuthService, ConfirmService, LocalStorageService, Notifier, ScreenService, ServerService, UserService } from '@app/core'
-import { immutableAssign } from '@app/helpers'
-import { Account, AccountService, VideoService } from '@app/shared/shared-main'
-import { AbstractVideoList } from '@app/shared/shared-video-miniature'
-import { VideoFilter } from '@shared/models'
+import { Component, inject, OnDestroy, OnInit, viewChild, ChangeDetectionStrategy } from '@angular/core'
+import { ComponentPaginationLight, DisableForReuseHook, ScreenService } from '@app/core'
+import { Account } from '@app/shared/shared-main/account/account.model'
+import { AccountService } from '@app/shared/shared-main/account/account.service'
+import { VideoService } from '@app/shared/shared-main/video/video.service'
+import { VideoFilters } from '@app/shared/shared-video-miniature/video-filters.model'
+import { VideoSortField } from '@peertube/peertube-models'
+import { Subscription } from 'rxjs'
+import { VideosListComponent } from '../../shared/shared-video-miniature/videos-list.component'
 
 @Component({
   selector: 'my-account-videos',
-  templateUrl: '../../shared/shared-video-miniature/abstract-video-list.html',
-  styleUrls: [
-    '../../shared/shared-video-miniature/abstract-video-list.scss'
-  ]
+  templateUrl: './account-videos.component.html',
+  changeDetection: ChangeDetectionStrategy.Eager,
+  imports: [ VideosListComponent ]
 })
-export class AccountVideosComponent extends AbstractVideoList implements OnInit, OnDestroy {
-  // No value because we don't want a page title
-  titlePage: string
-  loadOnInit = false
-  loadUserVideoPreferences = true
+export class AccountVideosComponent implements OnInit, OnDestroy, DisableForReuseHook {
+  private screenService = inject(ScreenService)
+  private accountService = inject(AccountService)
+  private videoService = inject(VideoService)
 
-  filter: VideoFilter = null
+  readonly videosList = viewChild<VideosListComponent>('videosList')
 
-  private account: Account
+  getVideosObservableFunction = this.getVideosObservable.bind(this)
+  getSyndicationItemsFunction = this.getSyndicationItems.bind(this)
+
+  defaultSort = '-publishedAt' as VideoSortField
+
+  account: Account
+  disabled = false
+
+  private alreadyLoaded = false
+
   private accountSub: Subscription
 
-  constructor (
-    protected router: Router,
-    protected serverService: ServerService,
-    protected route: ActivatedRoute,
-    protected authService: AuthService,
-    protected userService: UserService,
-    protected notifier: Notifier,
-    protected confirmService: ConfirmService,
-    protected screenService: ScreenService,
-    protected storageService: LocalStorageService,
-    private accountService: AccountService,
-    private videoService: VideoService,
-    protected cfr: ComponentFactoryResolver
-  ) {
-    super()
-  }
-
   ngOnInit () {
-    super.ngOnInit()
-
-    this.enableAllFilterIfPossible()
-
     // Parent get the account for us
-    this.accountSub = forkJoin([
-      this.accountService.accountLoaded.pipe(first()),
-      this.onUserLoadedSubject.pipe(first())
-    ]).subscribe(([ account ]) => {
-      this.account = account
+    this.accountSub = this.accountService.accountLoaded
+      .subscribe(account => {
+        if (account.id === this.account?.id) return
 
-      this.reloadVideos()
-      this.generateSyndicationList()
-    })
+        this.account = account
+        if (this.alreadyLoaded) this.videosList().reloadVideos()
+
+        this.alreadyLoaded = true
+      })
   }
 
   ngOnDestroy () {
     if (this.accountSub) this.accountSub.unsubscribe()
-
-    super.ngOnDestroy()
   }
 
-  getVideosObservable (page: number) {
-    const newPagination = immutableAssign(this.pagination, { currentPage: page })
-    const options = {
+  getVideosObservable (pagination: ComponentPaginationLight, filters: VideoFilters) {
+    return this.videoService.listAccountVideos({
+      ...filters.toVideosAPIObject(),
+
+      videoPagination: pagination,
       account: this.account,
-      videoPagination: newPagination,
-      sort: this.sort,
-      nsfwPolicy: this.nsfwPolicy,
-      videoFilter: this.filter
-    }
-
-    return this.videoService
-               .getAccountVideos(options)
+      skipCount: true,
+      includeScheduledLive: true
+    })
   }
 
-  toggleModerationDisplay () {
-    this.filter = this.buildLocalFilter(this.filter, null)
-
-    this.reloadVideos()
-  }
-
-  generateSyndicationList () {
-    this.syndicationItems = this.videoService.getAccountFeedUrls(this.account.id)
+  getSyndicationItems () {
+    return this.videoService.getAccountFeedUrls(this.account.id)
   }
 
   displayAsRow () {
     return this.screenService.isInMobileView()
+  }
+
+  disableForReuse () {
+    this.disabled = true
+  }
+
+  enabledForReuse () {
+    this.disabled = false
   }
 }

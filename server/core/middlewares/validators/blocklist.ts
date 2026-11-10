@@ -1,0 +1,233 @@
+import { HttpStatusCode } from '@peertube/peertube-models'
+import { areValidActorHandles } from '@server/helpers/custom-validators/activitypub/actor.js'
+import { isDateValid, isIdValid, toArray } from '@server/helpers/custom-validators/misc.js'
+import { isUrlValid } from '@server/helpers/custom-validators/urls.js'
+import { CONFIG } from '@server/initializers/config.js'
+import { getServerActor } from '@server/models/application/application.js'
+import express from 'express'
+import { body, param, query } from 'express-validator'
+import { isEachUniqueHostValid, isHostValid } from '../../helpers/custom-validators/servers.js'
+import { WEBSERVER } from '../../initializers/constants.js'
+import { AccountBlocklistModel } from '../../models/blocklist/account-blocklist.js'
+import { BlocklistSubscriptionModel } from '../../models/blocklist/blocklist-subscription.js'
+import { ServerBlocklistModel } from '../../models/blocklist/server-blocklist.js'
+import { ServerModel } from '../../models/server/server.js'
+import { areValidationErrors, doesAccountHandleExist } from './shared/index.js'
+
+export const blockAccountValidator = [
+  body('accountName')
+    .exists(),
+
+  async (req: express.Request, res: express.Response, next: express.NextFunction) => {
+    if (areValidationErrors(req, res)) return
+    if (!await doesAccountHandleExist({ handle: req.body.accountName, req, res, checkIsLocal: false, checkCanManage: false })) return
+
+    const user = res.locals.oauth.token.User
+    const accountToBlock = res.locals.account
+
+    if (user.Account.id === accountToBlock.id) {
+      res.fail({
+        status: HttpStatusCode.CONFLICT_409,
+        message: req.t('You cannot block yourself.')
+      })
+      return
+    }
+
+    return next()
+  }
+]
+
+export const unblockAccountByAccountValidator = [
+  param('accountName')
+    .exists(),
+
+  async (req: express.Request, res: express.Response, next: express.NextFunction) => {
+    if (areValidationErrors(req, res)) return
+    if (!await doesAccountHandleExist({ handle: req.params.accountName, req, res, checkIsLocal: false, checkCanManage: false })) return
+
+    const user = res.locals.oauth.token.User
+    const targetAccount = res.locals.account
+    if (!await doesUnblockAccountExist(user.Account.id, targetAccount.id, res)) return
+
+    return next()
+  }
+]
+
+export const unblockAccountByServerValidator = [
+  param('accountName')
+    .exists(),
+
+  async (req: express.Request, res: express.Response, next: express.NextFunction) => {
+    if (areValidationErrors(req, res)) return
+    if (!await doesAccountHandleExist({ handle: req.params.accountName, req, res, checkIsLocal: false, checkCanManage: false })) return
+
+    const serverActor = await getServerActor()
+    const targetAccount = res.locals.account
+    if (!await doesUnblockAccountExist(serverActor.Account.id, targetAccount.id, res)) return
+
+    return next()
+  }
+]
+
+export const blockServerValidator = [
+  body('host')
+    .custom(isHostValid),
+
+  async (req: express.Request, res: express.Response, next: express.NextFunction) => {
+    if (areValidationErrors(req, res)) return
+
+    const host: string = req.body.host
+
+    if (host === WEBSERVER.HOST) {
+      return res.fail({
+        status: HttpStatusCode.CONFLICT_409,
+        message: req.t('You cannot block your own server.')
+      })
+    }
+
+    const server = await ServerModel.loadOrCreateByHost(host)
+
+    res.locals.server = server
+
+    return next()
+  }
+]
+
+export const unblockServerByAccountValidator = [
+  param('host')
+    .custom(isHostValid),
+
+  async (req: express.Request, res: express.Response, next: express.NextFunction) => {
+    if (areValidationErrors(req, res)) return
+
+    const user = res.locals.oauth.token.User
+    if (!await doesUnblockServerExist(user.Account.id, req.params.host, res)) return
+
+    return next()
+  }
+]
+
+export const unblockServerByServerValidator = [
+  param('host')
+    .custom(isHostValid),
+
+  async (req: express.Request, res: express.Response, next: express.NextFunction) => {
+    if (areValidationErrors(req, res)) return
+
+    const serverActor = await getServerActor()
+    if (!await doesUnblockServerExist(serverActor.Account.id, req.params.host, res)) return
+
+    return next()
+  }
+]
+
+export const blocklistStatusValidator = [
+  query('hosts')
+    .optional()
+    .customSanitizer(toArray)
+    .custom(isEachUniqueHostValid).withMessage('Should have a valid hosts array'),
+
+  query('accounts')
+    .optional()
+    .customSanitizer(toArray)
+    .custom(areValidActorHandles).withMessage('Should have a valid accounts array'),
+
+  (req: express.Request, res: express.Response, next: express.NextFunction) => {
+    if (areValidationErrors(req, res)) return
+
+    return next()
+  }
+]
+
+export const addBlocklistSubscriptionValidator = [
+  body('url')
+    .custom(isUrlValid).withMessage('Should have a valid URL'),
+
+  async (req: express.Request, res: express.Response, next: express.NextFunction) => {
+    if (areValidationErrors(req, res)) return
+
+    const serverActor = await getServerActor()
+
+    const existingSubscription = await BlocklistSubscriptionModel.loadByUrl({
+      accountId: serverActor.Account.id,
+      url: req.body.url
+    })
+
+    if (existingSubscription) {
+      return res.fail({
+        status: HttpStatusCode.CONFLICT_409,
+        message: req.t('Subscription with URL {url} already exists', { url: req.body.url })
+      })
+    }
+
+    return next()
+  }
+]
+
+export const deleteBlocklistSubscriptionValidator = [
+  param('id')
+    .custom(isIdValid),
+
+  async (req: express.Request, res: express.Response, next: express.NextFunction) => {
+    if (areValidationErrors(req, res)) return
+
+    const subscription = await BlocklistSubscriptionModel.loadById(+req.params.id)
+    if (!subscription) {
+      return res.fail({
+        status: HttpStatusCode.NOT_FOUND_404,
+        message: req.t('Blocklist subscription not found')
+      })
+    }
+
+    res.locals.blocklistSubscription = subscription
+    return next()
+  }
+]
+
+export const publicBlocklistLogValidator = [
+  query('startDate')
+    .optional()
+    .custom(isDateValid).withMessage('Should have a start date that conforms to ISO 8601'),
+
+  (req: express.Request, res: express.Response, next: express.NextFunction) => {
+    if (areValidationErrors(req, res)) return
+
+    if (CONFIG.BLOCKLIST.PUBLIC_LOG.ENABLED !== true) {
+      return res.sendStatus(HttpStatusCode.FORBIDDEN_403)
+    }
+
+    return next()
+  }
+]
+
+// ---------------------------------------------------------------------------
+// Private
+// ---------------------------------------------------------------------------
+
+async function doesUnblockAccountExist (accountId: number, targetAccountId: number, res: express.Response) {
+  const accountBlock = await AccountBlocklistModel.loadByAccountAndTarget(accountId, targetAccountId)
+  if (!accountBlock) {
+    res.fail({
+      status: HttpStatusCode.NOT_FOUND_404,
+      message: 'Account block entry not found.'
+    })
+    return false
+  }
+
+  res.locals.accountBlock = accountBlock
+  return true
+}
+
+async function doesUnblockServerExist (accountId: number, host: string, res: express.Response) {
+  const serverBlock = await ServerBlocklistModel.loadByAccountAndHost(accountId, host)
+  if (!serverBlock) {
+    res.fail({
+      status: HttpStatusCode.NOT_FOUND_404,
+      message: 'Server block entry not found.'
+    })
+    return false
+  }
+
+  res.locals.serverBlock = serverBlock
+  return true
+}

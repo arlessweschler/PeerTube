@@ -1,10 +1,11 @@
-import { Component, forwardRef, Input, OnChanges } from '@angular/core'
-import { ControlValueAccessor, NG_VALUE_ACCESSOR } from '@angular/forms'
+import { Component, forwardRef, OnChanges, input, ChangeDetectionStrategy } from '@angular/core'
+import { ControlValueAccessor, NG_VALUE_ACCESSOR, FormsModule } from '@angular/forms'
 import { SelectOptionsItem } from '../../../../types/select-options-item.model'
+
+import { SelectOptionsComponent } from './select-options.component'
 
 @Component({
   selector: 'my-select-custom-value',
-  styleUrls: [ './select-shared.component.scss' ],
   templateUrl: './select-custom-value.component.html',
   providers: [
     {
@@ -12,19 +13,28 @@ import { SelectOptionsItem } from '../../../../types/select-options-item.model'
       useExisting: forwardRef(() => SelectCustomValueComponent),
       multi: true
     }
-  ]
+  ],
+  imports: [ SelectOptionsComponent, FormsModule ],
+  changeDetection: ChangeDetectionStrategy.Eager,
+  host: {
+    '[class.has-custom-value]': 'isCustomValue()'
+  }
 })
 export class SelectCustomValueComponent implements ControlValueAccessor, OnChanges {
-  @Input() items: SelectOptionsItem[] = []
-  @Input() clearable = false
-  @Input() searchable = false
-  @Input() groupBy: string
-  @Input() labelForId: string
-  @Input() inputSuffix: string
-  @Input() inputType = 'text'
+  readonly inputId = input.required<string>()
+  readonly labelId = input.required<string>()
+
+  readonly items = input<SelectOptionsItem[]>([])
+
+  readonly clearable = input(false)
+  readonly searchable = input(false)
+
+  readonly inputSuffix = input<string>(undefined)
+  readonly inputType = input('text')
 
   customValue: number | string = ''
   selectedId: number | string
+  disabled = false
 
   itemsWithCustom: SelectOptionsItem[] = []
 
@@ -32,7 +42,9 @@ export class SelectCustomValueComponent implements ControlValueAccessor, OnChang
     this.itemsWithCustom = this.getItems()
   }
 
-  propagateChange = (_: any) => { /* empty */ }
+  propagateChange = (_: any) => {
+    // empty
+  }
 
   writeValue (id: number | string) {
     this.selectedId = id
@@ -60,7 +72,7 @@ export class SelectCustomValueComponent implements ControlValueAccessor, OnChang
   }
 
   isSelectedIdInItems () {
-    return !!this.items.find(i => i.id === this.selectedId)
+    return !!this.items().find(i => i.id === this.selectedId)
   }
 
   getItems () {
@@ -69,10 +81,14 @@ export class SelectCustomValueComponent implements ControlValueAccessor, OnChang
       label: $localize`Custom value...`
     }
 
-    return this.items.concat([ other ])
+    return this.items().concat([ other ])
   }
 
   isCustomValue () {
     return this.selectedId === 'other'
+  }
+
+  setDisabledState (isDisabled: boolean) {
+    this.disabled = isDisabled
   }
 }

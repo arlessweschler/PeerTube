@@ -1,101 +1,159 @@
-import { SortMeta } from 'primeng/api'
-import { Component, OnInit } from '@angular/core'
-import { ConfirmService, Notifier, RestPagination, RestTable } from '@app/core'
-import { InstanceFollowService } from '@app/shared/shared-instance'
-import { ActorFollow } from '@shared/models'
+import { ChangeDetectionStrategy, Component, OnInit, inject, viewChild } from '@angular/core'
+import { RouterLink } from '@angular/router'
+import { ConfirmService, Notifier } from '@app/core'
+import { formatICU } from '@app/helpers'
+import { InstanceFollowService } from '@app/shared/shared-instance/instance-follow.service'
+import { PTDatePipe } from '@app/shared/shared-main/common/date.pipe'
+import { DataLoaderOptionsBase, TableColumnInfo, TableComponent } from '@app/shared/shared-tables/table.component'
+import { ActorFollow, FollowState } from '@peertube/peertube-models'
+import { AdvancedFilterDef } from '../../../shared/shared-forms/advanced-input-filter.component'
+import { GlobalIconComponent } from '../../../shared/shared-icons/global-icon.component'
+import { DropdownAction } from '../../../shared/shared-main/buttons/action-dropdown.component'
+import { ButtonComponent } from '../../../shared/shared-main/buttons/button.component'
+import { DeleteButtonComponent } from '../../../shared/shared-main/buttons/delete-button.component'
+import { NumberFormatterPipe } from '../../../shared/shared-main/common/number-formatter.pipe'
+
+type DataLoaderParameter = Parameters<FollowersListComponent['_dataLoader']>[0]
 
 @Component({
   selector: 'my-followers-list',
   templateUrl: './followers-list.component.html',
-  styleUrls: [ '../follows.component.scss', './followers-list.component.scss' ]
+  styleUrls: [ './followers-list.component.scss' ],
+  changeDetection: ChangeDetectionStrategy.Eager,
+  imports: [
+    RouterLink,
+    GlobalIconComponent,
+    ButtonComponent,
+    DeleteButtonComponent,
+    PTDatePipe,
+    NumberFormatterPipe,
+    TableComponent
+  ]
 })
-export class FollowersListComponent extends RestTable implements OnInit {
-  followers: ActorFollow[] = []
-  totalRecords = 0
-  sort: SortMeta = { field: 'createdAt', order: -1 }
-  pagination: RestPagination = { count: this.rowsPerPage, start: 0 }
+export class FollowersListComponent implements OnInit {
+  private confirmService = inject(ConfirmService)
+  private notifier = inject(Notifier)
+  private followService = inject(InstanceFollowService)
 
-  constructor (
-    private confirmService: ConfirmService,
-    private notifier: Notifier,
-    private followService: InstanceFollowService
-  ) {
-    super()
+  readonly table = viewChild<TableComponent<ActorFollow, DataLoaderParameter>>('table')
+
+  inputFilters: AdvancedFilterDef<DataLoaderParameter>[] = []
+
+  bulkActions: DropdownAction<ActorFollow[]>[] = []
+
+  columns: TableColumnInfo<string>[] = [
+    { id: 'follower', label: $localize`Follower`, sortable: false },
+    { id: 'state', label: $localize`State`, sortable: true },
+    { id: 'score', label: $localize`Reliability`, sortable: true },
+    { id: 'createdAt', label: $localize`Created`, sortable: true }
+  ]
+
+  dataLoader: typeof this._dataLoader
+
+  constructor () {
+    this.dataLoader = this._dataLoader.bind(this)
   }
 
   ngOnInit () {
-    this.initialize()
+    this.inputFilters = this.followService.buildFollowsListFilters()
+
+    this.bulkActions = [
+      {
+        label: $localize`Reject`,
+        handler: follows => this.rejectFollower(follows),
+        isDisplayed: follows => follows.every(f => f.state !== 'rejected')
+      },
+      {
+        label: $localize`Accept`,
+        handler: follows => this.acceptFollower(follows),
+        isDisplayed: follows => follows.every(f => f.state !== 'accepted')
+      },
+      {
+        label: $localize`Delete`,
+        handler: follows => this.deleteFollowers(follows),
+        isDisplayed: follows => follows.every(f => f.state === 'rejected')
+      }
+    ]
   }
 
-  getIdentifier () {
-    return 'FollowersListComponent'
-  }
+  acceptFollower (follows: ActorFollow[]) {
+    this.followService.acceptFollower(follows)
+      .subscribe({
+        next: () => {
+          const message = formatICU(
+            $localize`Accepted {count, plural, =1 {{followerName} follow request} other {{count} follow requests}}`,
+            { count: follows.length, followerName: this.buildFollowerName(follows[0]) }
+          )
+          this.notifier.success(message)
 
-  acceptFollower (follow: ActorFollow) {
-    follow.state = 'accepted'
-
-    this.followService.acceptFollower(follow)
-      .subscribe(
-        () => {
-          const handle = follow.follower.name + '@' + follow.follower.host
-          this.notifier.success($localize`${handle} accepted in instance followers`)
+          this.table().loadData()
         },
 
-        err => {
-          follow.state = 'pending'
-          this.notifier.error(err.message)
-        }
-      )
+        error: err => this.notifier.handleError(err)
+      })
   }
 
-  async rejectFollower (follow: ActorFollow) {
-    const message = $localize`Do you really want to reject this follower?`
+  async rejectFollower (follows: ActorFollow[]) {
+    const message = formatICU(
+      $localize`Do you really want to reject {count, plural, =1 {{followerName} follow request?} other {{count} follow requests?}}`,
+      { count: follows.length, followerName: this.buildFollowerName(follows[0]) }
+    )
+
     const res = await this.confirmService.confirm(message, $localize`Reject`)
     if (res === false) return
 
-    this.followService.rejectFollower(follow)
-        .subscribe(
-          () => {
-            const handle = follow.follower.name + '@' + follow.follower.host
-            this.notifier.success($localize`${handle} rejected from instance followers`)
+    this.followService.rejectFollower(follows)
+      .subscribe({
+        next: () => {
+          const message = formatICU(
+            $localize`Rejected {count, plural, =1 {{followerName} follow request} other {{count} follow requests}}`,
+            { count: follows.length, followerName: this.buildFollowerName(follows[0]) }
+          )
+          this.notifier.success(message)
 
-            this.reloadData()
-          },
+          this.table().loadData()
+        },
 
-          err => {
-            follow.state = 'pending'
-            this.notifier.error(err.message)
-          }
-        )
+        error: err => this.notifier.handleError(err)
+      })
   }
 
-  async deleteFollower (follow: ActorFollow) {
-    const message = $localize`Do you really want to delete this follower?`
+  async deleteFollowers (follows: ActorFollow[]) {
+    const icuParams = { count: follows.length, followerName: this.buildFollowerName(follows[0]) }
+
+    let message = $localize`Deleted followers will be able to send again a follow request.`
+    message += '<br /><br />'
+
+    message += formatICU(
+      $localize`Do you really want to delete {count, plural, =1 {{followerName} follow request?} other {{count} follow requests?}}`,
+      icuParams
+    )
+
     const res = await this.confirmService.confirm(message, $localize`Delete`)
     if (res === false) return
 
-    this.followService.removeFollower(follow)
-        .subscribe(
-          () => {
-            const handle = follow.follower.name + '@' + follow.follower.host
-            this.notifier.success($localize`${handle} removed from instance followers`)
+    this.followService.removeFollower(follows)
+      .subscribe({
+        next: () => {
+          const message = formatICU(
+            $localize`Removed {count, plural, =1 {{followerName} follow request} other {{count} follow requests}}`,
+            icuParams
+          )
 
-            this.reloadData()
-          },
+          this.notifier.success(message)
 
-          err => this.notifier.error(err.message)
-        )
+          this.table().loadData()
+        },
+
+        error: err => this.notifier.handleError(err)
+      })
   }
 
-  protected reloadData () {
-    this.followService.getFollowers({ pagination: this.pagination, sort: this.sort, search: this.search })
-                      .subscribe(
-                        resultList => {
-                          this.followers = resultList.data
-                          this.totalRecords = resultList.total
-                        },
+  buildFollowerName (follow: ActorFollow) {
+    return follow.follower.name + '@' + follow.follower.host
+  }
 
-                        err => this.notifier.error(err.message)
-                      )
+  private _dataLoader (options: DataLoaderOptionsBase & { state?: FollowState }) {
+    return this.followService.listFollowers(options)
   }
 }
